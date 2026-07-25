@@ -29,7 +29,7 @@ if git grep -IEn '(BEGIN (RSA |EC |)PRIVATE KEY|<Keybox|remote_provisioning.+(cs
   fail secret-or-forbidden-rkp
 fi
 if git grep -IEn 'ro\\.(serialno|boot\\.serialno)|getprop.*(serial|fingerprint)|adb devices -l' \
-  -- scripts tests profiles module; then
+  -- scripts tests profiles module ':!scripts/verify.sh'; then
   fail device-identifier-collection
 fi
 pass secret-network-identifier-scan

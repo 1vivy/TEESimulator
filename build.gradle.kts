@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.android.application) apply false
     alias(libs.plugins.android.library) apply false
     alias(libs.plugins.kotlin.android) apply false
+    alias(libs.plugins.kotlin.jvm) apply false
     alias(libs.plugins.ktfmt) apply true
 }
 
@@ -12,6 +13,7 @@ tasks.register<KtfmtFormatTask>("format") {
     include("*.gradle.kts", "*/*.gradle.kts")
     dependsOn(":stub:ktfmtFormat")
     dependsOn(":app:ktfmtFormat")
+    dependsOn(":two-phone:ktfmtFormat")
 }
 
 ktfmt { kotlinLangStyle() }

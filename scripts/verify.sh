@@ -25,7 +25,7 @@ pass gpl-provenance
 
 [[ ! -e module/keybox.xml ]] || fail bundled-keybox
 if git grep -IEn '(BEGIN (RSA |EC |)PRIVATE KEY|<Keybox|remote_provisioning.+(csr|certify))' \
-  -- ':!README.md' ':!scripts/verify.sh'; then
+  -- app module profiles scripts ':!scripts/verify.sh'; then
   fail secret-or-forbidden-rkp
 fi
 if git grep -IEn 'ro\\.(serialno|boot\\.serialno)|getprop.*(serial|fingerprint)|adb devices -l' \

@@ -1,7 +1,6 @@
-id=tricky_store
-name=TEESimulator
+id=teesimulator_api36_probe
+name=TEESimulator API36 Probe
 version=${REPLACEMEVER}
 versionCode=${REPLACEMEVERCODE}
-author=JingMatrix
-description=Software simulation for Android hardware-backed key pairs with key attestation
-updateJson=https://raw.githubusercontent.com/JingMatrix/TEESimulator/main/module/update.json
+author=JingMatrix contributors and 1vivy
+description=Default-inert Android 16 compatibility probe; injection requires separately verified gates

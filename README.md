@@ -1,140 +1,39 @@
-# TEESimulator – A Full TEE Emulation Framework
+# TEESimulator – API36 safety fork
 
-**TEESimulator** is a system module designed to create a complete, software-based simulation of a hardware-backed Trusted Execution Environment ([TEE](https://source.android.com/docs/security/features/trusty)) for [Key Attestation](https://developer.android.com/privacy-and-security/security-key-attestation).
+This history-preserving GPLv3 fork is developing a narrowly scoped Android
+16/API36 compatibility probe around the upstream TEESimulator injector.
+The current release state is **probe-only and default-inert**. It makes no
+claim that live insertion is compatible or safe.
 
-The project's goal is to move beyond simple certificate patching and build a robust framework that can create and manage virtual, self-consistent cryptographic keys.
+Boot and module-action lifecycles do not invoke the injector or the preserved
+`app_process` bootstrap. No keybox, private key, target list, or SELinux policy
+is bundled. Installing this development branch on a device is not part of the
+documented gate workflow.
 
-## ✨ Core Principles
+## Safety gates
 
-*   **Bypass Hardware-Backed Attestation:** The primary goal of this project is to defeat Key Attestation, a security mechanism that allows apps to verify that they are running on a secure, unmodified device. This module provides the tools to bypass these checks on rooted or modified devices.
-*   **Stateful Emulation:** Instead of patching responses from the real TEE, the ultimate goal is to create and manage virtual keys entirely in a simulated software environment. Any request concerning a virtual key will be handled by the simulator, ensuring perfect consistency without ever touching the real hardware.
-*   **Architectural Interception:** By hooking low-level Binder IPC calls to the Keystore, the framework can transparently redirect requests for virtual keys to the software-based simulator, while allowing requests for real keys to pass through to the hardware TEE.
-*   **100% FOSS:** Licensed under GPLv3, ensuring it stays free, auditable, and compliant with open-source laws.
+`scripts/verify.sh` is G0. It checks tests, shell parsing, source/provenance,
+forbidden material, module contents, an arm64 release build, and repeatability.
 
-## 📱 Requirements
-- Android 10 or above
+`scripts/probe-api36.sh` is G1. It is a host-side read-only probe: no device
+file transfer or creation, tracing, injection, key creation, property change,
+or service restart. It prints identifier-free `PASS` or `STOP` lines. Any
+`STOP` forbids injection.
 
-## 📦 Installation & Configuration
+The expected device shape is recorded without a fingerprint or identifier in
+`profiles/api36-arm64-qcom-default-v1.conf`.
 
-1.  Flash this module via (Magisk / KernelSU / APatch) and reboot. It will replace [TrickyStore](https://github.com/5ec1cff/TrickyStore), [TrickyStoreOSS](https://github.com/beakthoven/TrickyStoreOSS) and their forks.
-2.  (Optional) Place a hardware-backed `keybox.xml` at `/data/adb/tricky_store/keybox.xml`. This provides the cryptographic "root of trust" for the simulator.
-3.  (Optional) Customize target packages in `/data/adb/tricky_store/target.txt`.
-4.  (Optional) Customize the simulated security patch level in `/data/adb/tricky_store/security_patch.txt`.
-5.  Enjoy!
+G2 requires a native default-attestation baseline and a controlled keystore2
+restart/recovery rehearsal. G2 tooling is not implemented in the current
+probe-only state. Consequently, no live insertion is authorized.
 
-**All configuration files are monitored and will take effect immediately upon saving.**
+## Deliberate exclusions
 
-### The `keybox.xml` Root of Trust
+StrongBox and AVF are pass-through-only and must never be targeted. Android
+remote provisioning CSR/certification APIs are outside scope. The external
+`MhmRdd/google-rkp-sw@8a74e55` repository is documentation context only: it is
+not included, invoked, or a build dependency.
 
-This file provides the master cryptographic identity for the simulator. It contains a private key and a valid, hardware-backed certificate chain from a real device. The simulator uses this to sign the virtual certificates it generates, making them appear legitimate to verifiers.
-
-```xml
-<?xml version="1.0"?>
-<AndroidAttestation>
-    <Keybox DeviceID="...">
-        <Key algorithm="ecdsa|rsa">
-            <PrivateKey format="pem">...</PrivateKey>
-            <CertificateChain>...</CertificateChain>
-        </Key>
-    </Keybox>
-</AndroidAttestation>
-```
-
-### Mode and Keybox Configuration (`target.txt`)
-
-TEESimulator currently operates in two primary modes as it transitions towards full emulation.
-You can control the simulation mode and the specific keybox.xml file used on a per-package basis.
-
-#### Mode Suffixes
-
-*   **`!` → Force Generation Mode:** Creates a complete, software-based virtual key. This is the foundation of the full TEE simulation.
-*   **`?` → Force Leaf Hacking Mode:** A legacy mode where a real TEE key is generated, but its attestation certificate is intercepted and modified.
-*   **No symbol → Automatic Mode:** The module selects the most appropriate mode for the device.
-
-#### Multi-Keybox Configuration
-
-You can specify different keybox files for different groups of applications. This is done by adding a line with the filename in square brackets (e.g., [demo_keybox.xml]).
-
-All applications listed after this line will use the specified keybox file, until a new keybox is declared. Applications listed before any custom keybox declaration will use the default `keybox.xml`.
-
-For example:
-```
-# These two apps will use the default /data/adb/tricky_store/keybox.xml
-com.google.android.gms!
-io.github.vvb2060.keyattestation?
-
-# Switch to a different keybox for the following apps.
-# The file must be located at /data/adb/tricky_store/aosp_keybox.xml
-[aosp_keybox.xml]
-com.google.android.gsf
-
-# Switch again to another keybox.
-# The file must be located at /data/adb/tricky_store/demo_keybox.xml
-[demo_keybox.xml]
-org.matrix.demo
-```
-
-### Security Patch Level (`security_patch.txt`)
-
-This file allows you to configure the `osPatchLevel`, `vendorPatchLevel`, and `bootPatchLevel` that the simulator will report in its patched or forged attestation certificates.
-
-**Note:** This only affects the Key Attestation data generated by the simulator. It does not change the actual system properties of your device.
-
-#### Global and Per-Package Configuration
-
-You can set a global patch level that applies to all applications, and you can also override these settings for specific packages. The syntax is hierarchical:
-
-*   Settings defined at the top of the file, before any `[package.name]` line, are **global** and serve as the default for all apps.
-*   To create a specific configuration for an application, add its package name in square brackets (e.g., `[com.google.android.gms]`). All settings following this line will apply *only* to that package until a new package context is declared.
-
-#### Configuration Keys and Values
-
-You can specify the patch level for the following components using a `key=value` format:
-
-*   `system`: The main OS patch level.
-*   `vendor`: The vendor patch level.
-*   `boot`: The boot/kernel patch level.
-*   `all`: A convenient shorthand to set the same date for `system`, `vendor`, and `boot` simultaneously. Any individual key can still be used to override the value set by `all`.
-
-Dates should be provided in `YYYY-MM-DD` format (e.g., `2025-11-05`).
-
-#### Special Keywords
-
-In addition to static dates, several special keywords provide advanced, dynamic control:
-
-*   **`today`**: Dynamically uses the current date every time an attestation is generated. This ensures the device always appears up-to-date without needing manual edits.
-
-*   **Date Templates**: You can create semi-dynamic dates using `YYYY`, `MM`, and `DD` as placeholders for the current year, month, and day. For example, `YYYY-MM-05` will always resolve to the 5th of the current month and year.
-
-*   **`no`**: This keyword instructs the simulator to **completely omit** the corresponding patch level tag from the generated attestation.
-
-*   **`device_default`**: This keyword forces the simulator to fall back and use the device's **real hardware value** for that specific patch level. This is essential for creating exceptions to a global override or an `all` rule.
-
-#### Example Configuration
-
-This example demonstrates how to combine global settings, per-package overrides, and special keywords for fine-grained control.
-
-```
-# --- Global Configuration ---
-# This is the default for all apps unless specified otherwise.
-# - Forge a recent system patch level, the 5th of the current month (a common patch date).
-# - Use the device's real vendor patch level.
-# - Do not report a boot patch level at all.
-system=YYYY-MM-05
-vendor=device_default
-boot=no
-
-# --- Per-Package Override for Google Play Services ---
-# This app will report an older, specific date for its system patch.
-# It will inherit the global settings for vendor (device_default) and boot (no).
-[com.google.android.gms]
-system=2024-10-01
-
-# --- Per-Package Override for a Demo App ---
-# This app gets a completely custom configuration.
-[org.matrix.demo]
-# Set a base date for all patch levels...
-all=2025-09-15
-# ...but make an exception: use the real boot patch level instead of the one from 'all'.
-boot=device_default
-```
+The upstream injector and bootstrap source remain in history and in the source
+tree for compatibility work, but inert lifecycle scripts do not call them.
+See `PROVENANCE.md` and `THIRD_PARTY_NOTICES.md`.

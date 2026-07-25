@@ -29,7 +29,7 @@ val gitExecutor = objects.newInstance(GitExecutor::class.java)
 
 val gitCommitCount = gitExecutor.execute("git rev-list HEAD --count", rootDir).toInt()
 val gitCommitHash = gitExecutor.execute("git rev-parse --verify --short HEAD", rootDir)
-val verName = "v3.2"
+val verName = "v0.1.0-probe.1"
 
 android {
     namespace = "org.matrix.TEESimulator"
@@ -43,6 +43,7 @@ android {
         targetSdk = 36
         versionCode = gitCommitCount
         versionName = verName
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     buildTypes {
@@ -123,6 +124,7 @@ androidComponents {
                 val sourceModuleDir = rootProject.projectDir.resolve("module")
                 from(sourceModuleDir) {
                     exclude("module.prop") // Exclude the template file.
+                    exclude("keybox.xml", "target.txt", "sepolicy.rule", "update.json", "changelog.md")
                 }
 
                 // Copy and filter the module.prop template separately.
@@ -149,6 +151,8 @@ androidComponents {
 
                 archiveFileName.set(zipFileName)
                 destinationDirectory.set(project.rootDir.resolve("out"))
+                isPreserveFileTimestamps = false
+                isReproducibleFileOrder = true
                 from(tempModuleDir) // Zip the entire contents of the staging directory.
             }
 

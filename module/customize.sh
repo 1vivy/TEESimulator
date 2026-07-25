@@ -1,7 +1,6 @@
 # shellcheck disable=SC2034
 SKIPUNZIP=1
-MIN_SDK=29
-CONFIG_DIR=/data/adb/tricky_store
+MIN_SDK=36
 
 # --- Installation Context Check ---
 if [ "$BOOTMODE" != true ]; then
@@ -21,18 +20,15 @@ ui_print ""
 # --- Architecture Handling ---
 case "$ARCH" in
   arm64) ABI_DIR="arm64-v8a" ;;
-  arm)   ABI_DIR="armeabi-v7a" ;;
-  x64)   ABI_DIR="x86_64" ;;
-  x86)   ABI_DIR="x86" ;;
-  *)     abort "! Unsupported architecture: $ARCH" ;;
+  *) abort "! This compatibility fork supports exact arm64/API36 only" ;;
 esac
 
 ui_print "- Device platform: $ARCH"
 ui_print "- Using ABI dir: $ABI_DIR"
 
 # --- SDK Check ---
-if [ "$API" -lt "$MIN_SDK" ]; then
-  abort "! Unsupported SDK: $API. Minimum required is $MIN_SDK"
+if [ "$API" -ne "$MIN_SDK" ]; then
+  abort "! Unsupported SDK: $API. Exact SDK $MIN_SDK is required"
 else
   ui_print "- Device SDK: $API"
 fi
@@ -48,7 +44,7 @@ install_file() {
 
 # --- Installation ---
 ui_print "- Extracting module files"
-for file in customize.sh module.prop service.sh sepolicy.rule daemon; do
+for file in customize.sh module.prop service.sh action.sh daemon; do
   install_file "$file" "$MODPATH"
 done
 
@@ -72,18 +68,5 @@ ui_print ""
 mv "$MODPATH/libinject.so" "$MODPATH/inject"
 chmod 755 "$MODPATH/inject"
 
-# --- Configuration Files ---
-if [ ! -d "$CONFIG_DIR" ]; then
-  ui_print "- Creating configuration directory"
-  mkdir -p "$CONFIG_DIR"
-fi
-
-if [ ! -f "$CONFIG_DIR/keybox.xml" ]; then
-  ui_print "- Adding AOSP software keybox"
-  install_file "keybox.xml" "$CONFIG_DIR"
-fi
-
-if [ ! -f "$CONFIG_DIR/target.txt" ]; then
-  ui_print "- Adding default target scope"
-  install_file "target.txt" "$CONFIG_DIR"
-fi
+ui_print "- Installed default-inert probe-only lifecycle"
+ui_print "- No keybox or target configuration is bundled"

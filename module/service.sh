@@ -1,11 +1,8 @@
-DEBUG=false
-
+#!/system/bin/sh
+# API36 safety fork: boot is deliberately inert. Injection is never a boot action.
 MODDIR=${0%/*}
+STATE="$MODDIR/state"
 
-cd $MODDIR
-
-while true; do
-  ./daemon "$MODDIR" || exit 1
-  # ensure keystore initialized
-  sleep 2
-done &
+mkdir -p "$STATE"
+printf '%s\n' "INERT: no compatibility action started" >"$STATE/last-service-status"
+exit 0

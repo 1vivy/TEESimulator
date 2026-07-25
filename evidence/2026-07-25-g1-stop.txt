@@ -1,0 +1,31 @@
+TEESimulator API36 non-injecting probe
+Date: 2026-07-25
+Profile: api36-arm64-qcom-default-v1
+Identifiers/fingerprint: not collected
+Device-side files created: none
+Mutations performed: none
+
+PASS api-36
+PASS abi-arm64-v8a
+PASS selinux-enforcing
+PASS avb-green
+PASS service-android.hardware.security.keymint.IKeyMintDevice/default
+PASS service-android.hardware.security.keymint.IKeyMintDevice/strongbox
+PASS service-android.hardware.security.keymint.IRemotelyProvisionedComponent/default
+PASS service-android.hardware.security.keymint.IRemotelyProvisionedComponent/strongbox
+PASS service-android.hardware.security.keymint.IRemotelyProvisionedComponent/avf
+PASS keystore2-pid-stable
+PASS keystore2-start-stable
+PASS keystore2-maps-stable
+PASS keystore2-context
+PASS binder-route
+PASS no-competing-hook
+PASS controlled-restart-tools-available
+STOP stable-aidl-version-hash-unimplemented
+STOP elf-dependencies-build-id-unimplemented
+STOP selinux-injection-prerequisites-unproven
+STOP G1
+
+Decision: Gate G1 failed closed. No injection, key creation, restart, or G2
+rehearsal was attempted. Outcome A (probe-only release) is required unless a
+later non-injecting probe implementation establishes every missing fact.

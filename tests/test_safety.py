@@ -31,5 +31,28 @@ class SafetyTests(unittest.TestCase):
                          "DEADLINE_SECONDS=120"):
             self.assertIn(expected, profile)
 
+    def test_two_phone_architecture_keeps_device_paths_inert(self):
+        architecture = (ROOT / "docs/TWO_PHONE_ARCHITECTURE.md").read_text()
+        for expected in (
+            "cannot arbitrary-sign",
+            "corresponding donor app process",
+            "ATTESTATION_APPLICATION_ID",
+            "fails closed",
+            "StrongBox",
+            "AVF",
+        ):
+            self.assertIn(expected, architecture)
+
+        routing = (ROOT / "two-phone/src/main/kotlin/org/matrix/teesimulator/twophone/Routing.kt").read_text()
+        self.assertIn("PLATFORM_BYTE_FOR_BYTE", routing)
+        self.assertIn("localFallbackCount", routing)
+        self.assertNotIn("android.os.Parcel", routing)
+
+    def test_protocol_has_no_private_material_or_raw_binder(self):
+        protocol = (ROOT / "two-phone/src/main/kotlin/org/matrix/teesimulator/twophone/Protocol.kt").read_text()
+        self.assertNotIn("android.os.Parcel", protocol)
+        self.assertNotIn("PRIVATE KEY", protocol)
+        self.assertNotIn("donorAlias", protocol)
+
 if __name__ == "__main__":
     unittest.main()

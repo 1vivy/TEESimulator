@@ -34,8 +34,9 @@ if git grep -IEn 'ro\\.(serialno|boot\\.serialno)|getprop.*(serial|fingerprint)|
 fi
 pass secret-network-identifier-scan
 
-./gradlew --no-daemon :app:zipRelease
-artifact=$(find out -maxdepth 1 -type f -name '*Release.zip' -print -quit)
+./gradlew --no-daemon clean :app:zipRelease
+short_commit=$(git rev-parse --short HEAD)
+artifact=$(find out -maxdepth 1 -type f -name "TEESimulator-v0.1.0-probe.1-*-${short_commit}-Release.zip" -print -quit)
 [[ -n "$artifact" ]] || fail module-package
 zipinfo -1 "$artifact" | grep -Fxq action.sh || fail package-action
 if zipinfo -1 "$artifact" | grep -Eq '(^|/)(keybox\\.xml|target\\.txt|sepolicy\\.rule)$'; then
@@ -46,7 +47,7 @@ pass arm64-build-module-package
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 cp "$artifact" "$tmpdir/first.zip"
-./gradlew --no-daemon :app:zipRelease
+./gradlew --no-daemon clean :app:zipRelease
 cmp -s "$tmpdir/first.zip" "$artifact" || fail reproducibility
 sha256sum "$artifact"
 pass reproducible

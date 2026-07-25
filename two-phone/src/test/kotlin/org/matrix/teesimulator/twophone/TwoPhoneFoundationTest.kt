@@ -8,7 +8,6 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
-import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class TwoPhoneFoundationTest {
@@ -34,12 +33,9 @@ class TwoPhoneFoundationTest {
             session.donor.accept(request.copy(sequence = 2uL), pair, caller, clock.now())
         }
         assertFailsWith<ProtocolException.OldSession> {
-            Session.establish(pair, nonce(3), nonce(4)).donor.accept(
-                request,
-                pair,
-                caller,
-                clock.now(),
-            )
+            Session.establish(pair, nonce(3), nonce(4))
+                .donor
+                .accept(request, pair, caller, clock.now())
         }
         assertFailsWith<ProtocolException.DeadlineExceeded> {
             session.donor.accept(request, pair, caller, clock.afterDeadline())
@@ -55,7 +51,7 @@ class TwoPhoneFoundationTest {
 
         val first = session.donor.dispatch(request, pair, caller, clock.now(), donor::dispatch)
         val replay = session.donor.dispatch(request, pair, caller, clock.now(), donor::dispatch)
-        assertEquals(first, replay)
+        assertContentEquals(first, replay)
         assertEquals(1, donor.counters.generate)
 
         val changed = request.copy(body = CanonicalBody.of("changed" to byteArrayOf(9)))
@@ -78,9 +74,12 @@ class TwoPhoneFoundationTest {
         assertFalse(generated.toString().contains("alias", ignoreCase = true))
         assertTrue(donor.debugTargetState().none { it.contains("PRIVATE") || it.contains("alias") })
 
-        assertFailsWith<DonorException.WrongCaller> { donor.metadata(generated.handle, otherCaller) }
+        assertFailsWith<DonorException.WrongCaller> {
+            donor.metadata(generated.handle, otherCaller)
+        }
         assertFailsWith<DonorException.WrongPair> {
-            donor.forPresentedPair(PairIdentity("copied-target", pair.donorPin))
+            donor
+                .forPresentedPair(PairIdentity("copied-target", pair.donorPin))
                 .metadata(generated.handle, caller)
         }
         val copied = KeyHandle(generated.handle.id, generated.handle.binding.copyOf())
@@ -94,13 +93,24 @@ class TwoPhoneFoundationTest {
         val key = donor.generate(GenerateRequest("one", challenge(1), caller))
         val pool = Executors.newFixedThreadPool(8)
         val operations =
-            pool.invokeAll(
+            pool
+                .invokeAll(
                     (0 until 32).map { index ->
                         Callable {
                             val operation = donor.begin(key.handle, caller)
                             donor.updateAad(operation, caller, "aad".encodeToByteArray())
-                            val first = donor.update(operation, caller, index.toString().encodeToByteArray())
-                            val duplicate = donor.update(operation, caller, index.toString().encodeToByteArray())
+                            val first =
+                                donor.update(
+                                    operation,
+                                    caller,
+                                    index.toString().encodeToByteArray(),
+                                )
+                            val duplicate =
+                                donor.update(
+                                    operation,
+                                    caller,
+                                    index.toString().encodeToByteArray(),
+                                )
                             assertContentEquals(first, duplicate)
                             donor.finish(operation, caller, byteArrayOf())
                         }
@@ -148,16 +158,14 @@ class TwoPhoneFoundationTest {
         seam.generate(eligible, "logical")
         assertEquals(1, donor.counters.generate)
 
-        for (
-            passThrough in
-                listOf(
-                    eligible.copy(securityLevel = SecurityLevel.STRONGBOX),
-                    eligible.copy(securityLevel = SecurityLevel.AVF),
-                    eligible.copy(attested = false),
-                    eligible.copy(purpose = "not-allowed"),
-                    eligible.copy(caller = otherCaller),
-                )
-        ) {
+        for (passThrough in
+            listOf(
+                eligible.copy(securityLevel = SecurityLevel.STRONGBOX),
+                eligible.copy(securityLevel = SecurityLevel.AVF),
+                eligible.copy(attested = false),
+                eligible.copy(purpose = "not-allowed"),
+                eligible.copy(caller = otherCaller),
+            )) {
             assertEquals(RouteDecision.PLATFORM_BYTE_FOR_BYTE, seam.decide(passThrough))
             assertContentEquals(passThrough.platformParcel, seam.platformBytes(passThrough))
         }

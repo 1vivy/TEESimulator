@@ -3,3 +3,5 @@ out
 build/
 local.properties
 .android-sdk/
+__pycache__/
+*.pyc

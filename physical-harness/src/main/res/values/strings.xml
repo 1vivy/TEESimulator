@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">Physical Harness</string>
+    <string name="donor_notification_channel_name">Controlled donor service</string>
+    <string name="donor_notification_title">Controlled donor service active</string>
+    <string name="donor_special_use_fgs_subtype">Controlled donor service started by an explicit user action</string>
+</resources>

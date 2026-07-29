@@ -12,6 +12,7 @@ import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.interception.keystore.AbstractKeystoreInterceptor
 import org.matrix.TEESimulator.interception.keystore.Keystore2Interceptor
 import org.matrix.TEESimulator.interception.keystore.KeystoreInterceptor
+import org.matrix.TEESimulator.interception.policy.InstalledTargetProfileApprovedFixtureSource
 import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.util.AndroidDeviceUtils
 
@@ -94,6 +95,11 @@ object App {
      */
     private fun initializeInterceptors() {
         val interceptor = selectKeystoreInterceptor()
+        if (interceptor === Keystore2Interceptor) {
+            Keystore2Interceptor.installApprovedFixtureProfileSource(
+                InstalledTargetProfileApprovedFixtureSource()
+            )
+        }
 
         // Continuously try to run the interceptor until it's successfully initialized.
         while (!interceptor.tryRunKeystoreInterceptor()) {

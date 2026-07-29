@@ -80,19 +80,18 @@ class KeyMintSecurityLevelRoutingSeam(
         get() = 0
 
     fun decide(request: RouteRequest): RouteDecision {
-        if (request.userAuthenticationRequired || request.deviceLocalSemantics) {
-            throw RoutingException.UnsupportedLocalSemantics()
-        }
-        return if (
+        val remoteEligible =
             request.securityLevel == SecurityLevel.TRUSTED_ENVIRONMENT &&
                 request.attested &&
                 request.caller.uid in policy.allowlistedUids &&
                 request.purpose in policy.allowlistedPurposes
-        ) {
-            RouteDecision.REMOTE
-        } else {
-            RouteDecision.PLATFORM_BYTE_FOR_BYTE
+        if (!remoteEligible) {
+            return RouteDecision.PLATFORM_BYTE_FOR_BYTE
         }
+        if (request.userAuthenticationRequired || request.deviceLocalSemantics) {
+            throw RoutingException.UnsupportedLocalSemantics()
+        }
+        return RouteDecision.REMOTE
     }
 
     fun platformBytes(request: RouteRequest): ByteArray {

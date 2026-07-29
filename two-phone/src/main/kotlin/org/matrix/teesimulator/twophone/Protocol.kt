@@ -2,6 +2,7 @@ package org.matrix.teesimulator.twophone
 
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
+import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.time.Instant
@@ -93,7 +94,7 @@ sealed class ProtocolException(message: String) : RuntimeException(message) {
 
     class SequenceOverflow : ProtocolException("uint64 sequence exhausted")
 
-    class RequestIdBodyMismatch : ProtocolException("request id reused with changed body")
+    class RequestIdReuse : ProtocolException("request id reused with changed authenticated request")
 
     class InvalidBodyHash : ProtocolException("body hash mismatch")
 
@@ -107,16 +108,7 @@ sealed class ProtocolException(message: String) : RuntimeException(message) {
 class Session private constructor(val target: Direction, val donor: Direction) {
     companion object {
         fun establish(pair: PairIdentity, clientNonce: ByteArray, serverNonce: ByteArray): Session {
-            require(clientNonce.size == 32 && serverNonce.size == 32)
-            val sessionId =
-                canonicalBytes(
-                        "two-phone-v1".encodeToByteArray(),
-                        pair.targetPin.encodeToByteArray(),
-                        pair.donorPin.encodeToByteArray(),
-                        clientNonce,
-                        serverNonce,
-                    )
-                    .sha256()
+            val sessionId = deriveSessionId(pair, clientNonce, serverNonce)
             return Session(
                 Direction(sessionId, clientNonce.copyOf(), serverNonce.copyOf(), pair, true),
                 Direction(sessionId, clientNonce.copyOf(), serverNonce.copyOf(), pair, false),
@@ -188,25 +180,42 @@ internal constructor(
         now: Instant,
         handler: (Method, CanonicalBody, CallerIdentity) -> ByteArray,
     ): ByteArray {
-        validateCommon(request, presentedPair, now, validateBody = false)
+        validateCommon(request, presentedPair, now)
         val id = request.requestId.bytes.toHex()
+        val requestFingerprint = requestFingerprint(request, caller)
         responses[id]?.let {
-            if (
-                !MessageDigest.isEqual(it.bodyHash, request.bodyHash) ||
-                    !MessageDigest.isEqual(request.bodyHash, request.body.sha256)
-            ) {
-                throw ProtocolException.RequestIdBodyMismatch()
+            if (!MessageDigest.isEqual(it.requestFingerprint, requestFingerprint)) {
+                throw ProtocolException.RequestIdReuse()
             }
             return it.response.copyOf()
         }
-        if (!MessageDigest.isEqual(request.bodyHash, request.body.sha256)) {
-            throw ProtocolException.InvalidBodyHash()
-        }
         validateSequence(request.sequence)
         val response = handler(request.method, request.body, caller)
-        responses[id] = CachedResponse(request.bodyHash.copyOf(), response.copyOf())
+        responses[id] = CachedResponse(requestFingerprint, response.copyOf())
         return response
     }
+
+    private fun requestFingerprint(request: Envelope, caller: CallerIdentity): ByteArray =
+        canonicalBytes(
+                "two-phone-authenticated-request-v1".encodeToByteArray(),
+                request.version.name.encodeToByteArray(),
+                sessionId,
+                clientNonce,
+                serverNonce,
+                pair.targetPin.encodeToByteArray(),
+                pair.donorPin.encodeToByteArray(),
+                byteArrayOf(if (sender) 1 else 0),
+                request.requestId.bytes,
+                request.method.name.encodeToByteArray(),
+                ByteBuffer.allocate(ULong.SIZE_BYTES).putLong(request.sequence.toLong()).array(),
+                ByteBuffer.allocate(Long.SIZE_BYTES + Int.SIZE_BYTES)
+                    .putLong(request.deadline.epochSecond)
+                    .putInt(request.deadline.nano)
+                    .array(),
+                request.bodyHash,
+                caller.stableCanonical(),
+            )
+            .sha256()
 
     private fun validateCommon(
         request: Envelope,
@@ -241,7 +250,7 @@ internal constructor(
         }
     }
 
-    private data class CachedResponse(val bodyHash: ByteArray, val response: ByteArray)
+    private data class CachedResponse(val requestFingerprint: ByteArray, val response: ByteArray)
 }
 
 interface PinnedTransport {
@@ -261,6 +270,22 @@ class MutableClock(private var instant: Instant) {
 
 internal fun ByteArray.sha256(): ByteArray = MessageDigest.getInstance("SHA-256").digest(this)
 
+internal fun deriveSessionId(
+    pair: PairIdentity,
+    clientNonce: ByteArray,
+    serverNonce: ByteArray,
+): ByteArray {
+    require(clientNonce.size == 32 && serverNonce.size == 32)
+    return canonicalBytes(
+            "two-phone-v1".encodeToByteArray(),
+            pair.targetPin.encodeToByteArray(),
+            pair.donorPin.encodeToByteArray(),
+            clientNonce,
+            serverNonce,
+        )
+        .sha256()
+}
+
 internal fun canonicalBytes(vararg values: ByteArray): ByteArray {
     val output = ByteArrayOutputStream()
     DataOutputStream(output).use { stream ->
@@ -271,5 +296,11 @@ internal fun canonicalBytes(vararg values: ByteArray): ByteArray {
     }
     return output.toByteArray()
 }
+
+internal fun CallerIdentity.stableCanonical(): ByteArray =
+    canonicalBytes(
+        signingCertificateDigest.encodeToByteArray(),
+        attestationApplicationIdDigest.encodeToByteArray(),
+    )
 
 internal fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }

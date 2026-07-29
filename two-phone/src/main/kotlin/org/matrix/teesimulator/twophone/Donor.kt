@@ -40,7 +40,7 @@ data class GenerateRequest(
         CanonicalBody.of(
             "logical-name-hash" to logicalName.encodeToByteArray().sha256(),
             "challenge" to challenge,
-            "caller" to caller.canonical(),
+            "caller" to caller.stableCanonical(),
         )
 }
 
@@ -70,18 +70,30 @@ sealed class DonorException(message: String) : RuntimeException(message) {
 
 class DonorCounters {
     val generateCounter = AtomicInteger()
+    val deleteCounter = AtomicInteger()
     val beginCounter = AtomicInteger()
+    val updateAadCounter = AtomicInteger()
     val updateCounter = AtomicInteger()
+    val abortCounter = AtomicInteger()
     val strongBoxCounter = AtomicInteger()
     val avfCounter = AtomicInteger()
     val generate: Int
         get() = generateCounter.get()
 
+    val delete: Int
+        get() = deleteCounter.get()
+
     val begin: Int
         get() = beginCounter.get()
 
+    val updateAad: Int
+        get() = updateAadCounter.get()
+
     val update: Int
         get() = updateCounter.get()
+
+    val abort: Int
+        get() = abortCounter.get()
 
     val strongBox: Int
         get() = strongBoxCounter.get()
@@ -111,59 +123,67 @@ internal data class DonorOperation(
     val id: UUID,
     val keyId: UUID,
     val caller: CallerIdentity,
+    val pair: PairIdentity,
     @Volatile var state: OperationState,
     val transcript: MutableList<ByteArray> = mutableListOf(),
-    var lastUpdateInput: ByteArray? = null,
-    var lastUpdateOutput: ByteArray? = null,
 )
 
-class FakeDonorAdapter(
+class FakeDonorAdapter
+private constructor(
     private val pair: PairIdentity,
     private val clock: MutableClock,
-    private val store: InMemoryDonorStore = InMemoryDonorStore(),
-    val counters: DonorCounters = DonorCounters(),
-    private val presentedPair: PairIdentity = pair,
+    private val store: InMemoryDonorStore,
+    val counters: DonorCounters,
+    private val presentedPair: PairIdentity,
+    recoverOperationsAfterRestart: Boolean,
 ) {
+    constructor(
+        pair: PairIdentity,
+        clock: MutableClock,
+        store: InMemoryDonorStore = InMemoryDonorStore(),
+        counters: DonorCounters = DonorCounters(),
+    ) : this(pair, clock, store, counters, pair, true)
+
     init {
-        store.operations.values
-            .filter { it.state !in setOf(OperationState.FINISHED, OperationState.ABORTED) }
-            .forEach { it.state = OperationState.LOST }
+        if (recoverOperationsAfterRestart) recoverOperationsAfterRestart()
     }
 
-    @Synchronized
     fun generate(request: GenerateRequest): GeneratedKey {
         verifyPair()
         require(request.challenge.isNotEmpty() && request.challenge.size <= 128)
-        store.logicalActive[request.logicalName]?.let { oldId ->
-            store.keys[oldId]?.let {
-                if (it.state == KeyState.ACTIVE) it.state = KeyState.SUPERSEDED
+        return synchronized(store) {
+            store.logicalActive[request.logicalName]?.let { oldId ->
+                store.keys[oldId]?.let {
+                    if (it.state == KeyState.ACTIVE) it.state = KeyState.SUPERSEDED
+                }
             }
-        }
-        val id = UUID.randomUUID()
-        val secret = ByteArray(32).also(SecureRandom()::nextBytes)
-        val publicKey = canonicalBytes(id.bytes(), secret).sha256()
-        val key =
-            DonorKey(
-                id,
-                request.logicalName,
-                request.caller,
-                pair,
-                secret,
-                publicKey,
-                KeyState.CREATING,
+            val id = UUID.randomUUID()
+            val secret = ByteArray(32).also(SecureRandom()::nextBytes)
+            val publicKey = canonicalBytes(id.bytes(), secret).sha256()
+            val key =
+                DonorKey(
+                    id,
+                    request.logicalName,
+                    request.caller,
+                    pair,
+                    secret,
+                    publicKey,
+                    KeyState.CREATING,
+                )
+            store.keys[id] = key
+            key.state = KeyState.ACTIVE
+            store.logicalActive[request.logicalName] = id
+            counters.generateCounter.incrementAndGet()
+            GeneratedKey(
+                handleFor(key),
+                request.challenge.copyOf(),
+                publicKey.copyOf(),
+                listOf(
+                    canonicalBytes(publicKey, request.challenge, request.caller.stableCanonical())
+                        .sha256()
+                ),
             )
-        store.keys[id] = key
-        key.state = KeyState.ACTIVE
-        store.logicalActive[request.logicalName] = id
-        counters.generateCounter.incrementAndGet()
-        return GeneratedKey(
-            handleFor(key),
-            request.challenge.copyOf(),
-            publicKey.copyOf(),
-            listOf(
-                canonicalBytes(publicKey, request.challenge, request.caller.canonical()).sha256()
-            ),
-        )
+        }
     }
 
     fun importKey(privateMaterial: ByteArray, caller: CallerIdentity): Nothing {
@@ -175,28 +195,40 @@ class FakeDonorAdapter(
         return KeyMetadata(key.state, key.publicKey.copyOf())
     }
 
-    @Synchronized
     fun delete(handle: KeyHandle, caller: CallerIdentity) {
-        val key = key(handle, caller)
-        if (key.state == KeyState.DELETED) return
-        if (key.state == KeyState.QUARANTINED) throw DonorException.InvalidState()
-        key.state = KeyState.DELETE_PENDING
-        key.secret.fill(0)
-        key.state = KeyState.DELETED
-        store.logicalActive.remove(key.logicalName, key.id)
+        synchronized(store) {
+            val key = key(handle, caller)
+            if (key.state == KeyState.DELETED) return
+            if (key.state == KeyState.QUARANTINED) throw DonorException.InvalidState()
+            key.state = KeyState.DELETE_PENDING
+            store.operations.values
+                .filter { it.keyId == key.id }
+                .forEach { operation ->
+                    synchronized(operation) {
+                        if (!operation.state.isTerminal()) {
+                            operation.state = OperationState.ABORTED
+                        }
+                    }
+                }
+            key.secret.fill(0)
+            key.state = KeyState.DELETED
+            store.logicalActive.remove(key.logicalName, key.id)
+            counters.deleteCounter.incrementAndGet()
+        }
     }
 
-    fun begin(handle: KeyHandle, caller: CallerIdentity): OperationHandle {
-        val key = key(handle, caller)
-        if (key.state != KeyState.ACTIVE && key.state != KeyState.SUPERSEDED) {
-            throw DonorException.InvalidState()
+    fun begin(handle: KeyHandle, caller: CallerIdentity): OperationHandle =
+        synchronized(store) {
+            val key = key(handle, caller)
+            if (key.state != KeyState.ACTIVE && key.state != KeyState.SUPERSEDED) {
+                throw DonorException.InvalidState()
+            }
+            val id = UUID.randomUUID()
+            val operation = DonorOperation(id, key.id, caller, key.pair, OperationState.BEGUN)
+            store.operations[id] = operation
+            counters.beginCounter.incrementAndGet()
+            operationHandle(operation)
         }
-        val id = UUID.randomUUID()
-        val operation = DonorOperation(id, key.id, caller, OperationState.BEGUN)
-        store.operations[id] = operation
-        counters.beginCounter.incrementAndGet()
-        return operationHandle(operation)
-    }
 
     fun updateAad(handle: OperationHandle, caller: CallerIdentity, input: ByteArray) {
         val operation = operation(handle, caller)
@@ -206,6 +238,7 @@ class FakeDonorAdapter(
             }
             operation.transcript += input.copyOf()
             operation.state = OperationState.AAD
+            counters.updateAadCounter.incrementAndGet()
         }
     }
 
@@ -213,24 +246,15 @@ class FakeDonorAdapter(
         val operation = operation(handle, caller)
         synchronized(operation) {
             if (
-                operation.lastUpdateInput?.let { MessageDigest.isEqual(it, input) } == true &&
-                    operation.lastUpdateOutput != null
-            ) {
-                return operation.lastUpdateOutput!!.copyOf()
-            }
-            if (
                 operation.state !in
                     setOf(OperationState.BEGUN, OperationState.AAD, OperationState.DATA)
             ) {
                 throw DonorException.InvalidState()
             }
-            val output = sign(store.keys.getValue(operation.keyId).secret, input)
             operation.transcript += input.copyOf()
-            operation.lastUpdateInput = input.copyOf()
-            operation.lastUpdateOutput = output.copyOf()
             operation.state = OperationState.DATA
             counters.updateCounter.incrementAndGet()
-            return output
+            return ByteArray(0)
         }
     }
 
@@ -259,6 +283,7 @@ class FakeDonorAdapter(
         synchronized(operation) {
             if (operation.state == OperationState.FINISHED) throw DonorException.InvalidState()
             operation.state = OperationState.ABORTED
+            counters.abortCounter.incrementAndGet()
         }
     }
 
@@ -274,13 +299,13 @@ class FakeDonorAdapter(
         store.keys.values.map { "${it.id}:${it.state}:${it.publicKey.toHex()}" }
 
     fun forPresentedPair(other: PairIdentity) =
-        FakeDonorAdapter(pair, clock, store, counters, other)
+        FakeDonorAdapter(pair, clock, store, counters, other, false)
 
     fun dispatch(method: Method, body: CanonicalBody, caller: CallerIdentity): ByteArray =
         when (method) {
             Method.GENERATE -> {
                 counters.generateCounter.incrementAndGet()
-                canonicalBytes(body.sha256, caller.canonical())
+                canonicalBytes(body.sha256, caller.stableCanonical())
             }
             else -> canonicalBytes(method.name.encodeToByteArray(), body.sha256)
         }
@@ -288,7 +313,7 @@ class FakeDonorAdapter(
     private fun key(handle: KeyHandle, caller: CallerIdentity): DonorKey {
         verifyPair()
         val key = store.keys[handle.id] ?: throw DonorException.CopiedHandle()
-        if (key.caller != caller) throw DonorException.WrongCaller()
+        if (!key.caller.matchesStableIdentity(caller)) throw DonorException.WrongCaller()
         if (!MessageDigest.isEqual(handle.binding, handleBinding(key))) {
             throw DonorException.CopiedHandle()
         }
@@ -298,7 +323,9 @@ class FakeDonorAdapter(
     private fun operation(handle: OperationHandle, caller: CallerIdentity): DonorOperation {
         verifyPair()
         val operation = store.operations[handle.id] ?: throw DonorException.CopiedHandle()
-        if (operation.caller != caller) throw DonorException.WrongCaller()
+        if (operation.pair != pair) throw DonorException.WrongPair()
+        if (!operation.caller.matchesStableIdentity(caller)) throw DonorException.WrongCaller()
+        if (handle.keyId != operation.keyId) throw DonorException.CopiedHandle()
         val expected = operationBinding(operation)
         if (!MessageDigest.isEqual(handle.binding, expected)) throw DonorException.CopiedHandle()
         return operation
@@ -308,12 +335,26 @@ class FakeDonorAdapter(
         if (presentedPair != pair) throw DonorException.WrongPair()
     }
 
+    private fun recoverOperationsAfterRestart() {
+        synchronized(store) {
+            store.operations.values
+                .filter { it.pair == pair }
+                .forEach { operation ->
+                    synchronized(operation) {
+                        if (!operation.state.isTerminal()) {
+                            operation.state = OperationState.LOST
+                        }
+                    }
+                }
+        }
+    }
+
     private fun handleFor(key: DonorKey) = KeyHandle(key.id, handleBinding(key))
 
     private fun handleBinding(key: DonorKey) =
         sign(
             store.handleSecret,
-            canonicalBytes(key.id.bytes(), key.caller.canonical(), pair.canonical()),
+            canonicalBytes(key.id.bytes(), key.caller.stableCanonical(), pair.canonical()),
         )
 
     private fun operationHandle(operation: DonorOperation) =
@@ -325,7 +366,8 @@ class FakeDonorAdapter(
             canonicalBytes(
                 operation.id.bytes(),
                 operation.keyId.bytes(),
-                operation.caller.canonical(),
+                operation.caller.stableCanonical(),
+                operation.pair.canonical(),
             ),
         )
 }
@@ -339,12 +381,12 @@ private fun sign(secret: ByteArray, value: ByteArray): ByteArray =
 private fun UUID.bytes(): ByteArray =
     ByteBuffer.allocate(16).putLong(mostSignificantBits).putLong(leastSignificantBits).array()
 
-private fun CallerIdentity.canonical(): ByteArray =
-    canonicalBytes(
-        ByteBuffer.allocate(4).putInt(uid).array(),
-        signingCertificateDigest.encodeToByteArray(),
-        attestationApplicationIdDigest.encodeToByteArray(),
-    )
+private fun CallerIdentity.matchesStableIdentity(other: CallerIdentity): Boolean =
+    signingCertificateDigest == other.signingCertificateDigest &&
+        attestationApplicationIdDigest == other.attestationApplicationIdDigest
+
+private fun OperationState.isTerminal(): Boolean =
+    this == OperationState.FINISHED || this == OperationState.ABORTED || this == OperationState.LOST
 
 private fun PairIdentity.canonical(): ByteArray =
     canonicalBytes(targetPin.encodeToByteArray(), donorPin.encodeToByteArray())

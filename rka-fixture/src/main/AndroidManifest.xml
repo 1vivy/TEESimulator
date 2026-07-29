@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission
+        android:name="android.permission.DUMP"
+        tools:ignore="ProtectedPermissions" />
+
+    <application
+        android:name=".FixtureApplication"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:usesCleartextTraffic="false">
+        <provider
+            android:name=".FixtureCommandProvider"
+            android:authorities="org.matrix.teesimulator.rkafixture.commands"
+            android:exported="true"
+            android:grantUriPermissions="false"
+            android:permission="android.permission.DUMP" />
+
+        <activity
+            android:name=".FixtureActivity"
+            android:exported="false" />
+    </application>
+</manifest>

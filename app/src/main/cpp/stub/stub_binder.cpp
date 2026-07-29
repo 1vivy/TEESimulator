@@ -169,6 +169,9 @@ status_t Parcel::writeString8(const char *, size_t) {
 status_t Parcel::writeStrongBinder(const sp<IBinder> &) {
     return 0;
 }
+status_t Parcel::writeFileDescriptor(int, bool) {
+    return 0;
+}
 status_t Parcel::writeBool(bool) {
     return 0;
 }

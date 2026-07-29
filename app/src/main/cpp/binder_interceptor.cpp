@@ -1,10 +1,13 @@
 #include <android/binder.h>
+#include <android-base/unique_fd.h>
 #include <binder/Binder.h>
 #include <binder/Common.h>
 #include <binder/IPCThreadState.h>
 #include <binder/IServiceManager.h>
 #include <binder/Parcel.h>
 #include <sys/ioctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <utils/StrongPointer.h>
 
 #include <atomic>
@@ -213,12 +216,14 @@ struct ThreadTransactionInfo {
     uint64_t transaction_id;
     uint32_t transaction_code;
     wp<BBinder> target_binder;
+    android::base::unique_fd origin_pidfd;
 
     // Default constructor
     ThreadTransactionInfo() : transaction_id(0), transaction_code(0) {}
 
-    ThreadTransactionInfo(uint64_t id, uint32_t code, wp<BBinder> target)
-        : transaction_id(id), transaction_code(code), target_binder(std::move(target)) {}
+    ThreadTransactionInfo(uint64_t id, uint32_t code, wp<BBinder> target, android::base::unique_fd pidfd)
+        : transaction_id(id), transaction_code(code), target_binder(std::move(target)),
+          origin_pidfd(std::move(pidfd)) {}
 };
 
 // A map keyed by thread ID. When ioctl intercepts a transaction intended for us,
@@ -235,6 +240,7 @@ class BinderInterceptor : public BBinder {
     struct RegistrationEntry {
         wp<IBinder> target;
         sp<IBinder> callback_interface;
+        int32_t origin_death_transaction_code;
     };
 
     // Reader-Writer lock for the registry to allow concurrent reads (lookups)
@@ -250,9 +256,16 @@ public:
         return registry_.find(target) != registry_.end();
     }
 
+    bool requiresOriginDeathTracking(const wp<BBinder> &target, uint32_t code) const {
+        std::shared_lock lock(registry_mutex_);
+        auto it = registry_.find(target);
+        return it != registry_.end() && it->second.origin_death_transaction_code >= 0 &&
+               static_cast<uint32_t>(it->second.origin_death_transaction_code) == code;
+    }
+
     // Main entry point for processing the "Man-in-the-Middle" logic
     bool processInterceptedTransaction(uint64_t tx_id, sp<BBinder> target, uint32_t code, const Parcel &data,
-                                       Parcel *reply, uint32_t flags, status_t &result);
+                                       Parcel *reply, uint32_t flags, int origin_pidfd, status_t &result);
 
 protected:
     // Handle configuration commands sent to the Interceptor itself
@@ -264,7 +277,7 @@ private:
 
     // Helpers to serialize data for the remote callback interface
     status_t writeTransactionData(Parcel &out, uint64_t tx_id, sp<BBinder> target, uint32_t code, uint32_t flags,
-                                  const Parcel &in_data) const;
+                                  int origin_pidfd, const Parcel &in_data) const;
 };
 
 static sp<BinderInterceptor> g_interceptor_instance = nullptr;
@@ -328,7 +341,7 @@ protected:
         // 4. Delegate to the Interceptor logic
         status_t status = OK;
         bool interceptorManagedFlow = g_interceptor_instance->processInterceptedTransaction(
-            info.transaction_id, real_target, info.transaction_code, data, reply, flags, status);
+            info.transaction_id, real_target, info.transaction_code, data, reply, flags, info.origin_pidfd.get(), status);
 
         // 5. If Interceptor logic says "Forward it", we call the original binder
         if (!interceptorManagedFlow) {
@@ -389,6 +402,14 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
             if (g_interceptor_instance->isBinderIntercepted(wp_target)) {
                 info.transaction_code = txn_data->code;
                 info.target_binder = wp_target; // Assign the valid weak pointer
+                if (g_interceptor_instance->requiresOriginDeathTracking(wp_target, txn_data->code)) {
+                    int pidfd = static_cast<int>(syscall(SYS_pidfd_open, txn_data->sender_pid, 0));
+                    if (pidfd >= 0) {
+                        info.origin_pidfd.reset(pidfd);
+                    } else {
+                        LOGE("[Hook] pidfd_open failed for caller pid %d: errno=%d", txn_data->sender_pid, errno);
+                    }
+                }
                 hijack = true;
             }
             // Manually release the temporary strong reference we acquired at the start.
@@ -525,10 +546,13 @@ status_t BinderInterceptor::onTransact(uint32_t code, const Parcel &data, Parcel
 status_t BinderInterceptor::handleRegister(const Parcel &data) {
     sp<IBinder> target;
     sp<IBinder> callback;
+    int32_t origin_death_transaction_code;
 
     if (data.readStrongBinder(&target) != OK || !target)
         return BAD_VALUE;
     if (data.readStrongBinder(&callback) != OK || !callback)
+        return BAD_VALUE;
+    if (data.readInt32(&origin_death_transaction_code) != OK)
         return BAD_VALUE;
 
     // We can only intercept local Binders (BBinder), not remote proxies (BpBinder)
@@ -540,7 +564,7 @@ status_t BinderInterceptor::handleRegister(const Parcel &data) {
     wp<IBinder> weak_target = target;
 
     std::unique_lock lock(registry_mutex_);
-    registry_[weak_target] = {weak_target, callback};
+    registry_[weak_target] = {weak_target, callback, origin_death_transaction_code};
 
     LOGI("Interceptor registered for binder %p", target.get());
     return OK;
@@ -563,7 +587,7 @@ status_t BinderInterceptor::handleUnregister(const Parcel &data) {
 }
 
 status_t BinderInterceptor::writeTransactionData(Parcel &out, uint64_t tx_id, sp<BBinder> target, uint32_t code,
-                                                 uint32_t flags, const Parcel &in_data) const {
+                                                 uint32_t flags, int origin_pidfd, const Parcel &in_data) const {
     // This is the data contract for communicating with the remote analysis/control tool
     VALIDATE_STATUS(tx_id, out.writeInt64(tx_id));
     VALIDATE_STATUS(tx_id, out.writeStrongBinder(target));
@@ -571,6 +595,10 @@ status_t BinderInterceptor::writeTransactionData(Parcel &out, uint64_t tx_id, sp
     VALIDATE_STATUS(tx_id, out.writeUint32(flags));
     VALIDATE_STATUS(tx_id, out.writeInt32(IPCThreadState::self()->getCallingUid()));
     VALIDATE_STATUS(tx_id, out.writeInt32(IPCThreadState::self()->getCallingPid()));
+    VALIDATE_STATUS(tx_id, out.writeInt32(origin_pidfd >= 0 ? 1 : 0));
+    if (origin_pidfd >= 0) {
+        VALIDATE_STATUS(tx_id, out.writeFileDescriptor(origin_pidfd));
+    }
     VALIDATE_STATUS(tx_id, out.writeUint64(in_data.dataSize()));
     VALIDATE_STATUS(tx_id, out.appendFrom(&in_data, 0, in_data.dataSize()));
     return OK;
@@ -578,21 +606,40 @@ status_t BinderInterceptor::writeTransactionData(Parcel &out, uint64_t tx_id, sp
 
 bool BinderInterceptor::processInterceptedTransaction(uint64_t tx_id, sp<BBinder> target, uint32_t code,
                                                       const Parcel &request, Parcel *reply, uint32_t flags,
-                                                      status_t &result) {
+                                                       int origin_pidfd, status_t &result) {
     sp<IBinder> callback;
+    bool requires_origin_death = false;
     {
         std::shared_lock lock(registry_mutex_);
         auto it = registry_.find(target);
         if (it == registry_.end())
             return false; // Should not happen given logic in hook, but safe
         callback = it->second.callback_interface;
+        requires_origin_death = it->second.origin_death_transaction_code == code;
     }
 
     // --- Phase 1: Pre-Transaction Callback ---
     Parcel pre_req, pre_resp;
-    writeTransactionData(pre_req, tx_id, target, code, flags, request);
+    const status_t write_status =
+        writeTransactionData(pre_req, tx_id, target, code, flags, origin_pidfd, request);
+    if (write_status != OK) {
+        LOGE("[TX_ID: %" PRIu64 "] Failed to serialize the pre-transaction callback: %d", tx_id,
+             write_status);
+        if (requires_origin_death) {
+            result = write_status;
+            return true;
+        }
+        return false;
+    }
 
-    if (callback->transact(intercept::kPreTransact, pre_req, &pre_resp) != OK) {
+    const status_t callback_status = callback->transact(intercept::kPreTransact, pre_req, &pre_resp);
+    if (callback_status != OK) {
+        if (requires_origin_death) {
+            LOGE("[TX_ID: %" PRIu64 "] Tracked pre-transaction callback failed closed: %d", tx_id,
+                 callback_status);
+            result = callback_status;
+            return true;
+        }
         LOGW("[TX_ID: %" PRIu64 "] Pre-transaction callback failed. Forwarding original call.", tx_id);
         return false; // Callback failed, proceed as if not intercepted
     }
@@ -637,7 +684,7 @@ bool BinderInterceptor::processInterceptedTransaction(uint64_t tx_id, sp<BBinder
 
     // --- Phase 3: Post-Transaction Callback ---
     Parcel post_req, post_resp;
-    writeTransactionData(post_req, tx_id, target, code, flags, final_request);
+    writeTransactionData(post_req, tx_id, target, code, flags, -1, final_request);
 
     // Append the result of the execution for the callback to see
     VALIDATE_STATUS(tx_id, post_req.writeInt32(result));

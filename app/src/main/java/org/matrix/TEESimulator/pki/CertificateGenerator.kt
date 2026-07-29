@@ -8,7 +8,6 @@ import java.math.BigInteger
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.cert.Certificate
-import java.security.cert.X509Certificate
 import java.security.interfaces.ECKey
 import java.security.interfaces.RSAKey
 import java.security.spec.ECGenParameterSpec
@@ -185,7 +184,7 @@ object CertificateGenerator {
             val certChain = CertificateHelper.getCertificateChain(keyInfo.response)
             if (!certChain.isNullOrEmpty()) {
                 val issuer = X509CertificateHolder(certChain[0].encoded).subject
-                Pair(keyInfo.keyPair, issuer)
+                keyInfo.keyPair?.let { Pair(it, issuer) }
             } else {
                 null
             }

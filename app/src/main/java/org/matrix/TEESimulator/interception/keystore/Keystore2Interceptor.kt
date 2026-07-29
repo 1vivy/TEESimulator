@@ -5,30 +5,36 @@ import android.hardware.security.keymint.SecurityLevel
 import android.os.Build
 import android.os.IBinder
 import android.os.Parcel
+import android.os.Process
 import android.system.keystore2.IKeystoreService
 import android.system.keystore2.KeyDescriptor
-import android.system.keystore2.KeyEntryResponse
-import java.security.SecureRandom
-import java.security.cert.Certificate
-import org.matrix.TEESimulator.attestation.AttestationPatcher
-import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.interception.keystore.shim.KeyMintSecurityLevelInterceptor
+import org.matrix.TEESimulator.interception.policy.AndroidFixturePackageResolver
+import org.matrix.TEESimulator.interception.policy.ApprovedFixtureProfileSource
+import org.matrix.TEESimulator.interception.policy.CallerDecision
+import org.matrix.TEESimulator.interception.policy.FixtureInterceptionPolicy
 import org.matrix.TEESimulator.logging.KeyMintParameterLogger
 import org.matrix.TEESimulator.logging.SystemLogger
-import org.matrix.TEESimulator.pki.CertificateGenerator
-import org.matrix.TEESimulator.pki.CertificateHelper
 
 /**
  * Interceptor for the `IKeystoreService` on Android S (API 31) and newer.
  *
  * This version of Keystore delegates most cryptographic operations to `IKeystoreSecurityLevel`
- * sub-services (for TEE, StrongBox, etc.). This interceptor's main role is to set up interceptors
- * for those sub-services and to patch certificate chains on their way out.
+ * sub-services. Only the TEE sub-service is eligible for interception; StrongBox remains entirely
+ * on the platform path.
  */
 @SuppressLint("BlockedPrivateApi")
 object Keystore2Interceptor : AbstractKeystoreInterceptor() {
     private val stubBinderClass = IKeystoreService.Stub::class.java
+    @Volatile private var approvedProfileSource = ApprovedFixtureProfileSource { null }
+    private val interceptionPolicy =
+        FixtureInterceptionPolicy(
+            approvedProfileSource = ApprovedFixtureProfileSource { approvedProfileSource.load() },
+            packageResolver =
+                AndroidFixturePackageResolver(ConfigurationManager::getPackageManager),
+            targetDaemonPid = Process.myPid(),
+        )
 
     // Transaction codes for the IKeystoreService interface methods we are interested in.
     private val GET_KEY_ENTRY_TRANSACTION =
@@ -58,8 +64,8 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
     override val injectionCommand = "exec ./inject `pidof keystore2` libTEESimulator.so entry"
 
     /**
-     * This method is called once the main service is hooked. It proceeds to find and hook the
-     * security level sub-services (e.g., TEE, StrongBox).
+     * This method is called once the main service is hooked. It proceeds to find and hook the TEE
+     * security-level sub-service. Deliberately excluded levels are never queried or registered.
      */
     override fun onInterceptorReady(service: IBinder, backdoor: IBinder) {
         val keystoreInterface = IKeystoreService.Stub.asInterface(service)
@@ -67,27 +73,32 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
     }
 
     private fun setupSecurityLevelInterceptors(service: IKeystoreService, backdoor: IBinder) {
-        // Attempt to get and intercept the TEE security level service.
-        runCatching {
-                service.getSecurityLevel(SecurityLevel.TRUSTED_ENVIRONMENT)?.let { tee ->
-                    SystemLogger.info("Found TEE SecurityLevel. Registering interceptor...")
-                    val interceptor =
-                        KeyMintSecurityLevelInterceptor(tee, SecurityLevel.TRUSTED_ENVIRONMENT)
-                    register(backdoor, tee.asBinder(), interceptor)
+        interceptedSecurityLevels().forEach { securityLevel ->
+            runCatching {
+                    service.getSecurityLevel(securityLevel)?.let { keyMint ->
+                        SystemLogger.info("Found TEE SecurityLevel. Registering interceptor...")
+                        val interceptor =
+                            KeyMintSecurityLevelInterceptor(
+                                keyMint,
+                                securityLevel,
+                                interceptionPolicy,
+                            )
+                        register(
+                            backdoor,
+                            keyMint.asBinder(),
+                            interceptor,
+                            interceptor.originDeathTransactionCode,
+                        )
+                    }
                 }
-            }
-            .onFailure { SystemLogger.error("Failed to intercept TEE SecurityLevel.", it) }
+                .onFailure { SystemLogger.error("Failed to intercept TEE SecurityLevel.", it) }
+        }
+    }
 
-        // Attempt to get and intercept the StrongBox security level service.
-        runCatching {
-                service.getSecurityLevel(SecurityLevel.STRONGBOX)?.let { strongbox ->
-                    SystemLogger.info("Found StrongBox SecurityLevel. Registering interceptor...")
-                    val interceptor =
-                        KeyMintSecurityLevelInterceptor(strongbox, SecurityLevel.STRONGBOX)
-                    register(backdoor, strongbox.asBinder(), interceptor)
-                }
-            }
-            .onFailure { SystemLogger.error("Failed to intercept StrongBox SecurityLevel.", it) }
+    internal fun interceptedSecurityLevels(): List<Int> = listOf(SecurityLevel.TRUSTED_ENVIRONMENT)
+
+    internal fun installApprovedFixtureProfileSource(source: ApprovedFixtureProfileSource) {
+        approvedProfileSource = source
     }
 
     override fun onPreTransact(
@@ -99,6 +110,10 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
+        if (interceptionPolicy.beforeCaller(callingUid, callingPid) == CallerDecision.PLATFORM) {
+            return TransactionResult.ContinueAndSkipPost
+        }
+
         if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
             logTransaction(txId, transactionNames[code]!!, callingUid, callingPid, true)
 
@@ -186,8 +201,11 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         reply: Parcel?,
         resultCode: Int,
     ): TransactionResult {
-        if (target != keystoreService || reply == null || InterceptorUtils.hasException(reply))
-            return TransactionResult.SkipTransaction
+        if (target != keystoreService || reply == null) return TransactionResult.SkipTransaction
+
+        if (code == GET_KEY_ENTRY_TRANSACTION) return TransactionResult.SkipTransaction
+
+        if (InterceptorUtils.hasException(reply)) return TransactionResult.SkipTransaction
 
         if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
@@ -207,116 +225,6 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                         it,
                     )
                     TransactionResult.SkipTransaction
-                }
-        } else if (code == GET_KEY_ENTRY_TRANSACTION) {
-            data.enforceInterface(IKeystoreService.DESCRIPTOR)
-            val keyDescriptor =
-                data.readTypedObject(KeyDescriptor.CREATOR)
-                    ?: return TransactionResult.SkipTransaction
-
-            logTransaction(
-                txId,
-                "post-${transactionNames[code]!!} ${keyDescriptor.alias}",
-                callingUid,
-                callingPid,
-            )
-
-            runCatching {
-                    val response = reply.readTypedObject(KeyEntryResponse.CREATOR)!!
-                    val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
-
-                    val authorizations = response.metadata.authorizations
-                    val parsedParameters =
-                        KeyMintAttestation(
-                            authorizations?.map { it.keyParameter }?.toTypedArray() ?: emptyArray()
-                        )
-
-                    if (parsedParameters.isImportKey()) {
-                        SystemLogger.info("[TX_ID: $txId] Skip patching for imported keys.")
-                        return TransactionResult.SkipTransaction
-                    }
-
-                    if (parsedParameters.isAttestKey()) {
-                        SystemLogger.warning(
-                            "[TX_ID: $txId] Found hardware attest key ${keyId.alias} in the reply."
-                        )
-                        // Attest keys that are not under our control should be overriden.
-                        val keyData =
-                            CertificateGenerator.generateAttestedKeyPair(
-                                callingUid,
-                                keyId.alias,
-                                null,
-                                parsedParameters,
-                                response.metadata.keySecurityLevel,
-                            ) ?: throw Exception("Failed to create overriding attest key pair.")
-
-                        CertificateHelper.updateCertificateChain(
-                                callingUid,
-                                response.metadata,
-                                keyData.second.toTypedArray(),
-                            )
-                            .getOrThrow()
-
-                        val key = response.metadata.key!!
-                        key.nspace = SecureRandom().nextLong()
-                        KeyMintSecurityLevelInterceptor.generatedKeys[keyId] =
-                            KeyMintSecurityLevelInterceptor.GeneratedKeyInfo(
-                                keyData.first,
-                                key.nspace,
-                                response,
-                            )
-                        KeyMintSecurityLevelInterceptor.attestationKeys.add(keyId)
-                        return InterceptorUtils.createTypedObjectReply(response)
-                    }
-
-                    val originalChain = CertificateHelper.getCertificateChain(response)
-
-                    // Check if we should perform attestation patch.
-                    if (originalChain == null || originalChain.size < 2) {
-                        SystemLogger.info(
-                            "[TX_ID: $txId] Skip patching short certificate chain of length ${originalChain?.size}."
-                        )
-                        return TransactionResult.SkipTransaction
-                    }
-
-                    // First, try to retrieve the already-patched chain from our cache to ensure
-                    // consistency.
-                    val cachedChain = KeyMintSecurityLevelInterceptor.getPatchedChain(keyId)
-
-                    val finalChain: Array<Certificate>
-                    if (cachedChain != null) {
-                        SystemLogger.debug(
-                            "[TX_ID: $txId] Using cached patched certificate chain for $keyId."
-                        )
-                        finalChain = cachedChain
-                    } else {
-                        // If no chain is cached (e.g., key existed before simulator started),
-                        // perform a live patch as a fallback. This may still be detectable.
-                        SystemLogger.info(
-                            "[TX_ID: $txId] No cached chain for $keyId. Performing live patch as a fallback."
-                        )
-                        finalChain =
-                            AttestationPatcher.patchCertificateChain(originalChain, callingUid)
-
-                        KeyMintSecurityLevelInterceptor.patchedChains[keyId] = finalChain
-                        SystemLogger.debug("Cached patched certificate chain for $keyId.")
-                    }
-
-                    CertificateHelper.updateCertificateChain(
-                            callingUid,
-                            response.metadata,
-                            finalChain,
-                        )
-                        .getOrThrow()
-
-                    return InterceptorUtils.createTypedObjectReply(response)
-                }
-                .onFailure {
-                    SystemLogger.error(
-                        "[TX_ID: $txId] Failed to modify hardware KeyEntryResponse.",
-                        it,
-                    )
-                    return TransactionResult.SkipTransaction
                 }
         }
         return TransactionResult.SkipTransaction

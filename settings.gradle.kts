@@ -21,3 +21,7 @@ include(":stub")
 include(":app")
 
 include(":two-phone")
+
+include(":physical-harness")
+
+include(":rka-fixture")

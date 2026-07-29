@@ -5,7 +5,10 @@ plugins {
 
 kotlin { jvmToolchain(21) }
 
-dependencies { testImplementation(kotlin("test")) }
+dependencies {
+    testImplementation(kotlin("test"))
+    testImplementation(libs.bcpkix)
+}
 
 tasks.test {
     useJUnitPlatform()

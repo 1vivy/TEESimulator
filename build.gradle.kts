@@ -14,6 +14,8 @@ tasks.register<KtfmtFormatTask>("format") {
     dependsOn(":stub:ktfmtFormat")
     dependsOn(":app:ktfmtFormat")
     dependsOn(":two-phone:ktfmtFormat")
+    dependsOn(":physical-harness:ktfmtFormat")
+    dependsOn(":rka-fixture:ktfmtFormat")
 }
 
 ktfmt { kotlinLangStyle() }

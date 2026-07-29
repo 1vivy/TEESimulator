@@ -55,6 +55,13 @@ object InterceptorUtils {
         return BinderInterceptor.TransactionResult.OverrideReply(parcel)
     }
 
+    fun createExceptionReply(
+        failure: Exception
+    ): BinderInterceptor.TransactionResult.OverrideReply {
+        val parcel = Parcel.obtain().apply { writeException(failure) }
+        return BinderInterceptor.TransactionResult.OverrideReply(parcel)
+    }
+
     /** Creates an `OverrideReply` parcel containing a raw byte array. */
     fun createByteArrayReply(data: ByteArray): BinderInterceptor.TransactionResult.OverrideReply {
         val parcel =

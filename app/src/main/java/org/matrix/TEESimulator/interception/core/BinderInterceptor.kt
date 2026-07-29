@@ -3,6 +3,7 @@ package org.matrix.TEESimulator.interception.core
 import android.os.Binder
 import android.os.IBinder
 import android.os.Parcel
+import android.os.ParcelFileDescriptor
 import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.logging.SystemLogger
 
@@ -75,6 +76,22 @@ abstract class BinderInterceptor : Binder() {
         data: Parcel,
     ): TransactionResult = TransactionResult.ContinueAndSkipPost
 
+    internal open fun onPreTransactWithOriginDeath(
+        txId: Long,
+        target: IBinder,
+        code: Int,
+        flags: Int,
+        callingUid: Int,
+        callingPid: Int,
+        data: Parcel,
+        originDeathLease: OriginProcessDeathLease?,
+    ): TransactionResult =
+        try {
+            onPreTransact(txId, target, code, flags, callingUid, callingPid, data)
+        } finally {
+            originDeathLease?.close()
+        }
+
     /**
      * Called *after* the original binder transaction has been executed.
      *
@@ -132,6 +149,10 @@ abstract class BinderInterceptor : Binder() {
         val transactionFlags = data.readInt()
         val callingUid = data.readInt()
         val callingPid = data.readInt()
+        val originDeathLease =
+            if (data.readInt() == 1) {
+                data.readFileDescriptor()?.let(::ParcelFileDescriptorOriginProcessDeathLease)
+            } else null
         val dataSize = data.readLong()
 
         // We must create a new parcel containing only the original transaction data.
@@ -139,7 +160,7 @@ abstract class BinderInterceptor : Binder() {
         return try {
             transactionData.appendFrom(data, data.dataPosition(), dataSize.toInt())
             transactionData.setDataPosition(0)
-            onPreTransact(
+            onPreTransactWithOriginDeath(
                 txId,
                 target,
                 transactionCode,
@@ -147,8 +168,10 @@ abstract class BinderInterceptor : Binder() {
                 callingUid,
                 callingPid,
                 transactionData,
+                originDeathLease,
             )
         } finally {
+            originDeathLease?.close()
             transactionData.recycle()
         }
     }
@@ -160,6 +183,7 @@ abstract class BinderInterceptor : Binder() {
         val transactionFlags = data.readInt()
         val callingUid = data.readInt()
         val callingPid = data.readInt()
+        check(data.readInt() == 0) { "post-transaction callback cannot carry an origin pidfd" }
 
         // The native hook also marshals the original data and reply parcels.
         val transactionData = Parcel.obtain()
@@ -294,12 +318,18 @@ abstract class BinderInterceptor : Binder() {
         }
 
         /** Uses the backdoor binder to register an interceptor for a specific target service. */
-        fun register(backdoor: IBinder, target: IBinder, interceptor: BinderInterceptor) {
+        fun register(
+            backdoor: IBinder,
+            target: IBinder,
+            interceptor: BinderInterceptor,
+            originDeathTransactionCode: Int? = null,
+        ) {
             val data = Parcel.obtain()
             val reply = Parcel.obtain()
             try {
                 data.writeStrongBinder(target)
                 data.writeStrongBinder(interceptor)
+                data.writeInt(originDeathTransactionCode ?: NO_ORIGIN_DEATH_TRANSACTION)
                 backdoor.transact(REGISTER_INTERCEPTOR_CODE, data, reply, 0)
                 SystemLogger.info("Registered interceptor for target: $target")
             } catch (e: Exception) {
@@ -309,6 +339,8 @@ abstract class BinderInterceptor : Binder() {
                 reply.recycle()
             }
         }
+
+        private const val NO_ORIGIN_DEATH_TRANSACTION = -1
 
         /** Uses the backdoor binder to unregister an interceptor for a specific target service. */
         fun unregister(backdoor: IBinder, target: IBinder) {

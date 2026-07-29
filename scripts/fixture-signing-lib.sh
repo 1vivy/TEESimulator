@@ -15,7 +15,7 @@ fixture_close_stdin() {
   exec </dev/null
 }
 
-fixture_temporary_directory='' 
+fixture_temporary_directory=''
 
 fixture_create_temporary_directory() {
   fixture_temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/teesim-fixture.XXXXXX") ||

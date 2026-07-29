@@ -64,12 +64,25 @@ android {
             buildStagingDirectory = layout.buildDirectory.get().asFile
         }
     }
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+        unitTests.all {
+            it.testLogging {
+                events("passed", "skipped", "failed")
+                showStandardStreams = true
+            }
+        }
+    }
 }
 
 dependencies {
     compileOnly(project(":stub"))
     compileOnly(libs.annotation)
+    implementation(project(":two-phone"))
     implementation(libs.bcpkix)
+    testImplementation(project(":physical-harness"))
+    testImplementation(project(":stub"))
+    testImplementation(kotlin("test"))
 }
 
 androidComponents {

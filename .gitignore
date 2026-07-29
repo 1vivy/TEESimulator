@@ -5,3 +5,5 @@ local.properties
 .android-sdk/
 __pycache__/
 *.pyc
+/.omo/
+/.debug-journal.md

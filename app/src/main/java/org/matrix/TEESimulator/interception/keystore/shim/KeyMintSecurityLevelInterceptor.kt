@@ -1,8 +1,12 @@
 package org.matrix.TEESimulator.interception.keystore.shim
 
+import android.hardware.security.keymint.Algorithm
+import android.hardware.security.keymint.Digest
+import android.hardware.security.keymint.EcCurve
 import android.hardware.security.keymint.KeyOrigin
 import android.hardware.security.keymint.KeyParameter
 import android.hardware.security.keymint.KeyParameterValue
+import android.hardware.security.keymint.KeyPurpose
 import android.hardware.security.keymint.SecurityLevel
 import android.hardware.security.keymint.Tag
 import android.os.IBinder
@@ -16,25 +20,47 @@ import org.matrix.TEESimulator.attestation.AttestationPatcher
 import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.interception.core.BinderInterceptor
+import org.matrix.TEESimulator.interception.core.OriginProcessDeathLease
 import org.matrix.TEESimulator.interception.keystore.InterceptorUtils
 import org.matrix.TEESimulator.interception.keystore.KeyIdentifier
+import org.matrix.TEESimulator.interception.policy.FixtureInterceptionPolicy
+import org.matrix.TEESimulator.interception.policy.InterceptionDecision
+import org.matrix.TEESimulator.interception.policy.InterceptionMethod
+import org.matrix.TEESimulator.interception.policy.InterceptionRequest
+import org.matrix.TEESimulator.interception.policy.PolicyDigest
+import org.matrix.TEESimulator.interception.policy.PolicyEcCurve
+import org.matrix.TEESimulator.interception.policy.PolicyKeyAlgorithm
+import org.matrix.TEESimulator.interception.policy.PolicyPurpose
+import org.matrix.TEESimulator.interception.policy.PolicySecurityLevel
+import org.matrix.TEESimulator.interception.policy.PreParcelDecision
 import org.matrix.TEESimulator.logging.SystemLogger
-import org.matrix.TEESimulator.pki.CertificateGenerator
 import org.matrix.TEESimulator.pki.CertificateHelper
+import org.matrix.TEESimulator.twophone.RemoteGeneratedKey
+import org.matrix.TEESimulator.twophone.RemoteKeyGeneration
+import org.matrix.TEESimulator.twophone.RemoteNormalizedKeyLifecycle
+import org.matrix.TEESimulator.twophone.TargetSessionManagerHolder
+import org.matrix.TEESimulator.twophone.toWireCallerIdentity
 import org.matrix.TEESimulator.util.AndroidDeviceUtils
 
 /**
- * Intercepts calls to an `IKeystoreSecurityLevel` service (e.g., TEE or StrongBox). This is where
- * the core logic for key generation and import handling for modern Android resides.
+ * Intercepts calls to the TEE `IKeystoreSecurityLevel` service. The exact fixture policy runs
+ * before any transaction parcel is decoded.
  */
-class KeyMintSecurityLevelInterceptor(
+internal class KeyMintSecurityLevelInterceptor(
     private val original: IKeystoreSecurityLevel,
     private val securityLevel: Int,
+    private val interceptionPolicy: FixtureInterceptionPolicy,
+    private val remoteLifecycleFactory: ((InterceptionRequest) -> RemoteNormalizedKeyLifecycle)? =
+        null,
 ) : BinderInterceptor() {
+
+    internal val originDeathTransactionCode: Int
+        get() = CREATE_OPERATION_TRANSACTION
 
     // --- Data Structures for State Management ---
     data class GeneratedKeyInfo(
-        val keyPair: KeyPair,
+        val keyPair: KeyPair?,
+        val remoteKey: RemoteGeneratedKey?,
         val nspace: Long,
         val response: KeyEntryResponse,
     )
@@ -47,29 +73,77 @@ class KeyMintSecurityLevelInterceptor(
         callingUid: Int,
         callingPid: Int,
         data: Parcel,
-    ): TransactionResult {
-        val shouldSkip = ConfigurationManager.shouldSkipUid(callingUid)
+    ): TransactionResult =
+        handlePreTransact(txId, target, code, flags, callingUid, callingPid, data, null)
+
+    internal override fun onPreTransactWithOriginDeath(
+        txId: Long,
+        target: IBinder,
+        code: Int,
+        flags: Int,
+        callingUid: Int,
+        callingPid: Int,
+        data: Parcel,
+        originDeathLease: OriginProcessDeathLease?,
+    ): TransactionResult =
+        handlePreTransact(
+            txId,
+            target,
+            code,
+            flags,
+            callingUid,
+            callingPid,
+            data,
+            originDeathLease,
+        )
+
+    private fun handlePreTransact(
+        txId: Long,
+        target: IBinder,
+        code: Int,
+        flags: Int,
+        callingUid: Int,
+        callingPid: Int,
+        data: Parcel,
+        originDeathLease: OriginProcessDeathLease?,
+    ): TransactionResult =
+        try {
+        val policyRequest =
+            InterceptionRequest(
+                callingUid = callingUid,
+                callingPid = callingPid,
+                method = policyMethod(code),
+                securityLevel = policySecurityLevel(),
+            )
+        if (interceptionPolicy.beforeParcel(policyRequest) == PreParcelDecision.PLATFORM) {
+            logTransaction(
+                txId,
+                transactionNames[code] ?: "unknown code=$code",
+                callingUid,
+                callingPid,
+                true,
+            )
+            return if (code == IMPORT_KEY_TRANSACTION) {
+                TransactionResult.Continue
+            } else {
+                TransactionResult.ContinueAndSkipPost
+            }
+        }
 
         when (code) {
             GENERATE_KEY_TRANSACTION -> {
                 logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
-
-                if (!shouldSkip) return handleGenerateKey(callingUid, data)
+                return handleGenerateKey(callingUid, data, policyRequest)
             }
             CREATE_OPERATION_TRANSACTION -> {
                 logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
-
-                if (!shouldSkip) return handleCreateOperation(txId, callingUid, data)
-            }
-            IMPORT_KEY_TRANSACTION -> {
-                logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
-
-                data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
-                SystemLogger.info(
-                    "[TX_ID: $txId] Forward to post-importKey hook for ${keyDescriptor.alias}[${keyDescriptor.nspace}]"
+                return handleCreateOperation(
+                    txId,
+                    callingUid,
+                    data,
+                    policyRequest,
+                    originDeathLease,
                 )
-                return TransactionResult.Continue
             }
         }
 
@@ -82,7 +156,9 @@ class KeyMintSecurityLevelInterceptor(
         )
 
         return TransactionResult.ContinueAndSkipPost
-    }
+        } finally {
+            originDeathLease?.close()
+        }
 
     override fun onPostTransact(
         txId: Long,
@@ -180,13 +256,15 @@ class KeyMintSecurityLevelInterceptor(
 
     /**
      * Handles the `createOperation` transaction. It checks if the operation is for a key that was
-     * generated in software. If so, it creates a software-based operation handler. Otherwise, it
-     * lets the call proceed to the real hardware service.
+     * generated by the approved remote lifecycle. If so, it creates a typed remote operation
+     * handler. Otherwise, it lets the call proceed to the real hardware service.
      */
     private fun handleCreateOperation(
         txId: Long,
         callingUid: Int,
         data: Parcel,
+        policyRequest: InterceptionRequest,
+        originDeathLease: OriginProcessDeathLease?,
     ): TransactionResult {
         data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
         val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
@@ -198,21 +276,58 @@ class KeyMintSecurityLevelInterceptor(
 
         val nspace = keyDescriptor.nspace
         val generatedKeyInfo = findGeneratedKeyByKeyId(callingUid, nspace)
+        val platformContinuation = createOperationContinuationFor(generatedKeyInfo)
 
-        if (generatedKeyInfo == null) {
+        if (platformContinuation != null) {
             SystemLogger.debug(
                 "[TX_ID: $txId] Operation for unknown/hardware KeyId ($nspace). Forwarding."
             )
-            return TransactionResult.Continue
+            return platformContinuation
         }
-
-        SystemLogger.info("[TX_ID: $txId] Creating SOFTWARE operation for KeyId $nspace.")
+        val interceptedKeyInfo = checkNotNull(generatedKeyInfo)
 
         val params = data.createTypedArray(KeyParameter.CREATOR)!!
         val parsedParams = KeyMintAttestation(params)
+        val keyParams =
+            KeyMintAttestation(
+                interceptedKeyInfo.response.metadata.authorizations
+                    ?.map { it.keyParameter }
+                    ?.toTypedArray() ?: emptyArray()
+            )
+        val completeRequest =
+            policyRequest
+                .withKeyShape(keyParams)
+                .copy(
+                    digests = parsedParams.digest.mapTo(mutableSetOf(), ::policyDigest),
+                    purposes = parsedParams.purpose.mapTo(mutableSetOf(), ::policyPurpose),
+                )
+        if (interceptionPolicy.decide(completeRequest) != InterceptionDecision.REMOTE) {
+            return TransactionResult.ContinueAndSkipPost
+        }
+        val remoteKey = interceptedKeyInfo.remoteKey ?: return TransactionResult.ContinueAndSkipPost
+        val requiredOriginDeathLease =
+            originDeathLease
+                ?: return InterceptorUtils.createExceptionReply(
+                    IllegalStateException("selected remote operation is missing its origin pidfd")
+                )
 
-        val softwareOperation = SoftwareOperation(txId, generatedKeyInfo.keyPair, parsedParams)
-        val operationBinder = SoftwareOperationBinder(softwareOperation)
+        SystemLogger.info("[TX_ID: $txId] Creating remote operation for KeyId $nspace.")
+
+        val operationBinder =
+            runCatching {
+                    checkNotNull(
+                        createSelectedRemoteOperation(
+                            completeRequest,
+                            remoteKey,
+                            requiredOriginDeathLease,
+                        )
+                    )
+                }
+                .getOrElse { failure ->
+                    return InterceptorUtils.createExceptionReply(
+                        if (failure is Exception) failure else IllegalStateException(failure)
+                    )
+                }
 
         val response =
             CreateOperationResponse().apply {
@@ -225,9 +340,14 @@ class KeyMintSecurityLevelInterceptor(
 
     /**
      * Handles the `generateKey` transaction. Based on the configuration for the calling UID, it
-     * either generates a key in software or lets the call pass through to the hardware.
+     * either generates a key through the approved remote lifecycle or lets the call pass through to
+     * the hardware.
      */
-    private fun handleGenerateKey(callingUid: Int, data: Parcel): TransactionResult {
+    private fun handleGenerateKey(
+        callingUid: Int,
+        data: Parcel,
+        policyRequest: InterceptionRequest,
+    ): TransactionResult {
         return runCatching {
                 data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
                 val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
@@ -237,45 +357,52 @@ class KeyMintSecurityLevelInterceptor(
                 )
                 val params = data.createTypedArray(KeyParameter.CREATOR)!!
                 val parsedParams = KeyMintAttestation(params)
+                val completeRequest = policyRequest.withKeyShape(parsedParams)
+                if (interceptionPolicy.decide(completeRequest) != InterceptionDecision.REMOTE) {
+                    return TransactionResult.ContinueAndSkipPost
+                }
                 val isAttestKeyRequest = parsedParams.isAttestKey()
 
                 // Determine if we need to generate a key based on config or
                 // if it's an attestation request in patch mode.
-                val needsSoftwareGeneration =
+                val needsRemoteGeneration =
                     ConfigurationManager.shouldGenerate(callingUid) ||
                         (ConfigurationManager.shouldPatch(callingUid) && isAttestKeyRequest) ||
                         (attestationKey != null &&
                             isAttestationKey(KeyIdentifier(callingUid, attestationKey.alias)))
 
-                if (needsSoftwareGeneration) {
+                if (
+                    needsRemoteGeneration &&
+                        attestationKey == null &&
+                        parsedParams.attestationChallenge?.isNotEmpty() == true
+                ) {
                     keyDescriptor.nspace = secureRandom.nextLong()
                     SystemLogger.info(
-                        "Generating software key for ${keyDescriptor.alias}[${keyDescriptor.nspace}]."
+                        "Generating remote key for ${keyDescriptor.alias}[${keyDescriptor.nspace}]."
                     )
 
-                    // Generate the key pair and certificate chain.
-                    val keyData =
-                        CertificateGenerator.generateAttestedKeyPair(
-                            callingUid,
-                            keyDescriptor.alias,
-                            attestationKey?.alias,
-                            parsedParams,
-                            securityLevel,
-                        ) ?: throw Exception("CertificateGenerator failed to create key pair.")
+                    val remoteKey =
+                        checkNotNull(
+                            generateSelectedRemoteKey(
+                                completeRequest,
+                                RemoteKeyGeneration(
+                                    keyDescriptor.alias,
+                                    checkNotNull(parsedParams.attestationChallenge),
+                                ),
+                            )
+                        )
 
                     val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
-                    // It is unnecessary but a good practice to clean up possible caches
                     cleanupKeyData(keyId)
-                    // Store the generated key data.
                     val response =
                         buildKeyEntryResponse(
                             callingUid,
-                            keyData.second,
+                            remoteCertificateChain(remoteKey),
                             parsedParams,
                             keyDescriptor,
                         )
                     generatedKeys[keyId] =
-                        GeneratedKeyInfo(keyData.first, keyDescriptor.nspace, response)
+                        GeneratedKeyInfo(null, remoteKey, keyDescriptor.nspace, response)
                     if (isAttestKeyRequest) attestationKeys.add(keyId)
 
                     // Return the metadata of our generated key, skipping the real hardware call.
@@ -287,10 +414,69 @@ class KeyMintSecurityLevelInterceptor(
                 }
             }
             .getOrElse {
-                SystemLogger.error("No key pair generated for UID $callingUid.", it)
-                TransactionResult.ContinueAndSkipPost
+                SystemLogger.error("Remote key generation failed for UID $callingUid.", it)
+                InterceptorUtils.createExceptionReply(
+                    if (it is Exception) it else IllegalStateException(it)
+                )
             }
     }
+
+    private fun remoteLifecycle(request: InterceptionRequest): RemoteNormalizedKeyLifecycle {
+        val fixture =
+            checkNotNull(interceptionPolicy.remoteFixtureIdentity(request)) {
+                "remote fixture admission changed during generation"
+            }
+        val session =
+            TargetSessionManagerHolder.getOrCreate(fixture, fixture.toWireCallerIdentity())
+        return RemoteNormalizedKeyLifecycle(session)
+    }
+
+    internal fun generateSelectedRemoteKey(
+        request: InterceptionRequest,
+        generation: RemoteKeyGeneration,
+    ): RemoteGeneratedKey? {
+        if (interceptionPolicy.decide(request) != InterceptionDecision.REMOTE) return null
+        return selectedRemoteLifecycle(request).generate(generation)
+    }
+
+    internal fun createSelectedRemoteOperation(
+        request: InterceptionRequest,
+        remoteKey: RemoteGeneratedKey,
+        originDeathLease: OriginProcessDeathLease,
+    ): IKeystoreOperation? {
+        if (interceptionPolicy.decide(request) != InterceptionDecision.REMOTE) return null
+        return RemoteSigningOperationBinder(
+            selectedRemoteLifecycle(request).begin(remoteKey),
+            originDeathLease,
+        )
+    }
+
+    private fun selectedRemoteLifecycle(
+        request: InterceptionRequest
+    ): RemoteNormalizedKeyLifecycle =
+        remoteLifecycleFactory?.invoke(request) ?: remoteLifecycle(request)
+
+    private fun remoteCertificateChain(remoteKey: RemoteGeneratedKey): List<Certificate> =
+        remoteKey.metadata.certificateChain
+            .map { encoded ->
+                (CertificateHelper.toCertificate(encoded)
+                        as? CertificateHelper.OperationResult.Success)
+                    ?.data
+                    ?: throw IllegalStateException(
+                        "remote response contained an invalid certificate"
+                    )
+            }
+            .also { certificates ->
+                require(
+                    certificates
+                        .first()
+                        .publicKey
+                        .encoded
+                        .contentEquals(remoteKey.metadata.publicKey)
+                ) {
+                    "remote response public key did not match its leaf certificate"
+                }
+            }
 
     /**
      * Constructs a fake `KeyEntryResponse` that mimics a real response from the Keystore service.
@@ -348,6 +534,14 @@ class KeyMintSecurityLevelInterceptor(
                 .associate { field -> (field.get(null) as Int) to field.name.split("_")[1] }
         }
 
+        private fun policyMethod(code: Int): InterceptionMethod =
+            when (code) {
+                GENERATE_KEY_TRANSACTION -> InterceptionMethod.GENERATE_KEY
+                CREATE_OPERATION_TRANSACTION -> InterceptionMethod.CREATE_OPERATION
+                IMPORT_KEY_TRANSACTION -> InterceptionMethod.IMPORT_KEY
+                else -> InterceptionMethod.UNKNOWN
+            }
+
         // Stores keys generated entirely in software.
         val generatedKeys = ConcurrentHashMap<KeyIdentifier, GeneratedKeyInfo>()
         // A set to quickly identify keys that were generated for attestation purposes.
@@ -369,7 +563,7 @@ class KeyMintSecurityLevelInterceptor(
          * @param nspace The unique key identifier from the operation's KeyDescriptor.
          * @return The matching GeneratedKeyInfo if found, otherwise null.
          */
-        fun findGeneratedKeyByKeyId(callingUid: Int, nspace: Long?): GeneratedKeyInfo? {
+        internal fun findGeneratedKeyByKeyId(callingUid: Int, nspace: Long?): GeneratedKeyInfo? {
             // Iterate through all entries in the map to check both the key (for UID) and value (for
             // nspace).
             if (nspace == null || nspace == 0L) return null
@@ -378,6 +572,10 @@ class KeyMintSecurityLevelInterceptor(
                 .find { (_, info) -> info.nspace == nspace }
                 ?.value
         }
+
+        internal fun createOperationContinuationFor(
+            generatedKeyInfo: GeneratedKeyInfo?
+        ): TransactionResult? = if (generatedKeyInfo == null) TransactionResult.Continue else null
 
         fun getPatchedChain(keyId: KeyIdentifier): Array<Certificate>? = patchedChains[keyId]
 
@@ -414,6 +612,52 @@ class KeyMintSecurityLevelInterceptor(
             SystemLogger.info("Cleared all cached keys ($count entries)$reasonMessage.")
         }
     }
+
+    private fun policySecurityLevel(): PolicySecurityLevel =
+        when (securityLevel) {
+            SecurityLevel.TRUSTED_ENVIRONMENT -> PolicySecurityLevel.TRUSTED_ENVIRONMENT
+            SecurityLevel.STRONGBOX -> PolicySecurityLevel.STRONGBOX
+            SecurityLevel.SOFTWARE -> PolicySecurityLevel.SOFTWARE
+            else -> PolicySecurityLevel.UNKNOWN
+        }
+
+    private fun InterceptionRequest.withKeyShape(params: KeyMintAttestation): InterceptionRequest =
+        copy(
+            algorithm =
+                when (params.algorithm) {
+                    Algorithm.EC -> PolicyKeyAlgorithm.EC
+                    Algorithm.RSA -> PolicyKeyAlgorithm.RSA
+                    else -> PolicyKeyAlgorithm.UNKNOWN
+                },
+            curve =
+                when (params.ecCurve) {
+                    EcCurve.P_256 -> PolicyEcCurve.P256
+                    EcCurve.P_384 -> PolicyEcCurve.P384
+                    EcCurve.P_521 -> PolicyEcCurve.P521
+                    EcCurve.CURVE_25519 -> PolicyEcCurve.CURVE25519
+                    else -> PolicyEcCurve.UNKNOWN
+                },
+            digests = params.digest.mapTo(mutableSetOf(), ::policyDigest),
+            purposes = params.purpose.mapTo(mutableSetOf(), ::policyPurpose),
+        )
+
+    private fun policyDigest(digest: Int): PolicyDigest =
+        when (digest) {
+            Digest.SHA_2_256 -> PolicyDigest.SHA256
+            Digest.SHA_2_512 -> PolicyDigest.SHA512
+            Digest.NONE -> PolicyDigest.NONE
+            else -> PolicyDigest.UNKNOWN
+        }
+
+    private fun policyPurpose(purpose: Int): PolicyPurpose =
+        when (purpose) {
+            KeyPurpose.SIGN -> PolicyPurpose.SIGN
+            KeyPurpose.VERIFY -> PolicyPurpose.VERIFY
+            KeyPurpose.ENCRYPT -> PolicyPurpose.ENCRYPT
+            KeyPurpose.DECRYPT -> PolicyPurpose.DECRYPT
+            KeyPurpose.ATTEST_KEY -> PolicyPurpose.ATTEST_KEY
+            else -> PolicyPurpose.UNKNOWN
+        }
 }
 
 /**

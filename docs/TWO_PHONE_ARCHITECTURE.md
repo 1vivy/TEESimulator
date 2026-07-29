@@ -27,17 +27,30 @@ parcels. A transport interface hides mutually pinned TLS identities. Session
 establishment binds the target/server pins, a 256-bit client nonce, and a
 256-bit server nonce into a session ID.
 
-Each direction has an independent, exact unsigned 64-bit sequence beginning at
-zero. Every request includes the protocol version, session ID, both nonces,
-sequence, random 128-bit request ID, SHA-256 canonical-body hash, typed method,
-and bounded absolute deadline. Bodies use deterministic length-prefixed fields
-sorted by name with field-count, name, value, and total-size bounds.
+`Envelope` and `CanonicalBody` remain the legacy host-foundation model;
+`CanonicalBody` uses sorted name/value fields. The normalized V1 transport uses
+the separate typed fixed-schema request and result payloads. Its fields have
+explicit numeric tags, deterministic big-endian encoding, exact bounds, and a
+hard 2 MiB frame cap. It does not encode Binder parcels or arbitrary field
+names.
 
-The receiver rejects old sessions, duplicates, gaps, exhausted sequences,
-expired deadlines, wrong pairs, invalid body hashes, copied handles, wrong
-callers, and request-ID reuse with a changed body. A completed request ID with
-the same body hash returns its cached response without re-executing the donor
-operation.
+Target-to-donor requests have one exact unsigned 64-bit sequence beginning at
+zero. Every request includes the protocol version, derived session ID, both
+nonces, sequence, random 128-bit request ID, typed-payload hash, typed method,
+stable caller identity, and bounded absolute deadline. Responses do not have a
+second sequence: they carry the trusted session ID and request ID and are
+accepted only through a stateful target correlator. The target registers each
+outgoing request, validates response version/session/request ID/method, and
+atomically consumes a matching response once. Parsing a response frame alone
+does not establish correlation.
+
+The donor rejects old sessions or nonces, duplicates, gaps, exhausted
+sequences, expired or overlong deadlines, wrong pairs, invalid payload hashes,
+wrong callers, and request-ID reuse with a changed authenticated request. An
+exact completed request-ID replay returns its cached response without
+re-executing donor state. Persistent generation/deletion ID conflicts and
+operation-step conflicts use `REPLAY_CONFLICT`; invalid key and operation
+handles use distinct stable errors.
 
 Errors are typed at protocol, donor, and routing boundaries. They are not raw
 KeyMint or Binder status parcels.
@@ -54,15 +67,19 @@ and:
 
 `QUARANTINED` is terminal pending explicit operator reconciliation.
 
-Operations use:
+V1 operations model only EC-P256/SHA-256 `SIGN`:
 
-`BEGUN → AAD → DATA → FINISHING → FINISHED`
+`BEGUN → DATA → FINISHING → FINISHED`
 
-with `ABORTED` for explicit cancellation. Any nonterminal operation found
-after donor restart becomes `LOST`; it is never silently resumed. Target
-restart reconciles its handle states from donor metadata. Alias replacement
-supersedes the old opaque handle before activating the replacement, and delete
-is idempotent.
+`UPDATE` appends each chunk and returns no output; `FINISH` is the only method
+that returns the signature. `UPDATE_AAD` keeps its reserved typed wire shape for
+future versions but is unsupported for V1 `SIGN`: it aborts the live operation,
+caches that typed error for exact step replay, and makes later steps invalid.
+`ABORTED` also represents explicit cancellation. Any nonterminal operation
+found after donor restart becomes `LOST`; it is never silently resumed. Target
+restart reconciles its handle states from complete donor public metadata.
+Alias replacement supersedes the old opaque handle before activating the
+replacement, and delete is idempotent.
 
 ## Routing boundary
 

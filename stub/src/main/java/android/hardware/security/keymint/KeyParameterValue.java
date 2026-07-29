@@ -33,202 +33,253 @@ public final class KeyParameterValue implements Parcelable {
         }
     };
 
-    public KeyParameterValue() {
-        throw new UnsupportedOperationException("STUB!");
-    }
+    private int tag = invalid;
+    private Object value = 0;
+
+    public KeyParameterValue() {}
 
     protected KeyParameterValue(Parcel in) {
         throw new UnsupportedOperationException("STUB!");
     }
 
     public static KeyParameterValue invalid(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        KeyParameterValue result = new KeyParameterValue();
+        result.setInvalid(_value);
+        return result;
     }
 
     public static KeyParameterValue algorithm(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        KeyParameterValue result = new KeyParameterValue();
+        result.setAlgorithm(_value);
+        return result;
     }
 
     public static KeyParameterValue blockMode(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        KeyParameterValue result = new KeyParameterValue();
+        result.setBlockMode(_value);
+        return result;
     }
 
     public static KeyParameterValue paddingMode(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        KeyParameterValue result = new KeyParameterValue();
+        result.setPaddingMode(_value);
+        return result;
     }
 
     public static KeyParameterValue digest(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        KeyParameterValue result = new KeyParameterValue();
+        result.setDigest(_value);
+        return result;
     }
 
     public static KeyParameterValue ecCurve(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        KeyParameterValue result = new KeyParameterValue();
+        result.setEcCurve(_value);
+        return result;
     }
 
     public static KeyParameterValue origin(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        KeyParameterValue result = new KeyParameterValue();
+        result.setOrigin(_value);
+        return result;
     }
 
     public static KeyParameterValue keyPurpose(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        KeyParameterValue result = new KeyParameterValue();
+        result.setKeyPurpose(_value);
+        return result;
     }
 
     public static KeyParameterValue hardwareAuthenticatorType(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        KeyParameterValue result = new KeyParameterValue();
+        result.setHardwareAuthenticatorType(_value);
+        return result;
     }
 
     public static KeyParameterValue securityLevel(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        KeyParameterValue result = new KeyParameterValue();
+        result.setSecurityLevel(_value);
+        return result;
     }
 
     public static KeyParameterValue boolValue(boolean _value) {
-        throw new UnsupportedOperationException("STUB!");
+        KeyParameterValue result = new KeyParameterValue();
+        result.setBoolValue(_value);
+        return result;
     }
 
     public static KeyParameterValue integer(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        KeyParameterValue result = new KeyParameterValue();
+        result.setInteger(_value);
+        return result;
     }
 
     public static KeyParameterValue longInteger(long _value) {
-        throw new UnsupportedOperationException("STUB!");
+        KeyParameterValue result = new KeyParameterValue();
+        result.setLongInteger(_value);
+        return result;
     }
 
     public static KeyParameterValue dateTime(long _value) {
-        throw new UnsupportedOperationException("STUB!");
+        KeyParameterValue result = new KeyParameterValue();
+        result.setDateTime(_value);
+        return result;
     }
 
     public static KeyParameterValue blob(byte[] _value) {
-        throw new UnsupportedOperationException("STUB!");
+        KeyParameterValue result = new KeyParameterValue();
+        result.setBlob(_value);
+        return result;
     }
 
     public int getTag() {
-        throw new UnsupportedOperationException("STUB!");
+        return tag;
     }
 
     public int getInvalid() {
-        throw new UnsupportedOperationException("STUB!");
+        return intValue(invalid);
     }
 
     public void setInvalid(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        set(invalid, _value);
     }
 
     public int getAlgorithm() {
-        throw new UnsupportedOperationException("STUB!");
+        return intValue(algorithm);
     }
 
     public void setAlgorithm(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        set(algorithm, _value);
     }
 
     public int getBlockMode() {
-        throw new UnsupportedOperationException("STUB!");
+        return intValue(blockMode);
     }
 
     public void setBlockMode(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        set(blockMode, _value);
     }
 
     public int getPaddingMode() {
-        throw new UnsupportedOperationException("STUB!");
+        return intValue(paddingMode);
     }
 
     public void setPaddingMode(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        set(paddingMode, _value);
     }
 
     public int getDigest() {
-        throw new UnsupportedOperationException("STUB!");
+        return intValue(digest);
     }
 
     public void setDigest(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        set(digest, _value);
     }
 
     public int getEcCurve() {
-        throw new UnsupportedOperationException("STUB!");
+        return intValue(ecCurve);
     }
 
     public void setEcCurve(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        set(ecCurve, _value);
     }
 
     public int getOrigin() {
-        throw new UnsupportedOperationException("STUB!");
+        return intValue(origin);
     }
 
     public void setOrigin(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        set(origin, _value);
     }
 
     public int getKeyPurpose() {
-        throw new UnsupportedOperationException("STUB!");
+        return intValue(keyPurpose);
     }
 
     public void setKeyPurpose(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        set(keyPurpose, _value);
     }
 
     public int getHardwareAuthenticatorType() {
-        throw new UnsupportedOperationException("STUB!");
+        return intValue(hardwareAuthenticatorType);
     }
 
     public void setHardwareAuthenticatorType(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        set(hardwareAuthenticatorType, _value);
     }
 
     public int getSecurityLevel() {
-        throw new UnsupportedOperationException("STUB!");
+        return intValue(securityLevel);
     }
 
     public void setSecurityLevel(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        set(securityLevel, _value);
     }
 
     public boolean getBoolValue() {
-        throw new UnsupportedOperationException("STUB!");
+        requireTag(boolValue);
+        return (Boolean) value;
     }
 
     public void setBoolValue(boolean _value) {
-        throw new UnsupportedOperationException("STUB!");
+        set(boolValue, _value);
     }
 
     public int getInteger() {
-        throw new UnsupportedOperationException("STUB!");
+        return intValue(integer);
     }
 
     public void setInteger(int _value) {
-        throw new UnsupportedOperationException("STUB!");
+        set(integer, _value);
     }
 
     public long getLongInteger() {
-        throw new UnsupportedOperationException("STUB!");
+        requireTag(longInteger);
+        return (Long) value;
     }
 
     public void setLongInteger(long _value) {
-        throw new UnsupportedOperationException("STUB!");
+        set(longInteger, _value);
     }
 
     public long getDateTime() {
-        throw new UnsupportedOperationException("STUB!");
+        requireTag(dateTime);
+        return (Long) value;
     }
 
     public void setDateTime(long _value) {
-        throw new UnsupportedOperationException("STUB!");
+        set(dateTime, _value);
     }
 
     public byte[] getBlob() {
-        throw new UnsupportedOperationException("STUB!");
+        requireTag(blob);
+        return ((byte[]) value).clone();
     }
 
     public void setBlob(byte[] _value) {
-        throw new UnsupportedOperationException("STUB!");
+        set(blob, _value.clone());
+    }
+
+    private int intValue(int expectedTag) {
+        requireTag(expectedTag);
+        return (Integer) value;
+    }
+
+    private void requireTag(int expectedTag) {
+        if (tag != expectedTag) {
+            throw new IllegalStateException("bad access: " + expectedTag + ", " + tag + " is available");
+        }
+    }
+
+    private void set(int newTag, Object newValue) {
+        tag = newTag;
+        value = newValue;
     }
 
 
     @Override
     public int describeContents() {
-        throw new UnsupportedOperationException("STUB!");
+        return 0;
     }
 
     @Override

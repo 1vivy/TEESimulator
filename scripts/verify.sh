@@ -15,9 +15,23 @@ pass() { printf 'PASS %s\n' "$*"; }
 
 python3 -m unittest discover -s tests -p 'test_*.py'
 pass unit-safety
-./gradlew --no-daemon :two-phone:test :two-phone:ktfmtCheck
-pass two-phone-host-tests
-bash -n module/service.sh module/action.sh module/customize.sh scripts/probe-api36.sh
+./gradlew --no-daemon \
+  :app:testDebugUnitTest \
+  :two-phone:test :two-phone:ktfmtCheck \
+  :physical-harness:test :physical-harness:ktfmtCheck \
+  :physical-harness:lintDebug :physical-harness:assembleRelease
+pass current-module-tests-format-lint-release
+project_listing=$(./gradlew --no-daemon -q projects)
+if scripts/g0-guards.sh project-list-has ':rka-fixture' <<<"$project_listing"; then
+  ./gradlew --no-daemon \
+    :rka-fixture:testDebugUnitTest :rka-fixture:ktfmtCheck \
+    :rka-fixture:lintDebug :rka-fixture:assembleRelease
+  pass rka-fixture-tests-format-lint-release
+fi
+bash -n module/service.sh module/action.sh module/customize.sh scripts/probe-api36.sh scripts/probe-api36-lib.sh scripts/g0-guards.sh \
+  scripts/fixture-signing-lib.sh scripts/bootstrap-fixture-signer.sh scripts/sign-fixture-release-apk.sh \
+  scripts/verify-fixture-apk.sh scripts/create-fixture-provenance.sh scripts/sign-fixture-provenance.sh \
+  scripts/verify-fixture-provenance.sh
 pass shell-parser
 
 [[ -f LICENSE ]] && grep -Fq 'GNU GENERAL PUBLIC LICENSE' LICENSE || fail gpl-license
@@ -25,23 +39,7 @@ pass shell-parser
 GIT_MASTER=1 git merge-base --is-ancestor 150a476 HEAD || fail upstream-history
 pass gpl-provenance
 
-[[ ! -e module/keybox.xml ]] || fail bundled-keybox
-if GIT_MASTER=1 git grep -IEn '(BEGIN (RSA |EC |)PRIVATE KEY|<Keybox|remote_provisioning.+(csr|certify))' \
-  -- app module profiles scripts ':!scripts/verify.sh'; then
-  fail secret-or-forbidden-rkp
-fi
-if GIT_MASTER=1 git grep -IEn 'ro\\.(serialno|boot\\.serialno)|getprop.*(serial|fingerprint)|adb devices -l' \
-  -- scripts tests profiles module ':!scripts/verify.sh'; then
-  fail device-identifier-collection
-fi
-if GIT_MASTER=1 git grep -IEn '(android\\.os\\.Parcel|android\\.os\\.IBinder)' -- two-phone; then
-  fail raw-binder-cross-device-protocol
-fi
-if GIT_MASTER=1 git grep -IEn '(privateKey|donorAlias)' -- \
-  two-phone/src/main/kotlin/org/matrix/teesimulator/twophone/Protocol.kt \
-  two-phone/src/main/kotlin/org/matrix/teesimulator/twophone/Routing.kt; then
-  fail target-protocol-custody
-fi
+scripts/g0-guards.sh source "$PWD"
 pass secret-network-identifier-scan
 
 ./gradlew --no-daemon clean :two-phone:build :app:zipRelease
@@ -49,9 +47,7 @@ short_commit=$(GIT_MASTER=1 git rev-parse --short HEAD)
 artifact=$(find out -maxdepth 1 -type f -name "TEESimulator-v0.1.0-probe.1-*-${short_commit}-Release.zip" -print -quit)
 [[ -n "$artifact" ]] || fail module-package
 zipinfo -1 "$artifact" | grep -Fxq action.sh || fail package-action
-if zipinfo -1 "$artifact" | grep -Eq '(^|/)(keybox\\.xml|target\\.txt|sepolicy\\.rule)$'; then
-  fail unsafe-package-content
-fi
+scripts/g0-guards.sh package "$artifact"
 pass arm64-build-module-package
 
 tmpdir=$(mktemp -d)

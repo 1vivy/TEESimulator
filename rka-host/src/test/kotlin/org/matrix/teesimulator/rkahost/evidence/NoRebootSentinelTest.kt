@@ -1,6 +1,5 @@
 package org.matrix.teesimulator.rkahost.evidence
 
-import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -14,7 +13,8 @@ class NoRebootSentinelTest {
     @Test
     fun stable_stream_is_valid() {
         // Given: serial-redacted, contiguous donor samples with one exact service identity.
-        val sentinel = NoRebootSentinel("serial-A", EndpointRole.DONOR, "profile-A")
+        val sentinel =
+            NoRebootSentinel("serial-A", EndpointRole.DONOR, "profile-A", MonotonicClock { 2_000 })
 
         // When: a synthetic stream stays on the same boot, properties, and service.
         val receipt =
@@ -134,12 +134,5 @@ class NoRebootSentinelTest {
         boot: String = "boot-A",
         properties: Map<String, String> = this.properties,
         forbidden: Set<Int> = emptySet(),
-    ) =
-        SentinelSample(
-            boot,
-            uptime,
-            properties,
-            forbidden,
-            Instant.ofEpochMilli(1_700_000_000_000L + uptime),
-        )
+    ) = SentinelSample(boot, uptime, properties, forbidden, uptime)
 }

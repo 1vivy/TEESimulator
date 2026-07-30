@@ -2,7 +2,6 @@ package org.matrix.teesimulator.rkahost.evidence
 
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
-import java.time.Instant
 import java.util.Base64
 
 enum class EndpointRole {
@@ -38,11 +37,12 @@ data class SentinelSample(
     val uptimeMillis: Long,
     val donorProperties: Map<String, String>,
     val forbiddenProcessPids: Set<Int>,
-    val observedAt: Instant,
+    val observedAtMillis: Long,
 ) {
     init {
         require(bootId.matches(Regex("[A-Za-z0-9._-]{1,128}"))) { "BOOT_ID_INVALID" }
         require(uptimeMillis >= 0) { "UPTIME_INVALID" }
+        require(observedAtMillis >= 0) { "OBSERVED_AT_INVALID" }
         require(forbiddenProcessPids.all { it > 0 }) { "FORBIDDEN_PID_INVALID" }
     }
 }
@@ -99,6 +99,10 @@ data class SentinelReceipt(
     val bootId: String,
     val headUptimeMillis: Long,
     val tailUptimeMillis: Long,
+    val headObservedAtMillis: Long,
+    val tailObservedAtMillis: Long,
+    val assertedAtMillis: Long,
+    val sampleChainHash: String,
     val sampleCount: Int,
     val service: ServiceIdentity,
     val propertyNames: List<String>,
@@ -114,6 +118,10 @@ data class SentinelReceipt(
                 bootId,
                 headUptimeMillis,
                 tailUptimeMillis,
+                headObservedAtMillis,
+                tailObservedAtMillis,
+                assertedAtMillis,
+                sampleChainHash,
                 sampleCount,
                 service.canonical(),
                 propertyNames.joinToString(","),
@@ -127,9 +135,18 @@ enum class Violation {
     BOOT_ID_DRIFT,
     UPTIME_NOT_INCREASING,
     SAMPLE_GAP,
+    OBSERVATION_NOT_INCREASING,
+    OBSERVATION_GAP,
+    CLOCK_DRIFT,
+    INSUFFICIENT_SAMPLES,
+    STALE_ASSERTION,
     PROPERTY_HASH_DRIFT,
     FORBIDDEN_PROCESS,
     UNAPPROVED_SERVICE_RESTART,
+}
+
+fun interface MonotonicClock {
+    fun nowMillis(): Long
 }
 
 class SentinelViolation(val violation: Violation) :

@@ -4,12 +4,14 @@ class NoRebootSentinel(
     serial: String,
     private val role: EndpointRole,
     private val profileId: String,
+    private val clock: MonotonicClock = MonotonicClock { System.nanoTime() / 1_000_000L },
 ) {
     private val serialHash = EvidenceHash.sha256(serial)
     private var first: SentinelSample? = null
     private var previous: SentinelSample? = null
     private var service: ServiceIdentity? = null
     private var count = 0
+    private var sampleChainHash = EvidenceHash.sha256("sentinel-sample-chain-v1")
 
     init {
         require(serial.matches(Regex("[A-Za-z0-9._:-]{1,128}"))) { "SERIAL_INVALID" }
@@ -26,14 +28,21 @@ class NoRebootSentinel(
             previous = sample
             service = identity
             count = 1
+            appendSample(sample, identity)
             return this
         }
         val last = checkNotNull(previous)
         if (sample.bootId != established.bootId) throw SentinelViolation(Violation.BOOT_ID_DRIFT)
         if (sample.uptimeMillis <= last.uptimeMillis)
             throw SentinelViolation(Violation.UPTIME_NOT_INCREASING)
-        if (sample.uptimeMillis - last.uptimeMillis > MAX_GAP_MILLIS)
-            throw SentinelViolation(Violation.SAMPLE_GAP)
+        val deviceElapsed = sample.uptimeMillis - last.uptimeMillis
+        if (deviceElapsed > MAX_GAP_MILLIS) throw SentinelViolation(Violation.SAMPLE_GAP)
+        if (sample.observedAtMillis <= last.observedAtMillis)
+            throw SentinelViolation(Violation.OBSERVATION_NOT_INCREASING)
+        val observedElapsed = sample.observedAtMillis - last.observedAtMillis
+        if (observedElapsed > MAX_GAP_MILLIS) throw SentinelViolation(Violation.OBSERVATION_GAP)
+        if (kotlin.math.abs(deviceElapsed - observedElapsed) > MAX_SCHEDULING_DRIFT_MILLIS)
+            throw SentinelViolation(Violation.CLOCK_DRIFT)
         if (
             EvidenceHash.propertyHash(sample.donorProperties) !=
                 EvidenceHash.propertyHash(established.donorProperties)
@@ -42,6 +51,7 @@ class NoRebootSentinel(
         if (identity != service) throw SentinelViolation(Violation.UNAPPROVED_SERVICE_RESTART)
         previous = sample
         count += 1
+        appendSample(sample, identity)
         return this
     }
 
@@ -53,6 +63,12 @@ class NoRebootSentinel(
         val head = checkNotNull(first) { "SENTINEL_EMPTY" }
         val tail = checkNotNull(previous)
         val selectedService = checkNotNull(service)
+        if (count < MINIMUM_SAMPLES) throw SentinelViolation(Violation.INSUFFICIENT_SAMPLES)
+        val assertedAtMillis = clock.nowMillis()
+        if (assertedAtMillis < 0 || assertedAtMillis < tail.observedAtMillis)
+            throw SentinelViolation(Violation.STALE_ASSERTION)
+        if (assertedAtMillis - tail.observedAtMillis > MAX_GAP_MILLIS)
+            throw SentinelViolation(Violation.STALE_ASSERTION)
         return SentinelReceipt(
             serialHash,
             role,
@@ -61,6 +77,10 @@ class NoRebootSentinel(
             head.bootId,
             head.uptimeMillis,
             tail.uptimeMillis,
+            head.observedAtMillis,
+            tail.observedAtMillis,
+            assertedAtMillis,
+            sampleChainHash,
             count,
             selectedService,
             head.donorProperties.keys.sorted(),
@@ -71,6 +91,24 @@ class NoRebootSentinel(
 
     companion object {
         const val MAX_GAP_MILLIS = 2_000L
+        const val MAX_SCHEDULING_DRIFT_MILLIS = 250L
+        const val MINIMUM_SAMPLES = 2
+    }
+
+    private fun appendSample(sample: SentinelSample, identity: ServiceIdentity) {
+        sampleChainHash =
+            EvidenceHash.sha256(
+                listOf(
+                        sampleChainHash,
+                        sample.bootId,
+                        sample.uptimeMillis,
+                        sample.observedAtMillis,
+                        EvidenceHash.propertyHash(sample.donorProperties),
+                        sample.forbiddenProcessPids.sorted().joinToString(","),
+                        identity.canonical(),
+                    )
+                    .joinToString("\n")
+            )
     }
 }
 

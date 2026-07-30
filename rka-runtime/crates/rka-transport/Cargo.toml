@@ -9,8 +9,13 @@ description = "Bounded transport traits for the TEESimulator RKA sidecar."
 publish = false
 
 [dependencies]
+rcgen.workspace = true
+ring.workspace = true
 rka-protocol = { version = "=0.1.0", path = "../rka-protocol" }
+rustls.workspace = true
+rustls-webpki.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

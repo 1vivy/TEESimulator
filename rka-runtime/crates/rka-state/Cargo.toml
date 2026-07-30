@@ -9,7 +9,9 @@ description = "Bounded persistence traits for the TEESimulator RKA sidecar."
 publish = false
 
 [dependencies]
+ring.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

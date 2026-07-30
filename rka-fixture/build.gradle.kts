@@ -22,6 +22,15 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    buildTypes {
+        create("candidateProbe") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".candidateprobe"
+            matchingFallbacks += listOf("debug")
+        }
+    }
+    testBuildType = "candidateProbe"
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21

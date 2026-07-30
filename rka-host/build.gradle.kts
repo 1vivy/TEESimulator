@@ -1,6 +1,7 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
+    application
     alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.ktfmt)
 }
@@ -15,4 +16,9 @@ kotlin {
 dependencies {
     implementation(project(":two-phone"))
     testImplementation(libs.junit)
+}
+
+application {
+    mainClass.set("org.matrix.teesimulator.rkahost.CandidateIdentityGateCli")
+    applicationName = "rka-host"
 }

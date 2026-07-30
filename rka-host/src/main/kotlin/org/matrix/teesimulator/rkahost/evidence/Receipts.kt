@@ -27,6 +27,7 @@ data class EvidenceReceipt(
     val bootId: String,
     val sampleHead: Long,
     val sampleTail: Long,
+    val sampleCount: Int,
     val headObservedAt: Long,
     val tailObservedAt: Long,
     val assertedAt: Long,
@@ -51,6 +52,7 @@ data class EvidenceReceipt(
             "boot_id" to bootId,
             "sample_head" to sampleHead.toString(),
             "sample_tail" to sampleTail.toString(),
+            "sample_count" to sampleCount.toString(),
             "head_observed_at" to headObservedAt.toString(),
             "tail_observed_at" to tailObservedAt.toString(),
             "asserted_at" to assertedAt.toString(),
@@ -102,7 +104,7 @@ object ReceiptCodec {
     fun decode(encoded: String): DecodedReceipt {
         require(!encoded.contains('\r')) { "RECEIPT_NONCANONICAL" }
         val lines = encoded.split('\n').dropLast(1)
-        require(encoded.endsWith("\n") && lines.size == 23) { "RECEIPT_TRUNCATED" }
+        require(encoded.endsWith("\n") && lines.size == 24) { "RECEIPT_TRUNCATED" }
         val pairs =
             lines.map { line ->
                 line.split('=', limit = 2).let {
@@ -121,6 +123,7 @@ object ReceiptCodec {
                     "b",
                     0,
                     1,
+                    2,
                     0,
                     1,
                     1,
@@ -149,6 +152,7 @@ object ReceiptCodec {
                 fields.getValue("boot_id"),
                 fields.getValue("sample_head").toLong(),
                 fields.getValue("sample_tail").toLong(),
+                fields.getValue("sample_count").toInt(),
                 fields.getValue("head_observed_at").toLong(),
                 fields.getValue("tail_observed_at").toLong(),
                 fields.getValue("asserted_at").toLong(),
@@ -202,8 +206,10 @@ object ReceiptCodec {
         require(
             receipt.sampleHead >= 0 &&
                 receipt.sampleTail >= receipt.sampleHead &&
+                receipt.sampleCount >= 2 &&
                 receipt.headObservedAt >= 0 &&
                 receipt.tailObservedAt > receipt.headObservedAt &&
+                receipt.tailObservedAt - receipt.headObservedAt <= 2_000 &&
                 receipt.assertedAt >= receipt.tailObservedAt &&
                 receipt.assertedAt - receipt.tailObservedAt <= 2_000 &&
                 receipt.monotonicMillis >= 0
@@ -263,6 +269,7 @@ object ReceiptFactory {
             "boot-A",
             0,
             2_000,
+            2,
             0,
             2_000,
             2_000,

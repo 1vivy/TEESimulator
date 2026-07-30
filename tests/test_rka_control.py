@@ -14,11 +14,17 @@ ACTIVE_CONFIG_NAME = "role.conf"
 
 
 class RkaControlTest(unittest.TestCase):
-    def run_control(self, config_root: Path, *arguments: str) -> CompletedProcess[str]:
+    def run_control(
+        self,
+        config_root: Path,
+        *arguments: str,
+        environment: dict[str, str] | None = None,
+    ) -> CompletedProcess[str]:
         return run(
             ["bash", str(CONTROL_SCRIPT), "--root", str(config_root), *arguments],
             check=False,
             capture_output=True,
+            env=environment,
             text=True,
         )
 
@@ -180,4 +186,26 @@ class RkaControlTest(unittest.TestCase):
 
         self.assertEqual(first_write.returncode, 0)
         self.assertNotEqual(invalid_write.returncode, 0)
+        self.assertEqual(final_content, valid_content)
+
+    def test_set_role_fsync_failure_preserves_last_valid_file(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            config_root = temporary_root / "tricky_store"
+            self.assertEqual(self.run_control(config_root, "set-role", "DONOR").returncode, 0)
+            config_path = config_root / ACTIVE_CONFIG_DIRECTORY / ACTIVE_CONFIG_NAME
+            valid_content = config_path.read_text(encoding="utf-8")
+            command_directory = temporary_root / "commands"
+            command_directory.mkdir()
+            sync_command = command_directory / "sync"
+            sync_command.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            os.chmod(sync_command, 0o700)
+            environment = os.environ | {"PATH": f"{command_directory}:{os.environ['PATH']}"}
+
+            failed_write = self.run_control(
+                config_root, "set-role", "CANDIDATE", environment=environment
+            )
+            final_content = config_path.read_text(encoding="utf-8")
+
+        self.assertNotEqual(failed_write.returncode, 0)
         self.assertEqual(final_content, valid_content)

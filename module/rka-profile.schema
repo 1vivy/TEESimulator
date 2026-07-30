@@ -1,0 +1,6 @@
+# Static packaged schema. Runtime profiles are root-only files beneath
+# /data/adb/teesimulator-rka/profiles and are never stored in the module ZIP.
+version=1
+role=LOCAL|DONOR|CANDIDATE|DISABLED
+profile_epoch=u64
+mutation_states=RKP_KEY_GENERATING,RKP_KEY_RECORDED,CSR_PREPARED,CSR_POSTING,POST_AMBIGUOUS,RKP_CERTIFIED,APP_KEY_GENERATING,APP_KEY_RECORDED,EXPOSED,TERMINAL,DELETE

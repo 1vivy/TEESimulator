@@ -4,10 +4,15 @@ set -f
 
 readonly MAX_CONFIG_BYTES=4096
 readonly DEFAULT_ROOT=/data/adb/tricky_store
+readonly DEFAULT_STATE_ROOT=/data/adb/teesimulator-rka
 readonly CONFIG_DIRECTORY=rka
 readonly CONFIG_NAME=role.conf
 
 root=$DEFAULT_ROOT
+rka_state_root=$DEFAULT_STATE_ROOT
+
+script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$script_directory/rka-paths.sh"
 
 print_inert() {
     printf '%s\n' INERT_INVALID_CONFIG
@@ -100,16 +105,13 @@ set_role() {
     config_directory_is_trusted || return 1
     config_path=$config_directory/$CONFIG_NAME
     [ ! -e "$config_path" ] && [ ! -L "$config_path" ] || config_is_valid || return 1
-    temporary_path=$(mktemp "$config_directory/.role.conf.XXXXXX") || return 1
-    trap 'rm -f "$temporary_path"' EXIT HUP INT TERM
-    printf 'version=1\nrole=%s\n' "$requested_role" > "$temporary_path" || return 1
-    chmod 600 "$temporary_path" || return 1
-    mv -f "$temporary_path" "$config_path" || return 1
-    trap - EXIT HUP INT TERM
+    rka_atomic_replace "$config_directory" "$config_path" "version=1
+role=$requested_role
+"
 }
 
 usage() {
-    printf '%s\n' 'usage: rka-control.sh [--root PATH] {set-role ROLE|status|boot-decision}' >&2
+    printf '%s\n' 'usage: rka-control.sh [--root PATH] [--state-root PATH] {set-role ROLE|initialize|wipe|mutation-states|status|boot-decision}' >&2
 }
 
 while [ $# -gt 0 ]; do
@@ -117,6 +119,11 @@ while [ $# -gt 0 ]; do
         --root)
             [ $# -ge 2 ] || exit 2
             root=$2
+            shift 2
+            ;;
+        --state-root)
+            [ $# -ge 2 ] || exit 2
+            rka_state_root=$2
             shift 2
             ;;
         set-role)
@@ -134,6 +141,33 @@ while [ $# -gt 0 ]; do
                 exit 1
             }
             printf 'version=1\nrole=%s\n' "$role"
+            exit 0
+            ;;
+        initialize)
+            [ $# -eq 1 ] || exit 2
+            role=$(read_role) || {
+                print_inert
+                exit 1
+            }
+            rka_initialize_layout "$role" || {
+                print_inert
+                exit 1
+            }
+            printf '%s\n' READY
+            exit 0
+            ;;
+        wipe)
+            [ $# -eq 1 ] || exit 2
+            rka_wipe_runtime || {
+                print_inert
+                exit 1
+            }
+            printf '%s\n' WIPED
+            exit 0
+            ;;
+        mutation-states)
+            [ $# -eq 1 ] || exit 2
+            rka_mutation_states
             exit 0
             ;;
         boot-decision)

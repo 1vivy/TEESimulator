@@ -62,29 +62,34 @@ class NoRebootSentinel(
         val selectedService = checkNotNull(service)
         if (count < MINIMUM_SAMPLES || count != samples.size || count > MAXIMUM_SAMPLES)
             throw SentinelViolation(Violation.INSUFFICIENT_SAMPLES)
-        val (derivedChainHash, derivedCount) = deriveSamples()
-        if (derivedCount != count || derivedChainHash != sampleChainHash)
+        val derived = deriveSamples()
+        if (derived.count != count || derived.chainHash != sampleChainHash)
             throw SentinelViolation(Violation.INSUFFICIENT_SAMPLES)
         if (assertedAtMillis < 0 || assertedAtMillis < tail.observedAtMillis)
             throw SentinelViolation(Violation.STALE_ASSERTION)
         if (assertedAtMillis - tail.observedAtMillis > MAX_GAP_MILLIS)
             throw SentinelViolation(Violation.STALE_ASSERTION)
-        return LiveSentinelEvidence.derived(LiveValues(
-            serialHash,
-            role,
-            profileId,
-            head.bootId,
-            head.uptimeMillis,
-            tail.uptimeMillis,
-            head.observedAtMillis,
-            tail.observedAtMillis,
-            assertedAtMillis,
-            sampleChainHash,
-            count,
-            selectedService,
-            head.donorProperties.keys.sorted(),
-            EvidenceHash.propertyHash(head.donorProperties),
-        ))
+        return LiveSentinelEvidence.derived(
+            LiveValues(
+                serialHash,
+                role,
+                profileId,
+                head.bootId,
+                head.uptimeMillis,
+                tail.uptimeMillis,
+                head.observedAtMillis,
+                tail.observedAtMillis,
+                assertedAtMillis,
+                sampleChainHash,
+                count,
+                derived.maxDeviceIntervalMillis,
+                derived.maxObservationIntervalMillis,
+                derived.maxIntervalDriftMillis,
+                selectedService,
+                head.donorProperties.keys.sorted(),
+                EvidenceHash.propertyHash(head.donorProperties),
+            )
+        )
     }
 
     companion object {
@@ -111,8 +116,11 @@ class NoRebootSentinel(
             )
     }
 
-    private fun deriveSamples(): Pair<String, Int> {
+    private fun deriveSamples(): DerivedSamples {
         var chain = EvidenceHash.sha256("sentinel-sample-chain-v1")
+        var maxDeviceIntervalMillis = 0L
+        var maxObservationIntervalMillis = 0L
+        var maxIntervalDriftMillis = 0L
         samples.forEach { (sample, identity) ->
             chain =
                 EvidenceHash.sha256(
@@ -128,8 +136,35 @@ class NoRebootSentinel(
                         .joinToString("\n")
                 )
         }
-        return chain to samples.size
+        samples.zipWithNext().forEach { (previousSample, sample) ->
+            val deviceIntervalMillis = sample.first.uptimeMillis - previousSample.first.uptimeMillis
+            val observationIntervalMillis =
+                sample.first.observedAtMillis - previousSample.first.observedAtMillis
+            maxDeviceIntervalMillis = maxOf(maxDeviceIntervalMillis, deviceIntervalMillis)
+            maxObservationIntervalMillis =
+                maxOf(maxObservationIntervalMillis, observationIntervalMillis)
+            maxIntervalDriftMillis =
+                maxOf(
+                    maxIntervalDriftMillis,
+                    kotlin.math.abs(deviceIntervalMillis - observationIntervalMillis),
+                )
+        }
+        return DerivedSamples(
+            chain,
+            samples.size,
+            maxDeviceIntervalMillis,
+            maxObservationIntervalMillis,
+            maxIntervalDriftMillis,
+        )
     }
+
+    private data class DerivedSamples(
+        val chainHash: String,
+        val count: Int,
+        val maxDeviceIntervalMillis: Long,
+        val maxObservationIntervalMillis: Long,
+        val maxIntervalDriftMillis: Long,
+    )
 }
 
 data class ServiceExpectation(

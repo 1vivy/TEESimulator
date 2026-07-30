@@ -96,10 +96,17 @@ class CommandReceiptTest {
             )
         }
         assertThrows(ReceiptException::class.java) {
-            ReceiptVerifier(signer).verify(
-                encoded.replace("version=1\n", "role=DONOR\nversion=1\n"),
-                ReceiptBinding("commit-A", "profile-A", EndpointRole.DONOR, "session-A", "nonce-A"),
-            )
+            ReceiptVerifier(signer)
+                .verify(
+                    encoded.replace("version=2\n", "role=DONOR\nversion=2\n"),
+                    ReceiptBinding(
+                        "commit-A",
+                        "profile-A",
+                        EndpointRole.DONOR,
+                        "session-A",
+                        "nonce-A",
+                    ),
+                )
         }
         val tamperedSignature = encoded.replace(Regex("(?m)^signature=."), "signature=A")
         val signatureFailure =
@@ -124,17 +131,64 @@ class CommandReceiptTest {
         val signer = DigestSigner("test-key")
         val encoded = issue("nonce-capability", signer)
         val verified =
-            ReceiptVerifier(signer).verify(
-                encoded,
+            ReceiptVerifier(signer)
+                .verify(
+                    encoded,
+                    ReceiptBinding(
+                        "commit-A",
+                        "profile-A",
+                        EndpointRole.DONOR,
+                        "session-A",
+                        "nonce-capability",
+                    ),
+                )
+        assertEquals(2, verified.sampleCount)
+    }
+
+    @Test
+    fun signs_three_samples_when_each_adjacent_interval_is_continuous() {
+        val signer = DigestSigner("test-key")
+        val service = ServiceIdentity("keystore2", "init", 42, 100, "/system/bin/keystore2", 0)
+        val properties = mapOf("ro.build.fingerprint" to "build-A")
+        val live =
+            NoRebootSentinel("serial-A", EndpointRole.DONOR, "profile-A", MonotonicClock { 3_000 })
+                .observe(SentinelSample("boot-A", 0, properties, emptySet(), 0), service)
+                .observe(SentinelSample("boot-A", 1_500, properties, emptySet(), 1_500), service)
+                .observe(SentinelSample("boot-A", 3_000, properties, emptySet(), 3_000), service)
+                .assertLive(3_000)
+        val encoded =
+            EvidenceIssuer.sign(
+                live,
                 ReceiptBinding(
                     "commit-A",
                     "profile-A",
                     EndpointRole.DONOR,
                     "session-A",
-                    "nonce-capability",
+                    "nonce-three",
                 ),
+                ReceiptMaterial(
+                    EvidenceHash.sha256("trace"),
+                    EvidenceHash.sha256("artifact"),
+                    monotonicMillis = 3_000,
+                ),
+                signer,
             )
-        assertEquals(2, verified.sampleCount)
+
+        assertEquals(
+            3,
+            ReceiptVerifier(signer)
+                .verify(
+                    encoded,
+                    ReceiptBinding(
+                        "commit-A",
+                        "profile-A",
+                        EndpointRole.DONOR,
+                        "session-A",
+                        "nonce-three",
+                    ),
+                )
+                .sampleCount,
+        )
     }
 
     @Test
@@ -168,7 +222,11 @@ class CommandReceiptTest {
         return EvidenceIssuer.sign(
             live,
             ReceiptBinding("commit-A", "profile-A", EndpointRole.DONOR, "session-A", nonce),
-            ReceiptMaterial(EvidenceHash.sha256("trace"), EvidenceHash.sha256("artifact"), monotonicMillis = 2_000),
+            ReceiptMaterial(
+                EvidenceHash.sha256("trace"),
+                EvidenceHash.sha256("artifact"),
+                monotonicMillis = 2_000,
+            ),
             signer,
         )
     }

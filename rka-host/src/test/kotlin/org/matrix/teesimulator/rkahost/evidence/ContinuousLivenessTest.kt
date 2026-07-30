@@ -16,8 +16,7 @@ class ContinuousLivenessTest {
         val sentinel = sentinel(clock).observe(sample(1_000, 1_000), service)
 
         // When: liveness is asserted.
-        val failure =
-            assertThrows(SentinelViolation::class.java) { sentinel.assertLive(1_000) }
+        val failure = assertThrows(SentinelViolation::class.java) { sentinel.assertLive(1_000) }
 
         // Then: one or truncated streams are not live.
         assertEquals(Violation.INSUFFICIENT_SAMPLES, failure.violation)
@@ -99,8 +98,7 @@ class ContinuousLivenessTest {
         clock.now = 3_001
 
         // When: the old tail is asserted after its freshness budget.
-        val failure =
-            assertThrows(SentinelViolation::class.java) { sentinel.assertLive(3_001) }
+        val failure = assertThrows(SentinelViolation::class.java) { sentinel.assertLive(3_001) }
 
         // Then: an old valid stream cannot be replayed as live.
         assertEquals(Violation.STALE_ASSERTION, failure.violation)
@@ -133,7 +131,11 @@ class ContinuousLivenessTest {
         EvidenceIssuer.sign(
             live,
             ReceiptBinding("commit-A", "profile-A", EndpointRole.DONOR, "session-A", nonce),
-            ReceiptMaterial(EvidenceHash.sha256("trace"), EvidenceHash.sha256("artifact"), monotonicMillis = 3_000),
+            ReceiptMaterial(
+                EvidenceHash.sha256("trace"),
+                EvidenceHash.sha256("artifact"),
+                monotonicMillis = 3_000,
+            ),
             DigestSigner("test-key"),
         )
 

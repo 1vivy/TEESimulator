@@ -51,6 +51,9 @@ object EvidenceIssuer {
                 values.tailObservedAtMillis,
                 values.assertedAtMillis,
                 values.sampleChainHash,
+                values.maxDeviceIntervalMillis,
+                values.maxObservationIntervalMillis,
+                values.maxIntervalDriftMillis,
                 EvidenceHash.sha256(values.service.canonical()),
                 EvidenceHash.sha256(values.propertyNames.joinToString(",")),
                 values.propertyHash,
@@ -79,6 +82,9 @@ private data class EvidenceReceipt(
     val tailObservedAt: Long,
     val assertedAt: Long,
     val sampleChainHash: String,
+    val maxDeviceIntervalMillis: Long,
+    val maxObservationIntervalMillis: Long,
+    val maxIntervalDriftMillis: Long,
     val serviceHash: String,
     val propertyDefinitionHash: String,
     val propertyHash: String,
@@ -89,7 +95,7 @@ private data class EvidenceReceipt(
 ) {
     fun fields(): List<Pair<String, String>> =
         listOf(
-            "version" to "1",
+            "version" to "2",
             "commit" to commit,
             "profile" to profile,
             "role" to role.name,
@@ -104,6 +110,9 @@ private data class EvidenceReceipt(
             "tail_observed_at" to tailObservedAt.toString(),
             "asserted_at" to assertedAt.toString(),
             "sample_chain_hash" to sampleChainHash,
+            "max_device_interval_millis" to maxDeviceIntervalMillis.toString(),
+            "max_observation_interval_millis" to maxObservationIntervalMillis.toString(),
+            "max_interval_drift_millis" to maxIntervalDriftMillis.toString(),
             "service_hash" to serviceHash,
             "property_definition_hash" to propertyDefinitionHash,
             "property_hash" to propertyHash,
@@ -152,7 +161,7 @@ private object ReceiptCodec {
     fun decode(encoded: String): DecodedReceipt {
         require(!encoded.contains('\r')) { "RECEIPT_NONCANONICAL" }
         val lines = encoded.split('\n').dropLast(1)
-        require(encoded.endsWith("\n") && lines.size == 24) { "RECEIPT_TRUNCATED" }
+        require(encoded.endsWith("\n") && lines.size == 27) { "RECEIPT_TRUNCATED" }
         val pairs =
             lines.map { line ->
                 line.split('=', limit = 2).let {
@@ -176,6 +185,9 @@ private object ReceiptCodec {
                     1,
                     1,
                     "h",
+                    1,
+                    1,
+                    0,
                     "h",
                     "h",
                     "h",
@@ -188,7 +200,7 @@ private object ReceiptCodec {
                 .map { it.first } + listOf("signer", "signature")
         require(pairs.map { it.first } == expected) { "RECEIPT_NONCANONICAL" }
         val fields = pairs.toMap()
-        require(fields.getValue("version") == "1") { "RECEIPT_VERSION_INVALID" }
+        require(fields.getValue("version") == "2") { "RECEIPT_VERSION_INVALID" }
         val receipt =
             EvidenceReceipt(
                 fields.getValue("commit"),
@@ -205,6 +217,9 @@ private object ReceiptCodec {
                 fields.getValue("tail_observed_at").toLong(),
                 fields.getValue("asserted_at").toLong(),
                 fields.getValue("sample_chain_hash"),
+                fields.getValue("max_device_interval_millis").toLong(),
+                fields.getValue("max_observation_interval_millis").toLong(),
+                fields.getValue("max_interval_drift_millis").toLong(),
                 fields.getValue("service_hash"),
                 fields.getValue("property_definition_hash"),
                 fields.getValue("property_hash"),
@@ -271,9 +286,17 @@ private object ReceiptCodec {
                 receipt.sampleTail >= receipt.sampleHead &&
                 receipt.sampleCount >= 2 &&
                 receipt.sampleCount <= NoRebootSentinel.MAXIMUM_SAMPLES &&
+                receipt.maxDeviceIntervalMillis in 1..NoRebootSentinel.MAX_GAP_MILLIS &&
+                receipt.maxObservationIntervalMillis in 1..NoRebootSentinel.MAX_GAP_MILLIS &&
+                receipt.maxIntervalDriftMillis in 0..NoRebootSentinel.MAX_SCHEDULING_DRIFT_MILLIS &&
+                receipt.maxIntervalDriftMillis <=
+                    maxOf(receipt.maxDeviceIntervalMillis, receipt.maxObservationIntervalMillis) &&
                 receipt.headObservedAt >= 0 &&
                 receipt.tailObservedAt > receipt.headObservedAt &&
-                receipt.tailObservedAt - receipt.headObservedAt <= 2_000 &&
+                receipt.sampleTail - receipt.sampleHead <=
+                    receipt.maxDeviceIntervalMillis * (receipt.sampleCount - 1L) &&
+                receipt.tailObservedAt - receipt.headObservedAt <=
+                    receipt.maxObservationIntervalMillis * (receipt.sampleCount - 1L) &&
                 receipt.assertedAt >= receipt.tailObservedAt &&
                 receipt.assertedAt - receipt.tailObservedAt <= 2_000 &&
                 receipt.monotonicMillis >= 0
@@ -321,10 +344,7 @@ class ReceiptVerifier(private val signer: ReceiptSigner) {
     }
 }
 
-class VerifiedEvidence internal constructor(
-    val sampleCount: Int,
-    val sampleChainHash: String,
-)
+class VerifiedEvidence internal constructor(val sampleCount: Int, val sampleChainHash: String)
 
 class AtomicReceiptStore(private val root: Path) {
     init {
@@ -348,9 +368,7 @@ class AtomicReceiptStore(private val root: Path) {
                 setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
             )
             FileChannel.open(temporary, StandardOpenOption.WRITE).use { channel ->
-                channel.write(
-                    java.nio.ByteBuffer.wrap(encoded.toByteArray())
-                )
+                channel.write(java.nio.ByteBuffer.wrap(encoded.toByteArray()))
                 channel.force(true)
             }
             if (interruptBeforeRename) throw ReceiptException("RECEIPT_INTERRUPTED")

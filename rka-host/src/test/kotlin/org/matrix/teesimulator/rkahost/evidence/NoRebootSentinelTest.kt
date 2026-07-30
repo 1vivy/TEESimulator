@@ -18,10 +18,7 @@ class NoRebootSentinelTest {
 
         // When: a synthetic stream stays on the same boot, properties, and service.
         val live =
-            sentinel
-                .observe(sample(0), service)
-                .observe(sample(2_000), service)
-                .assertLive(2_000)
+            sentinel.observe(sample(0), service).observe(sample(2_000), service).assertLive(2_000)
 
         // Then: the receipt binds only the serial hash and the two second edge is valid.
         val encoded = issue(live, "nonce-valid")
@@ -141,7 +138,11 @@ class NoRebootSentinelTest {
         EvidenceIssuer.sign(
             live,
             ReceiptBinding("commit-A", "profile-A", EndpointRole.DONOR, "session-A", nonce),
-            ReceiptMaterial(EvidenceHash.sha256("trace"), EvidenceHash.sha256("artifact"), monotonicMillis = 2_000),
+            ReceiptMaterial(
+                EvidenceHash.sha256("trace"),
+                EvidenceHash.sha256("artifact"),
+                monotonicMillis = 2_000,
+            ),
             DigestSigner("test-key"),
         )
 }

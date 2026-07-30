@@ -11,60 +11,81 @@ import java.nio.ByteOrder
 
 object BridgeCodec {
     fun encode(message: BridgeMessage, direction: BridgeDirection): ByteArray {
-        val tag =
-            when (message) {
-                is BridgeMessage.PublicKeyRequest -> BridgeTag.PUBLIC_KEY_REQUEST
-                is BridgeMessage.PublicKeyResponse -> BridgeTag.PUBLIC_KEY_RESPONSE
-                is BridgeMessage.UpdateRequest -> BridgeTag.UPDATE_REQUEST
-                is BridgeMessage.PublicResult -> BridgeTag.PUBLIC_RESULT
-                is BridgeMessage.Cancel -> BridgeTag.CANCEL
-                is BridgeMessage.Error -> BridgeTag.ERROR
+        val request =
+            message is BridgeMessage.PublicKeyRequest ||
+                message is BridgeMessage.UpdateRequest ||
+                message is BridgeMessage.Cancel
+        val role =
+            when (direction) {
+                BridgeDirection.SIDECAR_TO_BROKER ->
+                    if (request) BridgeExchangeRole.DONOR_REQUEST
+                    else BridgeExchangeRole.CANDIDATE_RESPONSE
+                BridgeDirection.BROKER_TO_SIDECAR ->
+                    if (request) BridgeExchangeRole.CANDIDATE_REQUEST
+                    else BridgeExchangeRole.DONOR_RESPONSE
             }
+        return encode(message, role)
+    }
+
+    fun encode(message: BridgeMessage, role: BridgeExchangeRole): ByteArray {
+        val tag = BridgeProtocol.tagOf(message)
+        require(tag in role.tags)
         val body = encodeBody(message)
         require(body.size in 1..BridgeLimits.MAX_FRAME_BYTES)
         return try {
-            headerForTest(direction, tag, message.requestId.value, body.size.toLong()) + body
+            headerForTest(role.direction, tag, message.requestId.value, body.size.toLong()) + body
         } finally {
             body.fill(0)
+        }
+    }
+
+    fun decode(input: InputStream, role: BridgeExchangeRole): BridgeResult<BridgeMessage> {
+        val header = ByteArray(BridgeLimits.HEADER_BYTES)
+        return try {
+            if (!readExactly(input, header)) return BridgeResult.Failure(BridgeError.Truncated)
+            val buffer = ByteBuffer.wrap(header).order(ByteOrder.BIG_ENDIAN)
+            if (buffer.int != BridgeLimits.MAGIC) return BridgeResult.Failure(BridgeError.BadMagic)
+            if (buffer.get().toInt() and 0xff != BridgeLimits.VERSION) {
+                return BridgeResult.Failure(BridgeError.UnsupportedVersion)
+            }
+            if (buffer.get().toInt() and 0xff != role.direction.wire) {
+                return BridgeResult.Failure(BridgeError.WrongDirection)
+            }
+            val tag = buffer.get().toInt() and 0xff
+            if (tag !in BridgeTag.known) return BridgeResult.Failure(BridgeError.UnknownTag)
+            if (tag !in role.tags) return BridgeResult.Failure(BridgeError.UnexpectedTag)
+            val flags = buffer.get().toInt() and 0xff
+            val requestId = buffer.long
+            val unsignedLength = buffer.int.toLong() and 0xffff_ffffL
+            val reserved = buffer.int
+            if (flags != 0 || reserved != 0) return BridgeResult.Failure(BridgeError.ReservedBits)
+            if (unsignedLength == 0L) return BridgeResult.Failure(BridgeError.EmptyFrame)
+            if (unsignedLength > BridgeLimits.MAX_FRAME_BYTES) {
+                return BridgeResult.Failure(BridgeError.FrameTooLarge)
+            }
+            val body = ByteArray(unsignedLength.toInt())
+            try {
+                if (!readExactly(input, body)) return BridgeResult.Failure(BridgeError.Truncated)
+                decodeBody(tag, RequestId(requestId), body)
+            } finally {
+                body.fill(0)
+            }
+        } finally {
+            header.fill(0)
         }
     }
 
     fun decode(
         input: InputStream,
         expectedDirection: BridgeDirection,
-    ): BridgeResult<BridgeMessage> {
-        val header = ByteArray(BridgeLimits.HEADER_BYTES)
-        if (!readExactly(input, header)) return BridgeResult.Failure(BridgeError.Truncated)
-        val buffer = ByteBuffer.wrap(header).order(ByteOrder.BIG_ENDIAN)
-        if (buffer.int != BridgeLimits.MAGIC) return BridgeResult.Failure(BridgeError.BadMagic)
-        if (buffer.get().toInt() and 0xff != BridgeLimits.VERSION) {
-            return BridgeResult.Failure(BridgeError.UnsupportedVersion)
-        }
-        if (buffer.get().toInt() and 0xff != expectedDirection.wire) {
-            return BridgeResult.Failure(BridgeError.WrongDirection)
-        }
-        val tag = buffer.get().toInt() and 0xff
-        if (tag !in BridgeTag.known) return BridgeResult.Failure(BridgeError.UnknownTag)
-        val flags = buffer.get().toInt() and 0xff
-        val requestId = buffer.long
-        val unsignedLength = buffer.int.toLong() and 0xffff_ffffL
-        val reserved = buffer.int
-        if (flags != 0 || reserved != 0) return BridgeResult.Failure(BridgeError.ReservedBits)
-        if (unsignedLength == 0L) return BridgeResult.Failure(BridgeError.EmptyFrame)
-        if (unsignedLength > BridgeLimits.MAX_FRAME_BYTES) {
-            return BridgeResult.Failure(BridgeError.FrameTooLarge)
-        }
-        val body = ByteArray(unsignedLength.toInt())
-        if (!readExactly(input, body)) {
-            body.fill(0)
-            return BridgeResult.Failure(BridgeError.Truncated)
-        }
-        return try {
-            decodeBody(tag, RequestId(requestId), body)
-        } finally {
-            body.fill(0)
-        }
-    }
+    ): BridgeResult<BridgeMessage> =
+        decode(
+            input,
+            when (expectedDirection) {
+                BridgeDirection.SIDECAR_TO_BROKER -> BridgeExchangeRole.DONOR_REQUEST
+                BridgeDirection.BROKER_TO_SIDECAR -> BridgeExchangeRole.CANDIDATE_REQUEST
+            },
+        )
 
     fun headerForTest(
         direction: BridgeDirection,
@@ -91,30 +112,38 @@ object BridgeCodec {
                 when (message) {
                     is BridgeMessage.PublicKeyRequest -> {
                         out.writeByte(message.keyCount)
-                        writeBytes(out, message.challenge.copyBytes())
+                        writeBytes(out, message.challenge)
                     }
                     is BridgeMessage.PublicKeyResponse -> {
-                        writeBytes(out, message.publicCsr.copyBytes())
+                        writeBytes(out, message.publicCsr)
                         val hashes = message.publicKeyHashes()
-                        out.writeByte(hashes.size)
-                        hashes.forEach { out.write(it.copyBytes()) }
+                        try {
+                            out.writeByte(hashes.size)
+                            hashes.forEach { writeFixed(out, it) }
+                        } finally {
+                            hashes.forEach(Hash32::close)
+                        }
                     }
                     is BridgeMessage.UpdateRequest -> {
-                        out.write(message.operationHandle.copyBytes())
+                        writeFixed(out, message.operationHandle)
                         out.writeInt(message.totalInputBytes)
-                        writeBytes(out, message.chunk.copyBytes())
+                        writeBytes(out, message.chunk)
                     }
                     is BridgeMessage.PublicResult -> {
-                        out.write(message.networkHandle.copyBytes())
-                        writeBytes(out, message.publicSpki.copyBytes())
+                        writeFixed(out, message.networkHandle)
+                        writeBytes(out, message.publicSpki)
                         val chain = message.certificateChain()
-                        out.writeByte(chain.size)
-                        chain.forEach { writeBytes(out, it.copyBytes()) }
+                        try {
+                            out.writeByte(chain.size)
+                            chain.forEach { writeBytes(out, it) }
+                        } finally {
+                            chain.forEach(PublicBytes::close)
+                        }
                     }
                     is BridgeMessage.Cancel -> out.writeByte(0)
                     is BridgeMessage.Error -> {
                         out.writeByte(message.code.wire)
-                        out.write(message.detailHash.copyBytes())
+                        writeFixed(out, message.detailHash)
                     }
                 }
             }
@@ -132,57 +161,72 @@ object BridgeCodec {
                 when (tag) {
                     BridgeTag.PUBLIC_KEY_REQUEST -> {
                         val count = input.readUnsignedByte()
-                        val challenge = readBytes(input, 64, minimum = 16)
-                        BridgeMessage.PublicKeyRequest(
-                            requestId,
-                            PublicBytes.of(challenge, 64),
-                            count,
-                        )
+                        val challenge = readPublicBytes(input, 64, minimum = 16)
+                        try {
+                            BridgeMessage.PublicKeyRequest(requestId, challenge, count)
+                        } catch (error: Throwable) {
+                            challenge.close()
+                            throw error
+                        }
                     }
                     BridgeTag.PUBLIC_KEY_RESPONSE -> {
-                        val csr = readBytes(input, BridgeLimits.MAX_FRAME_BYTES, minimum = 1)
+                        val csr = readPublicBytes(input, BridgeLimits.MAX_FRAME_BYTES, minimum = 1)
                         val count = input.readUnsignedByte()
-                        require(count in 1..BridgeLimits.MAX_PUBLIC_KEYS)
-                        val hashes = List(count) { Hash32.of(readFixed(input, 32)) }
-                        BridgeMessage.PublicKeyResponse(
-                            requestId,
-                            PublicBytes.of(csr, BridgeLimits.MAX_FRAME_BYTES),
-                            hashes,
-                        )
+                        val hashes = mutableListOf<Hash32>()
+                        try {
+                            require(count in 1..BridgeLimits.MAX_PUBLIC_KEYS)
+                            repeat(count) { hashes += readHash(input) }
+                            BridgeMessage.PublicKeyResponse(requestId, csr, hashes)
+                        } catch (error: Throwable) {
+                            csr.close()
+                            hashes.forEach(Hash32::close)
+                            throw error
+                        }
                     }
                     BridgeTag.UPDATE_REQUEST -> {
-                        val handle = NetworkHandle.of(readFixed(input, 16))
+                        val handle = readHandle(input)
                         val total = input.readInt()
-                        val chunk = readBytes(input, BridgeLimits.MAX_UPDATE_BYTES)
-                        BridgeMessage.UpdateRequest(
-                            requestId,
-                            handle,
-                            PublicBytes.of(chunk, BridgeLimits.MAX_UPDATE_BYTES),
-                            total,
-                        )
+                        val chunk = readPublicBytes(input, BridgeLimits.MAX_UPDATE_BYTES)
+                        try {
+                            BridgeMessage.UpdateRequest(requestId, handle, chunk, total)
+                        } catch (error: Throwable) {
+                            handle.close()
+                            chunk.close()
+                            throw error
+                        }
                     }
                     BridgeTag.PUBLIC_RESULT -> {
-                        val handle = NetworkHandle.of(readFixed(input, 16))
-                        val spki = readBytes(input, BridgeLimits.MAX_CERTIFICATE_BYTES, minimum = 1)
+                        val handle = readHandle(input)
+                        val spki =
+                            readPublicBytes(input, BridgeLimits.MAX_CERTIFICATE_BYTES, minimum = 1)
                         val count = input.readUnsignedByte()
-                        require(count in 1..BridgeLimits.MAX_CHAIN_CERTIFICATES)
-                        val chain =
-                            List(count) {
-                                PublicBytes.of(
-                                    readBytes(
+                        val chain = mutableListOf<PublicBytes>()
+                        var total = 0L
+                        try {
+                            require(count in 1..BridgeLimits.MAX_CHAIN_CERTIFICATES)
+                            repeat(count) {
+                                val length =
+                                    readLength(
                                         input,
                                         BridgeLimits.MAX_CERTIFICATE_BYTES,
                                         minimum = 1,
-                                    ),
-                                    BridgeLimits.MAX_CERTIFICATE_BYTES,
-                                )
+                                    )
+                                total = Math.addExact(total, length.toLong())
+                                require(total <= BridgeLimits.MAX_CHAIN_BYTES)
+                                chain +=
+                                    readPublicBytesOfLength(
+                                        input,
+                                        length,
+                                        BridgeLimits.MAX_CERTIFICATE_BYTES,
+                                    )
                             }
-                        BridgeMessage.PublicResult(
-                            requestId,
-                            handle,
-                            PublicBytes.of(spki, BridgeLimits.MAX_CERTIFICATE_BYTES),
-                            chain,
-                        )
+                            BridgeMessage.PublicResult(requestId, handle, spki, chain)
+                        } catch (error: Throwable) {
+                            handle.close()
+                            spki.close()
+                            chain.forEach(PublicBytes::close)
+                            throw error
+                        }
                     }
                     BridgeTag.CANCEL -> {
                         require(input.readUnsignedByte() == 0)
@@ -192,11 +236,12 @@ object BridgeCodec {
                         val codeValue = input.readUnsignedByte()
                         val code = BridgeErrorCode.entries.singleOrNull { it.wire == codeValue }
                         requireNotNull(code)
-                        BridgeMessage.Error(requestId, code, Hash32.of(readFixed(input, 32)))
+                        BridgeMessage.Error(requestId, code, readHash(input))
                     }
                     else -> return BridgeResult.Failure(BridgeError.UnknownTag)
                 }
             if (input.available() != 0) {
+                message.close()
                 BridgeResult.Failure(BridgeError.NonCanonical)
             } else {
                 BridgeResult.Success(message)
@@ -207,15 +252,78 @@ object BridgeCodec {
             BridgeResult.Failure(BridgeError.NonCanonical)
         }
 
-    private fun writeBytes(output: DataOutputStream, bytes: ByteArray) {
-        output.writeInt(bytes.size)
-        output.write(bytes)
+    private fun writeBytes(output: DataOutputStream, bytes: PublicBytes) {
+        val copy = bytes.copyBytes()
+        try {
+            output.writeInt(copy.size)
+            output.write(copy)
+        } finally {
+            copy.fill(0)
+        }
     }
 
-    private fun readBytes(input: DataInputStream, maximum: Int, minimum: Int = 0): ByteArray {
+    private fun writeFixed(output: DataOutputStream, value: Hash32) {
+        val copy = value.copyBytes()
+        try {
+            output.write(copy)
+        } finally {
+            copy.fill(0)
+        }
+    }
+
+    private fun writeFixed(output: DataOutputStream, value: NetworkHandle) {
+        val copy = value.copyBytes()
+        try {
+            output.write(copy)
+        } finally {
+            copy.fill(0)
+        }
+    }
+
+    private fun readPublicBytes(
+        input: DataInputStream,
+        maximum: Int,
+        minimum: Int = 0,
+    ): PublicBytes {
+        val length = readLength(input, maximum, minimum)
+        return readPublicBytesOfLength(input, length, maximum)
+    }
+
+    private fun readLength(input: DataInputStream, maximum: Int, minimum: Int): Int {
         val unsignedLength = input.readInt().toLong() and 0xffff_ffffL
         require(unsignedLength in minimum.toLong()..maximum.toLong())
-        return readFixed(input, unsignedLength.toInt())
+        return unsignedLength.toInt()
+    }
+
+    private fun readPublicBytesOfLength(
+        input: DataInputStream,
+        length: Int,
+        maximum: Int,
+    ): PublicBytes {
+        val bytes = readFixed(input, length)
+        return try {
+            PublicBytes.of(bytes, maximum)
+        } finally {
+            bytes.fill(0)
+        }
+    }
+
+    private fun readHash(input: DataInputStream): Hash32 {
+        val bytes = readFixed(input, 32)
+        return try {
+            Hash32.of(bytes)
+        } finally {
+            bytes.fill(0)
+        }
+    }
+
+    private fun readHandle(input: DataInputStream): NetworkHandle {
+        val bytes = readFixed(input, 16)
+        return try {
+            NetworkHandle.of(bytes)
+        } finally {
+            bytes.fill(0)
+        }
     }
 
     private fun readFixed(input: DataInputStream, size: Int): ByteArray =

@@ -1,86 +1,41 @@
 package org.matrix.TEESimulator.rka.bridge
 
-import java.util.concurrent.TimeUnit
-
 class BrokerBridgeClient(
     private val expected: () -> SupervisorSnapshot,
     private val processIdentity: ProcessIdentitySource,
     private val socketMetadata: () -> SocketMetadata,
     private val transport: BridgeTransport,
-    private val capacity: BridgeCapacity = BridgeCapacity(),
-    private val clock: () -> Long = System::nanoTime,
+    @Suppress("UNUSED_PARAMETER") private val capacity: BridgeCapacity = BridgeCapacity(),
+    @Suppress("UNUSED_PARAMETER") private val clock: () -> Long = System::nanoTime,
+    private val execution: BridgeExecution = BoundedBridgeExecution(),
+    private val timeoutMillis: Long = BridgeLimits.DEADLINE_MILLIS,
 ) {
     private val lock = Any()
     private var generation = -1L
-    private val correlations = mutableSetOf<RequestId>()
+    private var closed = false
+    private val correlations = mutableMapOf<RequestId, BridgeCorrelation>()
 
-    fun exchange(request: BridgeMessage): BridgeResult<BridgeMessage> {
-        val lease = capacity.acquire()
-        if (lease is BridgeResult.Failure) return lease
-        (lease as BridgeResult.Success).value.use {
-            val deadline = clock() + TimeUnit.MILLISECONDS.toNanos(BridgeLimits.DEADLINE_MILLIS)
-            val authenticated = authenticate()
-            if (authenticated is BridgeResult.Failure) return authenticated
-            val snapshot = (authenticated as BridgeResult.Success).value
-            if (!add(request.requestId, snapshot.generation)) {
-                return BridgeResult.Failure(BridgeError.DuplicateCorrelation)
-            }
-            try {
-                if (expired(deadline)) return BridgeResult.Failure(BridgeError.DeadlineExceeded)
-                val encoded = BridgeCodec.encode(request, BridgeDirection.BROKER_TO_SIDECAR)
-                try {
-                    transport.output().write(encoded)
-                    transport.output().flush()
-                } catch (_: SecurityException) {
-                    return closeWith(BridgeError.SelinuxDenied)
-                } catch (_: Exception) {
-                    return closeWith(BridgeError.PeerDied)
-                } finally {
-                    encoded.fill(0)
-                }
-                if (expired(deadline)) return closeWith(BridgeError.DeadlineExceeded)
-                val response =
-                    try {
-                        BridgeCodec.decode(transport.input(), BridgeDirection.SIDECAR_TO_BROKER)
-                    } catch (_: SecurityException) {
-                        return closeWith(BridgeError.SelinuxDenied)
-                    } catch (_: Exception) {
-                        return closeWith(BridgeError.PeerDied)
-                    }
-                if (response is BridgeResult.Failure) return closeWith(response.error)
-                val message = (response as BridgeResult.Success).value
-                if (message.requestId != request.requestId) {
-                    return closeWith(BridgeError.UnknownCorrelation)
-                }
-                val rechecked = authenticate()
-                if (
-                    rechecked is BridgeResult.Failure ||
-                        (rechecked as BridgeResult.Success).value != snapshot
-                ) {
-                    return closeWith(BridgeError.PeerIdentityChanged)
-                }
-                if (expired(deadline)) return closeWith(BridgeError.DeadlineExceeded)
-                return BridgeResult.Success(message)
-            } finally {
-                remove(request.requestId)
-            }
-        }
-    }
+    fun exchange(request: BridgeMessage): BridgeResult<BridgeMessage> =
+        execution.run(timeoutMillis, ::closeTransport) { exchangeOne(request) }
 
     fun cancel(requestId: RequestId): BridgeResult<Unit> =
-        if (remove(requestId)) {
-            runCatching { transport.close() }
+        take(requestId)?.let { correlation ->
+            correlation.worker.interrupt()
+            closeTransport()
             BridgeResult.Success(Unit)
-        } else {
-            BridgeResult.Failure(BridgeError.UnknownCorrelation)
-        }
+        } ?: run { BridgeResult.Failure(BridgeError.UnknownCorrelation) }
 
     private fun authenticate(): BridgeResult<SupervisorSnapshot> {
+        if (synchronized(lock) { closed }) {
+            return BridgeResult.Failure(BridgeError.PeerDied)
+        }
         val policy = SocketPolicy.validate(socketMetadata())
         if (policy is BridgeResult.Failure) return policy
         val credentials =
             try {
                 transport.peerCredentials()
+            } catch (error: BridgeTransportException) {
+                return BridgeResult.Failure(error.error)
             } catch (_: SecurityException) {
                 return BridgeResult.Failure(BridgeError.SelinuxDenied)
             } catch (_: Exception) {
@@ -102,24 +57,98 @@ class BrokerBridgeClient(
         }
     }
 
-    private fun add(id: RequestId, newGeneration: Long): Boolean =
+    private fun exchangeOne(request: BridgeMessage): BridgeResult<BridgeMessage> {
+        val authenticated = authenticate()
+        if (authenticated is BridgeResult.Failure) return authenticated
+        val snapshot = (authenticated as BridgeResult.Success).value
+        val correlation =
+            try {
+                BridgeProtocol.correlationFor(request, snapshot.generation)
+            } catch (_: IllegalArgumentException) {
+                request.close()
+                return closeWith(BridgeError.UnexpectedTag)
+            }
+        if (!add(correlation)) {
+            request.close()
+            return BridgeResult.Failure(BridgeError.DuplicateCorrelation)
+        }
+        try {
+            val encoded = BridgeCodec.encode(request, BridgeExchangeRole.CANDIDATE_REQUEST)
+            try {
+                transport.output().write(encoded)
+                transport.output().flush()
+            } catch (_: SecurityException) {
+                return closeWith(BridgeError.SelinuxDenied)
+            } catch (_: Exception) {
+                return closeWith(BridgeError.PeerDied)
+            } finally {
+                encoded.fill(0)
+            }
+            val response =
+                try {
+                    BridgeCodec.decode(transport.input(), BridgeExchangeRole.CANDIDATE_RESPONSE)
+                } catch (_: SecurityException) {
+                    return closeWith(BridgeError.SelinuxDenied)
+                } catch (_: Exception) {
+                    return closeWith(BridgeError.PeerDied)
+                }
+            if (response is BridgeResult.Failure) return closeWith(response.error)
+            val message = (response as BridgeResult.Success).value
+            if (!correlation.accepts(message)) {
+                message.close()
+                return closeWith(BridgeError.UnknownCorrelation)
+            }
+            val rechecked = authenticate()
+            if (
+                rechecked is BridgeResult.Failure ||
+                    (rechecked as BridgeResult.Success).value != snapshot
+            ) {
+                message.close()
+                return closeWith(BridgeError.PeerIdentityChanged)
+            }
+            return BridgeResult.Success(message)
+        } finally {
+            request.close()
+            remove(request.requestId)
+        }
+    }
+
+    private fun add(correlation: BridgeCorrelation): Boolean =
         synchronized(lock) {
-            if (generation != -1L && generation != newGeneration) correlations.clear()
-            generation = newGeneration
-            correlations.size < BridgeLimits.MAX_IN_FLIGHT && correlations.add(id)
+            if (generation != -1L && generation != correlation.generation) correlations.clear()
+            generation = correlation.generation
+            correlations.size < BridgeLimits.MAX_IN_FLIGHT &&
+                correlations.putIfAbsent(correlation.requestId, correlation) == null
         }
 
-    private fun remove(id: RequestId): Boolean = synchronized(lock) { correlations.remove(id) }
+    private fun remove(id: RequestId): Boolean =
+        synchronized(lock) { correlations.remove(id) != null }
 
-    private fun expired(deadline: Long): Boolean {
-        val remaining = deadline - clock()
-        return remaining <= 0L ||
-            remaining > TimeUnit.MILLISECONDS.toNanos(BridgeLimits.DEADLINE_MILLIS)
-    }
+    private fun take(id: RequestId): BridgeCorrelation? =
+        synchronized(lock) { correlations.remove(id) }
 
     private fun closeWith(error: BridgeError): BridgeResult.Failure {
         synchronized(lock) { correlations.clear() }
-        runCatching { transport.close() }
+        closeTransport()
         return BridgeResult.Failure(error)
     }
+
+    private fun closeTransport() {
+        var workers = emptyList<Thread>()
+        val shouldClose =
+            synchronized(lock) {
+                if (closed) false
+                else {
+                    closed = true
+                    workers = correlations.values.map(BridgeCorrelation::worker)
+                    correlations.clear()
+                    true
+                }
+            }
+        if (!shouldClose) return
+        workers.filter { it !== Thread.currentThread() }.forEach(Thread::interrupt)
+        runCatching { transport.close() }
+    }
+
+    internal fun correlationCountForTest(): Int = synchronized(lock) { correlations.size }
 }

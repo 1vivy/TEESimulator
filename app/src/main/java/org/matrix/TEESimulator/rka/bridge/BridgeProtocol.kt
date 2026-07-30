@@ -3,6 +3,7 @@ package org.matrix.TEESimulator.rka.bridge
 import java.io.Closeable
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Semaphore
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Frozen Task-7/Task-8 broker bridge contract. This is not the public RKA v2 wire protocol. */
 object BridgeLimits {
@@ -18,6 +19,7 @@ object BridgeLimits {
     const val MAX_PUBLIC_KEYS = 20
     const val MAX_CHAIN_CERTIFICATES = 20
     const val MAX_CERTIFICATE_BYTES = 65_536
+    const val MAX_CHAIN_BYTES = 524_288
 }
 
 enum class BridgeDirection(val wire: Int) {
@@ -37,15 +39,55 @@ object BridgeTag {
         setOf(PUBLIC_KEY_REQUEST, PUBLIC_KEY_RESPONSE, UPDATE_REQUEST, PUBLIC_RESULT, CANCEL, ERROR)
 }
 
+enum class BridgeExchangeRole(val direction: BridgeDirection, internal val tags: Set<Int>) {
+    DONOR_REQUEST(
+        BridgeDirection.SIDECAR_TO_BROKER,
+        setOf(BridgeTag.PUBLIC_KEY_REQUEST, BridgeTag.UPDATE_REQUEST, BridgeTag.CANCEL),
+    ),
+    DONOR_RESPONSE(
+        BridgeDirection.BROKER_TO_SIDECAR,
+        setOf(
+            BridgeTag.PUBLIC_KEY_RESPONSE,
+            BridgeTag.PUBLIC_RESULT,
+            BridgeTag.CANCEL,
+            BridgeTag.ERROR,
+        ),
+    ),
+    CANDIDATE_REQUEST(
+        BridgeDirection.BROKER_TO_SIDECAR,
+        setOf(BridgeTag.PUBLIC_KEY_REQUEST, BridgeTag.UPDATE_REQUEST, BridgeTag.CANCEL),
+    ),
+    CANDIDATE_RESPONSE(
+        BridgeDirection.SIDECAR_TO_BROKER,
+        setOf(
+            BridgeTag.PUBLIC_KEY_RESPONSE,
+            BridgeTag.PUBLIC_RESULT,
+            BridgeTag.CANCEL,
+            BridgeTag.ERROR,
+        ),
+    ),
+}
+
 @JvmInline value class RequestId(val value: Long)
 
-class PublicBytes private constructor(bytes: ByteArray) {
+class PublicBytes private constructor(bytes: ByteArray) : AutoCloseable {
     private val value = bytes.copyOf()
+    private val destroyed = AtomicBoolean()
 
-    fun copyBytes(): ByteArray = value.copyOf()
+    fun copyBytes(): ByteArray {
+        check(!destroyed.get()) { "public bytes destroyed" }
+        return value.copyOf()
+    }
 
     internal val size: Int
-        get() = value.size
+        get() {
+            check(!destroyed.get()) { "public bytes destroyed" }
+            return value.size
+        }
+
+    override fun close() {
+        if (destroyed.compareAndSet(false, true)) value.fill(0)
+    }
 
     override fun equals(other: Any?): Boolean =
         other is PublicBytes && value.contentEquals(other.value)
@@ -63,10 +105,18 @@ class PublicBytes private constructor(bytes: ByteArray) {
     }
 }
 
-class Hash32 private constructor(bytes: ByteArray) {
+class Hash32 private constructor(bytes: ByteArray) : AutoCloseable {
     private val value = bytes.copyOf()
+    private val destroyed = AtomicBoolean()
 
-    fun copyBytes(): ByteArray = value.copyOf()
+    fun copyBytes(): ByteArray {
+        check(!destroyed.get()) { "hash destroyed" }
+        return value.copyOf()
+    }
+
+    override fun close() {
+        if (destroyed.compareAndSet(false, true)) value.fill(0)
+    }
 
     override fun equals(other: Any?): Boolean = other is Hash32 && value.contentEquals(other.value)
 
@@ -82,10 +132,18 @@ class Hash32 private constructor(bytes: ByteArray) {
     }
 }
 
-class NetworkHandle private constructor(bytes: ByteArray) {
+class NetworkHandle private constructor(bytes: ByteArray) : AutoCloseable {
     private val value = bytes.copyOf()
+    private val destroyed = AtomicBoolean()
 
-    fun copyBytes(): ByteArray = value.copyOf()
+    fun copyBytes(): ByteArray {
+        check(!destroyed.get()) { "network handle destroyed" }
+        return value.copyOf()
+    }
+
+    override fun close() {
+        if (destroyed.compareAndSet(false, true)) value.fill(0)
+    }
 
     override fun equals(other: Any?): Boolean =
         other is NetworkHandle && value.contentEquals(other.value)
@@ -102,7 +160,7 @@ class NetworkHandle private constructor(bytes: ByteArray) {
     }
 }
 
-sealed class BridgeMessage {
+sealed class BridgeMessage : AutoCloseable {
     abstract val requestId: RequestId
 
     class PublicKeyRequest(
@@ -126,6 +184,10 @@ sealed class BridgeMessage {
 
         override fun toString(): String =
             "PublicKeyRequest(requestId=$requestId,challengeLength=${challenge.size},keyCount=$keyCount)"
+
+        override fun close() {
+            challenge.close()
+        }
     }
 
     class PublicKeyResponse(
@@ -138,12 +200,20 @@ sealed class BridgeMessage {
         init {
             require(publicCsr.size in 1..BridgeLimits.MAX_FRAME_BYTES)
             require(values.size in 1..BridgeLimits.MAX_PUBLIC_KEYS)
+            val encodedSize =
+                4L + publicCsr.size + 1L + Math.multiplyExact(values.size.toLong(), 32L)
+            require(encodedSize <= BridgeLimits.MAX_FRAME_BYTES)
         }
 
         fun publicKeyHashes(): List<Hash32> = values.map { Hash32.of(it.copyBytes()) }
 
         override fun toString(): String =
             "PublicKeyResponse(requestId=$requestId,csrLength=${publicCsr.size},hashCount=${values.size})"
+
+        override fun close() {
+            publicCsr.close()
+            values.forEach(Hash32::close)
+        }
     }
 
     class UpdateRequest(
@@ -159,6 +229,11 @@ sealed class BridgeMessage {
 
         override fun toString(): String =
             "UpdateRequest(requestId=$requestId,chunkLength=${chunk.size},totalInputBytes=$totalInputBytes)"
+
+        override fun close() {
+            operationHandle.close()
+            chunk.close()
+        }
     }
 
     class PublicResult(
@@ -167,14 +242,18 @@ sealed class BridgeMessage {
         val publicSpki: PublicBytes,
         certificateChain: List<PublicBytes>,
     ) : BridgeMessage() {
-        private val chain =
-            certificateChain.map {
-                PublicBytes.of(it.copyBytes(), BridgeLimits.MAX_CERTIFICATE_BYTES)
-            }
+        private val chain = copyBoundedChain(certificateChain)
 
         init {
             require(publicSpki.size in 1..BridgeLimits.MAX_CERTIFICATE_BYTES)
             require(chain.size in 1..BridgeLimits.MAX_CHAIN_CERTIFICATES)
+            val encodedSize =
+                16L +
+                    4L +
+                    publicSpki.size +
+                    1L +
+                    chain.fold(0L) { sum, certificate -> Math.addExact(sum, 4L + certificate.size) }
+            require(encodedSize <= BridgeLimits.MAX_FRAME_BYTES)
         }
 
         fun certificateChain(): List<PublicBytes> =
@@ -182,6 +261,27 @@ sealed class BridgeMessage {
 
         override fun toString(): String =
             "PublicResult(requestId=$requestId,spkiLength=${publicSpki.size},certificateCount=${chain.size})"
+
+        override fun close() {
+            networkHandle.close()
+            publicSpki.close()
+            chain.forEach(PublicBytes::close)
+        }
+
+        private companion object {
+            fun copyBoundedChain(source: List<PublicBytes>): List<PublicBytes> {
+                require(source.size in 1..BridgeLimits.MAX_CHAIN_CERTIFICATES)
+                val total =
+                    source.fold(0L) { sum, certificate ->
+                        require(certificate.size in 1..BridgeLimits.MAX_CERTIFICATE_BYTES)
+                        Math.addExact(sum, certificate.size.toLong())
+                    }
+                require(total <= BridgeLimits.MAX_CHAIN_BYTES)
+                return source.map {
+                    PublicBytes.of(it.copyBytes(), BridgeLimits.MAX_CERTIFICATE_BYTES)
+                }
+            }
+        }
     }
 
     class Cancel(override val requestId: RequestId) : BridgeMessage() {
@@ -190,6 +290,8 @@ sealed class BridgeMessage {
         override fun hashCode(): Int = requestId.hashCode()
 
         override fun toString(): String = "Cancel(requestId=$requestId)"
+
+        override fun close() = Unit
     }
 
     class Error(
@@ -198,6 +300,44 @@ sealed class BridgeMessage {
         val detailHash: Hash32,
     ) : BridgeMessage() {
         override fun toString(): String = "Error(requestId=$requestId,code=$code,detail=redacted)"
+
+        override fun close() {
+            detailHash.close()
+        }
+    }
+}
+
+internal data class BridgeCorrelation(
+    val requestId: RequestId,
+    val expectedTag: Int,
+    val generation: Long,
+    val worker: Thread,
+) {
+    fun accepts(message: BridgeMessage): Boolean =
+        message.requestId == requestId &&
+            (BridgeProtocol.tagOf(message) == expectedTag || message is BridgeMessage.Error)
+}
+
+internal object BridgeProtocol {
+    fun tagOf(message: BridgeMessage): Int =
+        when (message) {
+            is BridgeMessage.PublicKeyRequest -> BridgeTag.PUBLIC_KEY_REQUEST
+            is BridgeMessage.PublicKeyResponse -> BridgeTag.PUBLIC_KEY_RESPONSE
+            is BridgeMessage.UpdateRequest -> BridgeTag.UPDATE_REQUEST
+            is BridgeMessage.PublicResult -> BridgeTag.PUBLIC_RESULT
+            is BridgeMessage.Cancel -> BridgeTag.CANCEL
+            is BridgeMessage.Error -> BridgeTag.ERROR
+        }
+
+    fun correlationFor(request: BridgeMessage, generation: Long): BridgeCorrelation {
+        val expected =
+            when (request) {
+                is BridgeMessage.PublicKeyRequest -> BridgeTag.PUBLIC_KEY_RESPONSE
+                is BridgeMessage.UpdateRequest -> BridgeTag.PUBLIC_RESULT
+                is BridgeMessage.Cancel -> BridgeTag.CANCEL
+                else -> throw IllegalArgumentException("message is not a request")
+            }
+        return BridgeCorrelation(request.requestId, expected, generation, Thread.currentThread())
     }
 }
 
@@ -216,6 +356,8 @@ sealed class BridgeError {
     data object UnsupportedVersion : BridgeError()
 
     data object WrongDirection : BridgeError()
+
+    data object UnexpectedTag : BridgeError()
 
     data object UnknownTag : BridgeError()
 
@@ -248,6 +390,18 @@ sealed class BridgeError {
     data object PeerIdentityChanged : BridgeError()
 
     data object SocketPolicy : BridgeError()
+
+    data object SocketCreateDenied : BridgeError()
+
+    data object SocketChownDenied : BridgeError()
+
+    data object SocketChmodDenied : BridgeError()
+
+    data object SocketLabelDenied : BridgeError()
+
+    data object SocketBindDenied : BridgeError()
+
+    data object SocketPathChanged : BridgeError()
 
     data object SelinuxDenied : BridgeError()
 

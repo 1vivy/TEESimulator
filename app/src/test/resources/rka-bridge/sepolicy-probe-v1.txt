@@ -1,0 +1,6 @@
+ksu self unix_stream_socket create,bind,connect,listen,accept,read,write,getattr,getopt,setopt,shutdown
+magisk self unix_stream_socket create,bind,connect,listen,accept,read,write,getattr,getopt,setopt,shutdown
+ksu adb_data_file dir search,open,read,getattr,write,add_name,remove_name,setattr
+ksu adb_data_file sock_file create,open,read,write,getattr,setattr,unlink
+magisk adb_data_file dir search,open,read,getattr,write,add_name,remove_name,setattr
+magisk adb_data_file sock_file create,open,read,write,getattr,setattr,unlink

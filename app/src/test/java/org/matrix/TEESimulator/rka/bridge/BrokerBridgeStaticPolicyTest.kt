@@ -44,6 +44,21 @@ class BrokerBridgeStaticPolicyTest {
         )
         assertFalse(policy.lineSequence().any { it.trimStart().startsWith("permissive ") })
         assertFalse(policy.lineSequence().any { it.trimStart().startsWith("typeattribute ") })
+
+        val probe =
+            requireNotNull(javaClass.getResource("/rka-bridge/sepolicy-probe-v1.txt"))
+                .readText()
+                .lineSequence()
+                .filter(String::isNotBlank)
+                .toList()
+        for (entry in probe) {
+            val fields = entry.split(" ", limit = 4)
+            val permissions = fields[3].split(",").joinToString(" ")
+            assertTrue(
+                "missing exact policy probe entry: $entry",
+                policy.contains("allow ${fields[0]} ${fields[1]}:${fields[2]} { $permissions }"),
+            )
+        }
     }
 
     @Test

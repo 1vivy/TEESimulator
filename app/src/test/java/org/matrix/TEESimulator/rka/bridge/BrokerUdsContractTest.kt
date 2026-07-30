@@ -38,7 +38,7 @@ class BrokerUdsContractTest {
         val decoded =
             BridgeCodec.decode(
                 ByteArrayInputStream(transport.output.toByteArray()),
-                BridgeDirection.BROKER_TO_SIDECAR,
+                BridgeExchangeRole.DONOR_RESPONSE,
             )
         assertTrue(decoded is BridgeResult.Success)
         assertEquals(request.requestId, (decoded as BridgeResult.Success).value.requestId)

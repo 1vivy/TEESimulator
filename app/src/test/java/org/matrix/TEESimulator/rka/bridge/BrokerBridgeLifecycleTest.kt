@@ -2,7 +2,6 @@ package org.matrix.TEESimulator.rka.bridge
 
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
-import java.util.concurrent.atomic.AtomicLong
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -46,40 +45,44 @@ class BrokerBridgeLifecycleTest {
 
     @Test
     fun aggregate_deadline_includes_authentication_io_and_dispatch() {
-        val now = AtomicLong()
-        val snapshot = snapshot()
-        val request = BridgeMessage.Cancel(RequestId(92))
+        val dispatchEntered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val request =
+            BridgeMessage.PublicKeyRequest(RequestId(92), PublicBytes.of(ByteArray(16), 64), 1)
         val transport =
-            object :
-                DuplexTransport(
-                    BridgeCodec.encode(request, BridgeDirection.SIDECAR_TO_BROKER),
-                    PeerCredentials(0, 0, 42),
-                ) {
-                override fun input(): ByteArrayInputStream {
-                    now.addAndGet(2_000_000_000)
-                    return super.input()
-                }
-            }
+            DuplexTransport(
+                BridgeCodec.encode(request, BridgeDirection.SIDECAR_TO_BROKER),
+                PeerCredentials(0, 0, 42),
+            )
         val endpoint =
             BrokerBridgeEndpoint(
-                expected = { snapshot },
-                processIdentity =
-                    ProcessIdentitySource {
-                        now.addAndGet(2_000_000_000)
-                        observed()
-                    },
-                socketMetadata = {
-                    now.addAndGet(1_500_000_000)
-                    SocketMetadata.secureRootOwned()
-                },
-                clock = now::get,
+                expected = { snapshot() },
+                processIdentity = ProcessIdentitySource { observed() },
+                socketMetadata = { SocketMetadata.secureRootOwned() },
                 transport = transport,
+                timeoutMillis = 100,
             )
 
-        val result = endpoint.acceptAndDispatch { request }
+        val started = System.nanoTime()
+        val result =
+            endpoint.acceptAndDispatch {
+                dispatchEntered.countDown()
+                release.await()
+                BridgeMessage.PublicKeyResponse(
+                    it.requestId,
+                    PublicBytes.of(byteArrayOf(1), BridgeLimits.MAX_FRAME_BYTES),
+                    listOf(Hash32.of(ByteArray(32))),
+                )
+            }
+        val elapsedMillis =
+            java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+        release.countDown()
 
+        assertTrue(dispatchEntered.await(1, java.util.concurrent.TimeUnit.SECONDS))
         assertEquals(BridgeError.DeadlineExceeded, result.failure())
+        assertTrue("deadline took $elapsedMillis ms", elapsedMillis < 1_000)
         assertTrue(transport.closed)
+        assertEquals(0, endpoint.correlationCountForTest())
     }
 
     @Test

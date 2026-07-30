@@ -19,6 +19,8 @@ deny = [
     { name = "actix-web", reason = "Use axum for HTTP services." },
     { name = "async-std", reason = "Use tokio for asynchronous work." },
     { name = "chrono", reason = "Use jiff for civil time." },
+    { name = "nix", reason = "Use the pinned rustix Unix syscall bridge." },
+    { name = "socket2", reason = "Use the pinned rustix socket APIs." },
 ]
 
 [sources]

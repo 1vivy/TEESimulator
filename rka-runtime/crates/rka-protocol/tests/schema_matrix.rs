@@ -4,12 +4,15 @@
 )]
 
 use rka_protocol::{
-    Frame, FrameBody, FrameContext, MessageKind, ProtocolError, RequestId, SessionId, decode_frame,
-    encode_frame, validate_deterministic_cbor,
+    CborWriter, Frame, FrameBody, FrameContext, HashDomain, MessageKind, ProtocolError, RequestId,
+    SessionId, TTL_SECONDS, decode_frame, encode_frame, encode_frame_without_transcript, hash_cbor,
+    sha256, transcript_hash, validate_deterministic_cbor,
 };
 
 include!("support/schema_vectors.rs");
 include!("support/schema_results.rs");
+include!("support/schema_crypto.rs");
+include!("support/schema_frame.rs");
 
 #[test]
 fn begin_encoder_emits_every_required_field_and_roundtrips() {
@@ -41,6 +44,7 @@ fn every_frozen_body_schema_roundtrips_exactly() {
     // Then: all 21 schemas are canonical, accepted, and byte-exact after round-trip.
     assert_eq!(vectors.len(), 21);
     assert_eq!(golden.len(), vectors.len());
+    let mut previous = [0_u8; 32];
     for (vector, (golden_name, golden_bytes)) in vectors.iter().zip(golden) {
         assert_eq!(vector.name, golden_name);
         assert_eq!(vector.bytes, golden_bytes, "{}", vector.name);
@@ -50,12 +54,17 @@ fn every_frozen_body_schema_roundtrips_exactly() {
             "{} must be canonical",
             vector.name
         );
+        let decoded = decode_frame(&vector.bytes);
         assert_eq!(
-            decode_frame(&vector.bytes).map(|frame| encode_frame(&frame)),
-            Ok(vector.bytes.clone()),
-            "{}",
-            vector.name
+            decoded.as_ref().map(|frame| encode_frame(frame)),
+            Ok(vector.bytes.clone())
         );
+        if let Ok(frame) = decoded {
+            let expected_hash =
+                transcript_hash(&previous, &encode_frame_without_transcript(&frame));
+            assert_eq!(frame.transcript_hash, expected_hash, "{}", vector.name);
+            previous = expected_hash;
+        }
     }
 }
 

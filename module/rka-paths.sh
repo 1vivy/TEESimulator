@@ -24,13 +24,33 @@ rka_path_is_private_directory() {
 }
 
 rka_ensure_private_directory() {
-    rka_path_is_clean_absolute "$1" || return 1
-    [ ! -L "$1" ] || return 1
-    if [ ! -e "$1" ]; then
-        mkdir "$1" || return 1
-        chmod "$RKA_LAYOUT_DIRECTORY_MODE" "$1" || return 1
-    fi
-    rka_path_is_private_directory "$1"
+    rka_requested_directory=$1
+    rka_path_is_clean_absolute "$rka_requested_directory" || return 1
+    rka_remaining_components=${rka_requested_directory#/}
+    rka_component_path=
+    while [ -n "$rka_remaining_components" ]; do
+        case $rka_remaining_components in
+            */*)
+                rka_component=${rka_remaining_components%%/*}
+                rka_remaining_components=${rka_remaining_components#*/}
+                ;;
+            *)
+                rka_component=$rka_remaining_components
+                rka_remaining_components=
+                ;;
+        esac
+        [ -n "$rka_component" ] || return 1
+        rka_component_path=$rka_component_path/$rka_component
+        [ ! -L "$rka_component_path" ] || return 1
+        if [ -e "$rka_component_path" ]; then
+            [ -d "$rka_component_path" ] || return 1
+        else
+            mkdir "$rka_component_path" || return 1
+            chmod "$RKA_LAYOUT_DIRECTORY_MODE" "$rka_component_path" || return 1
+            rka_path_is_private_directory "$rka_component_path" || return 1
+        fi
+    done
+    rka_path_is_private_directory "$rka_requested_directory"
 }
 
 rka_private_file_is_valid() {

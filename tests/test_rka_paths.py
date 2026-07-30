@@ -106,6 +106,54 @@ class RkaPathsTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "INERT_INVALID_CONFIG\n")
 
+    def test_rejects_symlinked_state_ancestors_without_creating_state(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            config_root = temporary_root / "tricky_store"
+            target_root = temporary_root / "target"
+            target_root.mkdir()
+            for relative_link in (Path("link-one"), Path("safe") / "link-two"):
+                link_parent = temporary_root / relative_link.parent
+                link_parent.mkdir(exist_ok=True)
+                link_path = temporary_root / relative_link
+                link_path.symlink_to(target_root, target_is_directory=True)
+                escaped_state_root = link_path / "state"
+
+                result = self.run_control(config_root, escaped_state_root, "initialize")
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "INERT_INVALID_CONFIG\n")
+                self.assertFalse((target_root / "state").exists())
+
+    def test_rejects_state_ancestor_swapped_to_symlink(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            config_root = temporary_root / "tricky_store"
+            original_parent = temporary_root / "state-parent"
+            original_parent.mkdir()
+            state_root = original_parent / "state"
+            self.assertEqual(self.run_control(config_root, state_root, "initialize").returncode, 0)
+            replacement_parent = temporary_root / "replacement-parent"
+            original_parent.rename(replacement_parent)
+            original_parent.symlink_to(replacement_parent, target_is_directory=True)
+
+            result = self.run_control(config_root, state_root, "initialize")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "INERT_INVALID_CONFIG\n")
+
+    def test_creates_missing_state_ancestors_privately(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            state_root = temporary_root / "missing-parent" / "state"
+
+            result = self.run_control(temporary_root / "tricky_store", state_root, "initialize")
+
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "READY\n")
+            self.assertEqual(os.stat(state_root.parent).st_mode & 0o777, 0o700)
+            self.assertEqual(os.stat(state_root).st_mode & 0o777, 0o700)
+
     def test_rejects_weak_mode(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)

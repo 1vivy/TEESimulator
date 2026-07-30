@@ -1,12 +1,17 @@
 package org.matrix.teesimulator.rkahost.evidence
 
 import java.nio.channels.FileChannel
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFilePermission
+import java.security.GeneralSecurityException
+import java.security.PrivateKey
+import java.security.PublicKey
+import java.security.Signature
 import java.util.Base64
 
 data class ReceiptBinding(
@@ -29,7 +34,7 @@ object EvidenceIssuer {
         live: LiveSentinelEvidence,
         binding: ReceiptBinding,
         material: ReceiptMaterial,
-        signer: ReceiptSigner,
+        signer: Ed25519ReceiptSigner,
     ): String {
         val values = live.values
         require(binding.profile == values.profileId && binding.role == values.role) {
@@ -123,38 +128,60 @@ private data class EvidenceReceipt(
         )
 }
 
-interface ReceiptSigner {
-    val keyId: String
-
-    fun sign(canonical: ByteArray): ByteArray
-
-    fun verify(canonical: ByteArray, signature: ByteArray): Boolean
-}
-
-class DigestSigner(override val keyId: String) : ReceiptSigner {
-    override fun sign(canonical: ByteArray): ByteArray =
-        EvidenceHash.sha256(keyId.toByteArray() + canonical)
-            .chunked(2)
-            .map { it.toInt(16).toByte() }
-            .toByteArray()
-
-    override fun verify(canonical: ByteArray, signature: ByteArray): Boolean =
-        sign(canonical).contentEquals(signature)
-}
-
 class ReceiptException(message: String) : IllegalStateException(message)
+
+class Ed25519ReceiptSigner(val keyId: String, private val privateKey: PrivateKey) {
+    init {
+        if (!ReceiptAuthentication.keyId.matches(keyId))
+            throw ReceiptException("RECEIPT_SIGNER_ID_INVALID")
+        if (!ReceiptAuthentication.isEd25519(privateKey))
+            throw ReceiptException("RECEIPT_SIGNING_KEY_INVALID")
+    }
+
+    fun signReceipt(unsigned: ByteArray): ByteArray =
+        ReceiptAuthentication.sign(privateKey, unsigned)
+}
+
+private object ReceiptAuthentication {
+    val keyId = Regex("[A-Za-z0-9._-]{1,64}")
+    private val domain = "TEE-RKA-EVIDENCE-RECEIPT-v2\u0000".toByteArray(StandardCharsets.UTF_8)
+
+    fun isEd25519(key: java.security.Key): Boolean = key.algorithm in setOf("Ed25519", "EdDSA")
+
+    fun sign(privateKey: PrivateKey, unsigned: ByteArray): ByteArray =
+        try {
+            Signature.getInstance("Ed25519").run {
+                initSign(privateKey)
+                update(domain + unsigned)
+                sign()
+            }
+        } catch (_: GeneralSecurityException) {
+            throw ReceiptException("RECEIPT_SIGNING_FAILED")
+        }
+
+    fun verify(publicKey: PublicKey, unsigned: ByteArray, signature: ByteArray): Boolean =
+        try {
+            Signature.getInstance("Ed25519").run {
+                initVerify(publicKey)
+                update(domain + unsigned)
+                verify(signature)
+            }
+        } catch (_: GeneralSecurityException) {
+            throw ReceiptException("RECEIPT_SIGNATURE_INVALID")
+        }
+}
 
 private object ReceiptCodec {
     private val text = Regex("[A-Za-z0-9._/-]{1,160}")
     private val hash = Regex("[0-9a-f]{64}")
 
-    fun encode(receipt: EvidenceReceipt, signer: ReceiptSigner): String {
+    fun encode(receipt: EvidenceReceipt, signer: Ed25519ReceiptSigner): String {
         validate(receipt)
         val unsigned = receipt.fields().joinToString("\n") { "${it.first}=${it.second}" } + "\n"
         val signature =
             Base64.getUrlEncoder()
                 .withoutPadding()
-                .encodeToString(signer.sign(unsigned.toByteArray()))
+                .encodeToString(signer.signReceipt(unsigned.toByteArray(StandardCharsets.UTF_8)))
         return unsigned + "signer=${signer.keyId}\n" + "signature=$signature\n"
     }
 
@@ -201,6 +228,9 @@ private object ReceiptCodec {
         require(pairs.map { it.first } == expected) { "RECEIPT_NONCANONICAL" }
         val fields = pairs.toMap()
         require(fields.getValue("version") == "2") { "RECEIPT_VERSION_INVALID" }
+        require(ReceiptAuthentication.keyId.matches(fields.getValue("signer"))) {
+            "RECEIPT_SIGNER_ID_INVALID"
+        }
         val receipt =
             EvidenceReceipt(
                 fields.getValue("commit"),
@@ -241,8 +271,14 @@ private object ReceiptCodec {
         ) {
             "RECEIPT_NONCANONICAL"
         }
+        require(signature.size == ED25519_SIGNATURE_BYTES) { "RECEIPT_SIGNATURE_INVALID" }
         val unsigned = receipt.fields().joinToString("\n") { "${it.first}=${it.second}" } + "\n"
-        return DecodedReceipt(receipt, fields.getValue("signer"), signature, unsigned.toByteArray())
+        return DecodedReceipt(
+            receipt,
+            fields.getValue("signer"),
+            signature,
+            unsigned.toByteArray(StandardCharsets.UTF_8),
+        )
     }
 
     private fun validate(receipt: EvidenceReceipt) {
@@ -304,6 +340,8 @@ private object ReceiptCodec {
             "RECEIPT_TIME_INVALID"
         }
     }
+
+    private const val ED25519_SIGNATURE_BYTES = 64
 }
 
 private data class DecodedReceipt(
@@ -313,9 +351,21 @@ private data class DecodedReceipt(
     val unsigned: ByteArray,
 )
 
-class ReceiptVerifier(private val signer: ReceiptSigner) {
+class ReceiptVerifier(trustedKeys: Map<String, PublicKey>) {
+    private val trustedKeys = trustedKeys.toMap()
     private val consumedNonces = mutableSetOf<String>()
     private var previousHash: String? = null
+
+    init {
+        if (this.trustedKeys.isEmpty()) throw ReceiptException("RECEIPT_TRUST_EMPTY")
+        if (
+            !this.trustedKeys.all { (keyId, publicKey) ->
+                ReceiptAuthentication.keyId.matches(keyId) &&
+                    ReceiptAuthentication.isEd25519(publicKey)
+            }
+        )
+            throw ReceiptException("RECEIPT_TRUST_INVALID")
+    }
 
     fun verify(encoded: String, binding: ReceiptBinding): VerifiedEvidence {
         val decoded =
@@ -325,7 +375,9 @@ class ReceiptVerifier(private val signer: ReceiptSigner) {
                 throw ReceiptException(failure.message ?: "RECEIPT_INVALID")
             }
         val receipt = decoded.receipt
-        if (decoded.signerId != signer.keyId || !signer.verify(decoded.unsigned, decoded.signature))
+        val publicKey =
+            trustedKeys[decoded.signerId] ?: throw ReceiptException("RECEIPT_SIGNER_UNTRUSTED")
+        if (!ReceiptAuthentication.verify(publicKey, decoded.unsigned, decoded.signature))
             throw ReceiptException("RECEIPT_SIGNATURE_INVALID")
         if (
             receipt.commit != binding.commit ||

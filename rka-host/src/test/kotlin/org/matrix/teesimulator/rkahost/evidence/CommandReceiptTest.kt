@@ -67,12 +67,12 @@ class CommandReceiptTest {
     @Test
     fun receipts_reject_nonce_binding_signature_and_chain_attacks() {
         // Given: a deterministic signer and a sentinel-derived canonical signed receipt.
-        val signer = DigestSigner("test-key")
+        val signer = ReceiptTestKeys.signer
         val encoded = issue("nonce-A", signer)
 
         // When/Then: verification rejects wrong binding, replay, tamper, noncanonical, reorder, and
         // truncation.
-        val verifier = ReceiptVerifier(signer)
+        val verifier = ReceiptVerifier(ReceiptTestKeys.trustedKeys)
         verifier.verify(
             encoded,
             ReceiptBinding("commit-A", "profile-A", EndpointRole.DONOR, "session-A", "nonce-A"),
@@ -96,7 +96,7 @@ class CommandReceiptTest {
             )
         }
         assertThrows(ReceiptException::class.java) {
-            ReceiptVerifier(signer)
+            ReceiptVerifier(ReceiptTestKeys.trustedKeys)
                 .verify(
                     encoded.replace("version=2\n", "role=DONOR\nversion=2\n"),
                     ReceiptBinding(
@@ -111,7 +111,7 @@ class CommandReceiptTest {
         val tamperedSignature = encoded.replace(Regex("(?m)^signature=."), "signature=A")
         val signatureFailure =
             assertThrows(ReceiptException::class.java) {
-                ReceiptVerifier(signer)
+                ReceiptVerifier(ReceiptTestKeys.trustedKeys)
                     .verify(
                         tamperedSignature,
                         ReceiptBinding(
@@ -128,10 +128,10 @@ class CommandReceiptTest {
 
     @Test
     fun only_sentinel_derived_capability_can_be_signed() {
-        val signer = DigestSigner("test-key")
+        val signer = ReceiptTestKeys.signer
         val encoded = issue("nonce-capability", signer)
         val verified =
-            ReceiptVerifier(signer)
+            ReceiptVerifier(ReceiptTestKeys.trustedKeys)
                 .verify(
                     encoded,
                     ReceiptBinding(
@@ -147,7 +147,7 @@ class CommandReceiptTest {
 
     @Test
     fun signs_three_samples_when_each_adjacent_interval_is_continuous() {
-        val signer = DigestSigner("test-key")
+        val signer = ReceiptTestKeys.signer
         val service = ServiceIdentity("keystore2", "init", 42, 100, "/system/bin/keystore2", 0)
         val properties = mapOf("ro.build.fingerprint" to "build-A")
         val live =
@@ -176,7 +176,7 @@ class CommandReceiptTest {
 
         assertEquals(
             3,
-            ReceiptVerifier(signer)
+            ReceiptVerifier(ReceiptTestKeys.trustedKeys)
                 .verify(
                     encoded,
                     ReceiptBinding(
@@ -195,7 +195,7 @@ class CommandReceiptTest {
     fun atomic_store_leaves_old_or_new_never_partial_and_rejects_paths_modes_and_symlinks() {
         val root = Files.createTempDirectory("rka-receipt-")
         try {
-            val signer = DigestSigner("test-key")
+            val signer = ReceiptTestKeys.signer
             val store = AtomicReceiptStore(root)
             val first = issue("nonce-1", signer)
             store.write("receipt", first)
@@ -211,7 +211,7 @@ class CommandReceiptTest {
         }
     }
 
-    private fun issue(nonce: String, signer: ReceiptSigner): String {
+    private fun issue(nonce: String, signer: Ed25519ReceiptSigner): String {
         val service = ServiceIdentity("keystore2", "init", 42, 100, "/system/bin/keystore2", 0)
         val properties = mapOf("ro.build.fingerprint" to "build-A")
         val live =

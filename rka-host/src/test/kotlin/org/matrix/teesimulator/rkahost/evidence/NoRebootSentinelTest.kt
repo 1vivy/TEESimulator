@@ -143,6 +143,6 @@ class NoRebootSentinelTest {
                 EvidenceHash.sha256("artifact"),
                 monotonicMillis = 2_000,
             ),
-            DigestSigner("test-key"),
+            ReceiptTestKeys.signer,
         )
 }

@@ -9,7 +9,7 @@ import org.junit.Test
 class SignedLivenessTest {
     private val service = ServiceIdentity("keystore2", "init", 42, 100, "/system/bin/keystore2", 0)
     private val properties = mapOf("ro.build.fingerprint" to "build-A")
-    private val signer = DigestSigner("test-key")
+    private val signer = ReceiptTestKeys.signer
 
     @Test
     fun signs_one_hundred_continuous_samples_over_more_than_two_minutes() {
@@ -99,7 +99,8 @@ class SignedLivenessTest {
 
         mutations.forEach { (from, to) ->
             assertThrows(ReceiptException::class.java) {
-                ReceiptVerifier(signer).verify(encoded.replace(from, to), binding)
+                ReceiptVerifier(ReceiptTestKeys.trustedKeys)
+                    .verify(encoded.replace(from, to), binding)
             }
         }
         val tamperedChain =
@@ -110,7 +111,7 @@ class SignedLivenessTest {
         assertEquals(
             "RECEIPT_SIGNATURE_INVALID",
             assertThrows(ReceiptException::class.java) {
-                    ReceiptVerifier(signer).verify(tamperedChain, binding)
+                    ReceiptVerifier(ReceiptTestKeys.trustedKeys).verify(tamperedChain, binding)
                 }
                 .message,
         )
@@ -135,7 +136,8 @@ class SignedLivenessTest {
         assertEquals(
             "RECEIPT_TIME_INVALID",
             assertThrows(ReceiptException::class.java) {
-                    ReceiptVerifier(signer).verify(impossible, binding("nonce-resigned"))
+                    ReceiptVerifier(ReceiptTestKeys.trustedKeys)
+                        .verify(impossible, binding("nonce-resigned"))
                 }
                 .message,
         )
@@ -162,7 +164,7 @@ class SignedLivenessTest {
         )
 
     private fun verify(encoded: String, nonce: String): VerifiedEvidence =
-        ReceiptVerifier(signer).verify(encoded, binding(nonce))
+        ReceiptVerifier(ReceiptTestKeys.trustedKeys).verify(encoded, binding(nonce))
 
     private fun binding(nonce: String) =
         ReceiptBinding("commit-A", "profile-A", EndpointRole.DONOR, "session-A", nonce)
@@ -172,7 +174,7 @@ class SignedLivenessTest {
         val signature =
             Base64.getUrlEncoder()
                 .withoutPadding()
-                .encodeToString(signer.sign(unsigned.toByteArray()))
+                .encodeToString(signer.signReceipt(unsigned.toByteArray()))
         return unsigned + "signer=${signer.keyId}\n" + "signature=$signature\n"
     }
 

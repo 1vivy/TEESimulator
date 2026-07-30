@@ -136,7 +136,7 @@ class ContinuousLivenessTest {
                 EvidenceHash.sha256("artifact"),
                 monotonicMillis = 3_000,
             ),
-            DigestSigner("test-key"),
+            ReceiptTestKeys.signer,
         )
 
     private class FakeClock(var now: Long) : MonotonicClock {

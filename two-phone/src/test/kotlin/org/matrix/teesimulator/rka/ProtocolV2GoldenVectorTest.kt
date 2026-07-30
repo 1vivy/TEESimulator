@@ -49,6 +49,52 @@ class ProtocolV2GoldenVectorTest {
         assertEquals(6, observed.size)
     }
 
+    @Test
+    fun schemaMatrixCoversEveryFrozenBodyAndPinsBeginBytes() {
+        // Given: the shared Rust/Kotlin manifest for every frozen body schema kind.
+        val vectors =
+            resource("/rka-v2/schema-matrix.txt")
+                .lineSequence()
+                .filter(String::isNotBlank)
+                .map { line -> line.split(" ", limit = 2) }
+                .map { (name, encoded) -> name to encoded.decodeHex() }
+                .toList()
+        val expectedNames =
+            listOf(
+                "hello",
+                "hello_ack",
+                "generate",
+                "get",
+                "list",
+                "delete",
+                "begin",
+                "update_aad",
+                "update",
+                "finish",
+                "abort",
+                "result_generate",
+                "result_get",
+                "result_list",
+                "result_delete",
+                "result_begin",
+                "result_update_aad",
+                "result_update",
+                "result_finish",
+                "result_abort",
+                "error",
+            )
+        val expectedKinds = listOf(1, 2, 10, 11, 12, 13, 20, 21, 22, 23, 24) + List(9) { 30 } + 31
+
+        // When: Kotlin consumes every shared frame and independently emits frozen BEGIN.
+        val observedKinds = vectors.map { (_, encoded) -> topLevelKind(encoded) }
+        val beginGolden = vectors.single { (name, _) -> name == "begin" }.second
+
+        // Then: coverage, numeric tags, and BEGIN's four-field canonical bytes are exact.
+        assertEquals(expectedNames, vectors.map(Pair<String, ByteArray>::first))
+        assertEquals(expectedKinds, observedKinds)
+        assertArrayEquals(beginGolden, begin())
+    }
+
     private fun hello(
         includeTranscript: Boolean,
         transcript: ByteArray = ByteArray(32),
@@ -84,6 +130,51 @@ class ProtocolV2GoldenVectorTest {
                 bytes(transcript)
             }
         }.finish()
+
+    private fun begin(): ByteArray =
+        Cbor().apply {
+            map(8)
+            uint(0)
+            uint(2)
+            uint(1)
+            uint(20)
+            uint(2)
+            bytes(ByteArray(16) { 0x22 })
+            uint(3)
+            bytes(ByteArray(32) { 0x11 })
+            uint(4)
+            uint(7)
+            uint(5)
+            uint(1)
+            uint(6)
+            map(4)
+            uint(0)
+            bytes(ByteArray(16) { 0x55 })
+            uint(1)
+            uint(2)
+            uint(2)
+            uint(4)
+            uint(3)
+            uint(0)
+            uint(7)
+            bytes(ByteArray(32))
+        }.finish()
+
+    private fun topLevelKind(encoded: ByteArray): Int {
+        val cursor = ProtocolV2CborCursor(encoded)
+        require(cursor.collection(5) == 8)
+        require(cursor.uint() == 0 && cursor.uint() == 2)
+        require(cursor.uint() == 1)
+        val kind = cursor.uint()
+        repeat(5) {
+            cursor.uint()
+            cursor.skip()
+        }
+        require(cursor.uint() == 7)
+        cursor.skip()
+        require(cursor.complete())
+        return kind
+    }
 
     private fun decodeTopLevelVersion(encoded: ByteArray): Int {
         require(encoded.size > 3 && encoded[0] == 0xa8.toByte() && encoded[1] == 0.toByte())
@@ -146,4 +237,5 @@ class ProtocolV2GoldenVectorTest {
             }
         }
     }
+
 }

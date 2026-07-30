@@ -130,8 +130,9 @@ fn encode_body(writer: &mut CborWriter, body: &FrameBody<'_>) {
             writer.unsigned(4);
             writer.unsigned(hello.capabilities.bits());
         }
-        FrameBody::Handle(handle) | FrameBody::Begin(handle) => encode_handle(writer, handle),
+        FrameBody::Handle(handle) => encode_handle(writer, handle),
         FrameBody::List(identity_hash) => encode_handle(writer, identity_hash),
+        FrameBody::Begin(handle) => encode_begin(writer, handle),
         FrameBody::Chunk {
             operation_handle,
             chunk,
@@ -149,6 +150,18 @@ fn encode_handle<const N: usize>(writer: &mut CborWriter, handle: &[u8; N]) {
     writer.map(1);
     writer.unsigned(0);
     writer.bytes(handle);
+}
+
+fn encode_begin(writer: &mut CborWriter, handle: &[u8; 16]) {
+    writer.map(4);
+    writer.unsigned(0);
+    writer.bytes(handle);
+    writer.unsigned(1);
+    writer.unsigned(2);
+    writer.unsigned(2);
+    writer.unsigned(4);
+    writer.unsigned(3);
+    writer.unsigned(0);
 }
 
 fn encode_pair(writer: &mut CborWriter, handle: &[u8; 16], bytes: &[u8]) {

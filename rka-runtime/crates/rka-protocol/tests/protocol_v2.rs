@@ -67,14 +67,25 @@ fn vectors_v2_hash_domains_and_sha_are_exact() {
         LEAF_PROOF_DOMAIN,
         AUDIT_DOMAIN,
     ];
+    let expected_domains: [&[u8]; 10] = [
+        b"TEESIM-RKA-V2/FRAME\0",
+        b"TEESIM-RKA-V2/IDENTITY\0",
+        b"TEESIM-RKA-V2/AAID\0",
+        b"TEESIM-RKA-V2/PROFILE\0",
+        b"TEESIM-RKA-V2/IRPC\0",
+        b"TEESIM-RKA-V2/RKP-PUBLIC\0",
+        b"TEESIM-RKA-V2/CHAIN-SET\0",
+        b"TEESIM-RKA-V2/ENVELOPE\0",
+        b"TEESIM-RKA-V2/LEAF-PROOF\0",
+        b"TEESIM-RKA-V2/AUDIT\0",
+    ];
 
     // When: the constants and one domain-separated raw-byte preimage are hashed.
     let digest = sha256(b"abc");
     let raw_hash = hash_bytes(HashDomain::Aaid, b"\x30\x00");
 
     // Then: every full NUL-terminated domain and both hash boundaries are pinned.
-    assert_eq!(domains.len(), 10);
-    assert!(domains.iter().all(|domain| domain.ends_with(&[0])));
+    assert_eq!(domains, expected_domains);
     assert_eq!(
         digest,
         hex32("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
@@ -149,6 +160,25 @@ fn state_and_lifetime_constants_are_frozen() {
     // When: the frozen contract tuple is compared to its approved values.
     // Then: no implementation-selected value can silently replace the protocol decision.
     assert_eq!(observed, (2, 120, 1, 86_400, 2, REQUIRED_CAPABILITIES));
+    assert_eq!(
+        [
+            MessageKind::Hello,
+            MessageKind::HelloAck,
+            MessageKind::Generate,
+            MessageKind::Get,
+            MessageKind::List,
+            MessageKind::Delete,
+            MessageKind::Begin,
+            MessageKind::UpdateAad,
+            MessageKind::Update,
+            MessageKind::Finish,
+            MessageKind::Abort,
+            MessageKind::Result,
+            MessageKind::Error,
+        ]
+        .map(u64::from),
+        [1, 2, 10, 11, 12, 13, 20, 21, 22, 23, 24, 30, 31]
+    );
     assert_eq!(
         CapabilityBitmap::parse(0x1f),
         Err(ProtocolError::UnsupportedValue)

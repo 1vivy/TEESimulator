@@ -9,7 +9,8 @@ use super::{
     identity_source::{IdentitySource, LinuxIdentitySource, ProcessDescriptors},
     peer_authorization::{HeldDescriptor, PeerAuthorization, ProcDirectoryAuthorization},
     process_identity::{parse_cmdline, parse_start_time},
-    trusted_record::{MAX_RECORD_BYTES, OpenRecord, parse_record},
+    record_authorization::RecordAuthorization,
+    trusted_record::{MAX_RECORD_BYTES, parse_record},
 };
 
 pub(super) const BROKER_EXECUTABLE: &str = "/system/bin/app_process64";
@@ -208,27 +209,21 @@ fn read_identity_record(
     source: &mut impl IdentitySource,
     role: BrokerRole,
     deadline: &Deadline,
-) -> Result<(BrokerIdentity, HeldDescriptor), BridgeError> {
-    let OpenRecord {
-        descriptor,
-        snapshot,
-    } = source.open_record(deadline)?;
-    let mut record_bytes = read_bounded(
-        &descriptor,
+) -> Result<(BrokerIdentity, RecordAuthorization), BridgeError> {
+    let open = source.open_record(deadline)?;
+    let record_bytes = read_bounded(
+        &open.descriptor,
         deadline,
         ReadBound {
             bytes: MAX_RECORD_BYTES,
             error: BridgeError::TrustedState,
         },
     )?;
-    if !snapshot.verify(&descriptor, deadline)? {
+    if !open.snapshot.verify(&open.descriptor, deadline)? {
         return Err(BridgeError::TrustedState);
     }
     let parsed_identity = parse_record(&record_bytes, role);
-    record_bytes.fill(0);
     let identity = parsed_identity?;
-    Ok((
-        identity,
-        HeldDescriptor::from_snapshot(descriptor, snapshot),
-    ))
+    let authorization = RecordAuthorization::new(open, record_bytes)?;
+    Ok((identity, authorization))
 }

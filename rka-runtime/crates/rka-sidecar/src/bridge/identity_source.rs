@@ -12,7 +12,8 @@ use super::{
         ProcessLiveness, open_directory, open_platform_liveness, open_process_executable,
         open_readonly,
     },
-    trusted_record::{OpenRecord, open_identity_record},
+    record_authorization::OpenRecord,
+    trusted_record::open_identity_record,
 };
 
 mod sealed {
@@ -131,6 +132,17 @@ impl TestIdentitySource {
             record: Some(record),
             process: Some(process),
         }
+    }
+
+    pub(super) fn set_record_restore_hook(
+        &mut self,
+        hook: super::record_authorization::RecordRestoreHook,
+    ) -> Result<(), BridgeError> {
+        self.record
+            .as_mut()
+            .ok_or(BridgeError::TrustedState)?
+            .restore_after_read = Some(hook);
+        Ok(())
     }
 }
 

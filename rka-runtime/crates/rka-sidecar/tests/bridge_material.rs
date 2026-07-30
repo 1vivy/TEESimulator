@@ -36,6 +36,7 @@ fn bridge_material_source_has_no_generic_or_forbidden_serializer() {
         include_str!("../src/bridge/peer_authorization.rs"),
         include_str!("../src/bridge/process_identity.rs"),
         include_str!("../src/bridge/process_liveness.rs"),
+        include_str!("../src/bridge/record_authorization.rs"),
         include_str!("../src/bridge/socket.rs"),
     ]
     .concat();
@@ -77,7 +78,7 @@ fn bridge_material_source_has_no_generic_or_forbidden_serializer() {
         "deadline.wait(descriptor",
         "pidfd_open",
         "deadline.check_peer",
-        "HeldDescriptor::from_snapshot",
+        "RecordAuthorization::new",
         "OFlags::NONBLOCK",
         "OFlags::PATH",
     ] {

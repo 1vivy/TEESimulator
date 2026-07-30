@@ -22,7 +22,7 @@ use super::{
     peer_authorization::PeerAuthorization,
     process_identity::{parse_cmdline, parse_start_time},
     process_liveness::ProcessLiveness,
-    trusted_record::OpenRecord,
+    record_authorization::{OpenRecord, RecordPath, RecordRestoreHook},
 };
 
 static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
@@ -63,6 +63,7 @@ struct Fixture {
     _writer: Option<UnixStream>,
     _tree: TempTree,
     record_path: PathBuf,
+    record_parent_path: PathBuf,
     executable_path: PathBuf,
     process_path: PathBuf,
     stat_path: PathBuf,
@@ -130,16 +131,34 @@ fn fixture(phase: Phase) -> Result<Fixture, Box<dyn std::error::Error>> {
     fixture_with_proc_liveness(phase, false)
 }
 
-fn fixture_with_proc_liveness(
-    phase: Phase,
-    proc_liveness: bool,
-) -> Result<Fixture, Box<dyn std::error::Error>> {
-    let tree = TempTree::new("proc")?;
+fn test_record_path(
+    root: &PathBuf,
+    parent: &PathBuf,
+) -> Result<RecordPath, Box<dyn std::error::Error>> {
+    Ok(RecordPath::new(
+        OwnedFd::from(File::open(root)?),
+        vec![("trusted".to_owned(), OwnedFd::from(File::open(parent)?))],
+        "record",
+    )?)
+}
+
+fn create_process_tree(
+    tree: &TempTree,
+) -> Result<(PathBuf, String, PathBuf), Box<dyn std::error::Error>> {
     let proc_path = tree.0.join("proc");
     let process_name = std::process::id().to_string();
     let process_path = proc_path.join(&process_name);
     fs::create_dir(&proc_path)?;
     fs::create_dir(&process_path)?;
+    Ok((proc_path, process_name, process_path))
+}
+
+fn fixture_with_proc_liveness(
+    phase: Phase,
+    proc_liveness: bool,
+) -> Result<Fixture, Box<dyn std::error::Error>> {
+    let tree = TempTree::new("proc")?;
+    let (proc_path, process_name, process_path) = create_process_tree(&tree)?;
     let executable_path = tree.0.join("app_process64");
     fs::write(&executable_path, b"executable")?;
     let executable = OwnedFd::from(File::open(&executable_path)?);
@@ -160,7 +179,9 @@ fn fixture_with_proc_liveness(
         0,
         std::process::id()
     );
-    let record_path = tree.0.join("record");
+    let record_parent_path = tree.0.join("trusted");
+    fs::create_dir(&record_parent_path)?;
+    let record_path = record_parent_path.join("record");
     fs::write(&record_path, record.as_bytes())?;
     let stat_path = process_path.join("stat");
     fs::write(
@@ -218,12 +239,15 @@ fn fixture_with_proc_liveness(
             OpenRecord {
                 descriptor: record_descriptor,
                 snapshot: record_snapshot,
+                path: test_record_path(&tree.0, &record_parent_path)?,
+                restore_after_read: None,
             },
             process,
         ),
         _writer: writer,
         _tree: tree,
         record_path,
+        record_parent_path,
         executable_path,
         process_path,
         stat_path,
@@ -330,7 +354,7 @@ fn held_descriptors_detect_preexposure_content_change() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn record_name_swap_cannot_redirect_held_authorization() -> Result<(), Box<dyn std::error::Error>> {
+fn record_name_swap_invalidates_held_authorization() -> Result<(), Box<dyn std::error::Error>> {
     let mut fixture = fixture(Phase::Ready)?;
     let record_path = fixture.record_path.clone();
     let old_path = record_path.with_extension("held");
@@ -339,7 +363,124 @@ fn record_name_swap_cannot_redirect_held_authorization() -> Result<(), Box<dyn s
     let authorization = authenticate(&mut fixture.source, &stream, &deadline)?;
     fs::rename(&record_path, &old_path)?;
     fs::write(&record_path, b"attacker-controlled replacement")?;
-    assert_eq!(authorization.revalidate(&stream, &deadline), Ok(()));
+    assert_eq!(
+        authorization.revalidate(&stream, &deadline),
+        Err(BridgeError::TrustedState)
+    );
+    Ok(())
+}
+
+#[test]
+fn record_name_disappearance_and_symlink_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    for symlink_replacement in [false, true] {
+        let mut fixture = fixture(Phase::Ready)?;
+        let held = fixture.record_path.with_extension("held");
+        let (stream, _peer) = UnixStream::pair()?;
+        let deadline = deadline(Duration::from_millis(100))?;
+        let authorization = authenticate(&mut fixture.source, &stream, &deadline)?;
+        fs::rename(&fixture.record_path, &held)?;
+        if symlink_replacement {
+            symlink(&held, &fixture.record_path)?;
+        }
+        assert_eq!(
+            authorization.revalidate(&stream, &deadline),
+            Err(BridgeError::TrustedState)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn identical_recreated_and_hardlinked_records_are_rejected()
+-> Result<(), Box<dyn std::error::Error>> {
+    for hardlink in [false, true] {
+        let mut fixture = fixture(Phase::Ready)?;
+        let bytes = fs::read(&fixture.record_path)?;
+        let metadata = fs::metadata(&fixture.record_path)?;
+        let times = FileTimes::new()
+            .set_accessed(metadata.accessed()?)
+            .set_modified(metadata.modified()?);
+        let held = fixture.record_path.with_extension("held");
+        let attacker = fixture.record_path.with_extension("attacker");
+        let (stream, _peer) = UnixStream::pair()?;
+        let deadline = deadline(Duration::from_millis(100))?;
+        let authorization = authenticate(&mut fixture.source, &stream, &deadline)?;
+        fs::rename(&fixture.record_path, &held)?;
+        if hardlink {
+            fs::write(&attacker, &bytes)?;
+            fs::hard_link(&attacker, &fixture.record_path)?;
+        } else {
+            fs::write(&fixture.record_path, &bytes)?;
+            File::open(&fixture.record_path)?.set_times(times)?;
+        }
+        assert_eq!(
+            authorization.revalidate(&stream, &deadline),
+            Err(BridgeError::TrustedState)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn in_place_generation_and_nonce_rewrites_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    for generation in [true, false] {
+        let mut fixture = fixture(Phase::Ready)?;
+        let original = String::from_utf8(fs::read(&fixture.record_path)?)?;
+        let changed = if generation {
+            original.replace("generation=7", "generation=8")
+        } else {
+            original.replacen("launch_nonce=01", "launch_nonce=02", 1)
+        };
+        let (stream, _peer) = UnixStream::pair()?;
+        let deadline = deadline(Duration::from_millis(100))?;
+        let authorization = authenticate(&mut fixture.source, &stream, &deadline)?;
+        rewrite_preserving_snapshot(&fixture.record_path, changed.as_bytes())?;
+        assert_eq!(
+            authorization.revalidate(&stream, &deadline),
+            Err(BridgeError::TrustedState)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn record_parent_replacement_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = fixture(Phase::Ready)?;
+    let bytes = fs::read(&fixture.record_path)?;
+    let held_parent = fixture.record_parent_path.with_extension("held");
+    let (stream, _peer) = UnixStream::pair()?;
+    let deadline = deadline(Duration::from_millis(100))?;
+    let authorization = authenticate(&mut fixture.source, &stream, &deadline)?;
+    fs::rename(&fixture.record_parent_path, &held_parent)?;
+    fs::create_dir(&fixture.record_parent_path)?;
+    fs::write(&fixture.record_path, bytes)?;
+    assert_eq!(
+        authorization.revalidate(&stream, &deadline),
+        Err(BridgeError::TrustedState)
+    );
+    Ok(())
+}
+
+#[test]
+fn record_restore_after_read_race_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = fixture(Phase::Ready)?;
+    let original = fixture.record_path.with_extension("original");
+    let retired_replacement = fixture.record_path.with_extension("retired");
+    fixture.source.set_record_restore_hook(RecordRestoreHook {
+        current: fixture.record_path.clone(),
+        original: original.clone(),
+        retired_replacement,
+    })?;
+    let (stream, _peer) = UnixStream::pair()?;
+    let deadline = deadline(Duration::from_millis(100))?;
+    let authorization = authenticate(&mut fixture.source, &stream, &deadline)?;
+    fs::rename(&fixture.record_path, &original)?;
+    fs::write(&fixture.record_path, b"attacker-controlled replacement")?;
+    assert_eq!(
+        authorization.revalidate(&stream, &deadline),
+        Err(BridgeError::TrustedState)
+    );
+    assert!(fixture.record_path.exists());
     Ok(())
 }
 

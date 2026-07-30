@@ -11,6 +11,7 @@ use super::{
     },
     process_identity::{parse_cmdline, parse_start_time},
     process_liveness::{ProcessLiveness, open_directory, open_process_executable, open_readonly},
+    record_authorization::RecordAuthorization,
 };
 
 #[derive(Debug)]
@@ -26,13 +27,6 @@ impl HeldDescriptor {
             descriptor,
             snapshot,
         })
-    }
-
-    pub(super) const fn from_snapshot(descriptor: OwnedFd, snapshot: DescriptorSnapshot) -> Self {
-        Self {
-            descriptor,
-            snapshot,
-        }
     }
 
     pub(super) fn verify(
@@ -172,7 +166,7 @@ pub(super) struct PeerAuthorization {
     pub(super) identity: BrokerIdentity,
     pub(super) credentials: PeerCredentials,
     pub(super) revalidate_socket_credentials: bool,
-    pub(super) record: HeldDescriptor,
+    pub(super) record: RecordAuthorization,
     pub(super) process: ProcDirectoryAuthorization,
     pub(super) liveness: ProcessLiveness,
     pub(super) revalidation_gate: Option<OwnedFd>,
@@ -195,7 +189,7 @@ impl PeerAuthorization {
             deadline.wait(gate, rustix::event::PollFlags::IN)?;
         }
         self.liveness.check(deadline)?;
-        self.record.verify(deadline, BridgeError::TrustedState)?;
+        self.record.revalidate(&self.identity, deadline)?;
         self.process.revalidate(&self.identity, deadline)?;
         self.liveness.check(deadline)?;
         deadline.check_socket(stream)

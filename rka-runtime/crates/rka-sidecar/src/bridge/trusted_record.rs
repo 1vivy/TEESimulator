@@ -1,6 +1,6 @@
 use rustix::{
-    fd::OwnedFd,
     fs::{CWD, Mode, OFlags, fstat, openat},
+    io::dup,
 };
 
 use super::{
@@ -8,6 +8,7 @@ use super::{
     deadline::Deadline,
     descriptor_io::DescriptorSnapshot,
     identity::{BROKER_EXECUTABLE, BrokerIdentity, BrokerRole},
+    record_authorization::{OpenRecord, RecordPath},
 };
 
 const RECORD_COMPONENTS: [&str; 5] = ["data", "adb", "teesimulator-rka", "run", "pids"];
@@ -16,17 +17,16 @@ pub(super) const MAX_RECORD_BYTES: usize = 4096;
 const DIRECTORY_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 
-#[derive(Debug)]
-pub(super) struct OpenRecord {
-    pub(super) descriptor: OwnedFd,
-    pub(super) snapshot: DescriptorSnapshot,
-}
-
 pub(super) fn open_identity_record(deadline: &Deadline) -> Result<OpenRecord, BridgeError> {
     deadline.remaining()?;
     let root = openat(CWD, "/", directory_flags(), Mode::empty())
         .map_err(|_| BridgeError::TrustedState)?;
+    let root_anchor = dup(&root).map_err(|_| BridgeError::TrustedState)?;
     let mut parent = root;
+    let mut components = Vec::new();
+    components
+        .try_reserve(RECORD_COMPONENTS.len())
+        .map_err(|_| BridgeError::Allocation)?;
     for component in RECORD_COMPONENTS {
         deadline.remaining()?;
         let descriptor = openat(&parent, component, directory_flags(), Mode::empty())
@@ -35,6 +35,10 @@ pub(super) fn open_identity_record(deadline: &Deadline) -> Result<OpenRecord, Br
         if stat.st_uid != 0 || stat.st_gid != 0 || stat.st_mode & 0o777 != DIRECTORY_MODE {
             return Err(BridgeError::TrustedState);
         }
+        components.push((
+            component.to_owned(),
+            dup(&descriptor).map_err(|_| BridgeError::TrustedState)?,
+        ));
         parent = descriptor;
     }
     deadline.remaining()?;
@@ -59,6 +63,9 @@ pub(super) fn open_identity_record(deadline: &Deadline) -> Result<OpenRecord, Br
     Ok(OpenRecord {
         descriptor,
         snapshot,
+        path: RecordPath::new(root_anchor, components, RECORD_NAME)?,
+        #[cfg(test)]
+        restore_after_read: None,
     })
 }
 

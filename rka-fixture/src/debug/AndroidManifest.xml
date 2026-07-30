@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.DUMP" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <application>
+        <provider
+            android:name=".DebugCommandProvider"
+            android:authorities="org.matrix.teesimulator.rkafixture.commands"
+            android:exported="true"
+            android:readPermission="android.permission.DUMP"
+            android:writePermission="android.permission.DUMP" />
+        <service
+            android:name=".DebugCommandForegroundService"
+            android:exported="false" />
+    </application>
+</manifest>

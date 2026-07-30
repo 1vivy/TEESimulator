@@ -29,6 +29,7 @@ fn bridge_material_source_has_no_generic_or_forbidden_serializer() {
         include_str!("../src/bridge/trusted_record.rs"),
         include_str!("../src/bridge/runtime.rs"),
         include_str!("../src/bridge/executor_state.rs"),
+        include_str!("../src/bridge/lifecycle.rs"),
         include_str!("../src/bridge/deadline.rs"),
         include_str!("../src/bridge/socket.rs"),
     ]
@@ -63,10 +64,21 @@ fn bridge_material_source_has_no_generic_or_forbidden_serializer() {
         "shutdown(stream, Shutdown::Both)",
         "checked_duration_since(Instant::now())",
         "socket_error(&descriptor)",
+        "QueuedGuard::new",
+        "queued.transition_locked",
+        "ActiveGuard::new",
+        "ResourceGuard::acquire",
+        "lock_for_cleanup",
     ] {
         assert!(
             source.contains(required),
             "required deadline invariant {required}"
         );
     }
+    let lifecycle = [
+        include_str!("../src/bridge/executor_state.rs"),
+        include_str!("../src/bridge/lifecycle.rs"),
+    ]
+    .concat();
+    assert!(!lifecycle.contains("saturating_sub"));
 }

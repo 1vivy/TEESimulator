@@ -10,6 +10,9 @@ mod decode_body;
 mod error;
 mod executor_state;
 mod identity;
+mod lifecycle;
+#[cfg(test)]
+mod lifecycle_tests;
 mod model;
 mod runtime;
 mod socket;

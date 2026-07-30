@@ -99,7 +99,7 @@ impl RoleExecutor {
                 if !correlation.accepts(&response, permit.generation) {
                     return Err(BridgeError::Correlation);
                 }
-                permit.expose(response)
+                Ok(permit.expose(response))
             }
             (SidecarRole::Candidate, BrokerOperation::Candidate { listener, response }) => {
                 let stream = accept_peer(listener, &deadline)?;
@@ -116,7 +116,7 @@ impl RoleExecutor {
                 write_message(&stream, &frame, &deadline)?;
                 authenticated.revalidate(&stream)?;
                 deadline.remaining()?;
-                permit.expose(request)
+                Ok(permit.expose(request))
             }
             _ => Err(BridgeError::WrongRole),
         }

@@ -6,20 +6,21 @@ use std::{
 use super::{
     BridgeError, BridgeMessage,
     deadline::{Control, Deadline},
+    lifecycle::{ActiveGuard, QueuedGuard, ResourceGuard, ResourceKind},
 };
 
 const MAX_ACTIVE: usize = 4;
 const MAX_QUEUED: usize = 4;
 
 #[derive(Debug)]
-struct Counters {
-    active: usize,
-    queued: usize,
-    generation: u64,
-    closed: bool,
-    sockets: usize,
-    staged_dtos: usize,
-    controls: Vec<Arc<Control>>,
+pub(super) struct Counters {
+    pub(super) active: usize,
+    pub(super) queued: usize,
+    pub(super) generation: u64,
+    pub(super) closed: bool,
+    pub(super) sockets: usize,
+    pub(super) staged_dtos: usize,
+    pub(super) controls: Vec<Arc<Control>>,
 }
 
 /// Binary-observable executor state used by cleanup checks.
@@ -47,7 +48,7 @@ pub struct RuntimeSnapshot {
 #[derive(Debug)]
 pub(super) struct Shared {
     counters: Mutex<Counters>,
-    changed: Condvar,
+    pub(super) changed: Condvar,
 }
 
 impl Shared {
@@ -71,45 +72,49 @@ impl Shared {
         deadline: &Deadline,
         control: Arc<Control>,
     ) -> Result<Permit, BridgeError> {
+        deadline.remaining()?;
+        let mut active = ActiveGuard::new(Arc::clone(self), Arc::clone(&control));
+        let mut queued = QueuedGuard::new(Arc::clone(self));
         let mut counters = self.lock()?;
         if counters.active >= MAX_ACTIVE {
             if counters.queued >= MAX_QUEUED {
                 return Err(BridgeError::QueueSaturated);
             }
-            counters.queued = counters
-                .queued
-                .checked_add(1)
-                .ok_or(BridgeError::Capacity)?;
+            deadline.remaining()?;
+            queued.acquire_locked(&mut counters)?;
             while counters.active >= MAX_ACTIVE && !counters.closed {
+                let remaining = deadline.remaining()?;
                 let waited = self
                     .changed
-                    .wait_timeout(counters, deadline.remaining()?)
+                    .wait_timeout(counters, remaining)
                     .map_err(|_| BridgeError::Io)?;
                 counters = waited.0;
                 if waited.1.timed_out() {
-                    counters.queued = counters.queued.saturating_sub(1);
                     deadline.control().expire();
                     return Err(BridgeError::Deadline);
                 }
             }
-            counters.queued = counters.queued.saturating_sub(1);
         }
         if counters.closed {
             return Err(BridgeError::PeerDied);
         }
-        counters.active = counters
-            .active
-            .checked_add(1)
-            .ok_or(BridgeError::Capacity)?;
+        if counters.active >= MAX_ACTIVE {
+            return Err(BridgeError::Capacity);
+        }
+        if queued.is_held() {
+            queued.transition_locked(&mut counters, &mut active)?;
+        } else {
+            active.acquire_locked(&mut counters)?;
+        }
         let generation = counters.generation;
-        counters.controls.push(Arc::clone(&control));
         drop(counters);
         Ok(Permit {
             shared: Arc::clone(self),
             control,
             generation,
-            socket_attached: false,
-            staged: false,
+            active: Some(active),
+            socket: None,
+            staged: None,
         })
     }
 
@@ -152,8 +157,15 @@ impl Shared {
         })
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, Counters>, BridgeError> {
+    pub(super) fn lock(&self) -> Result<MutexGuard<'_, Counters>, BridgeError> {
         self.counters.lock().map_err(|_| BridgeError::Io)
+    }
+
+    pub(super) fn lock_for_cleanup(&self) -> MutexGuard<'_, Counters> {
+        match self.counters.lock() {
+            Ok(counters) => counters,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 }
 
@@ -162,60 +174,36 @@ pub(super) struct Permit {
     shared: Arc<Shared>,
     control: Arc<Control>,
     pub(super) generation: u64,
-    socket_attached: bool,
-    staged: bool,
+    active: Option<ActiveGuard>,
+    socket: Option<ResourceGuard>,
+    staged: Option<ResourceGuard>,
 }
 
 impl Permit {
     pub(super) fn attach(&mut self, stream: &UnixStream) -> Result<(), BridgeError> {
         self.control.attach(stream)?;
-        let mut counters = self.shared.lock()?;
-        counters.sockets = counters
-            .sockets
-            .checked_add(1)
-            .ok_or(BridgeError::Capacity)?;
-        drop(counters);
-        self.socket_attached = true;
+        let socket = ResourceGuard::acquire(Arc::clone(&self.shared), ResourceKind::Socket)?;
+        self.socket = Some(socket);
         Ok(())
     }
 
     pub(super) fn stage(&mut self) -> Result<(), BridgeError> {
-        let mut counters = self.shared.lock()?;
-        counters.staged_dtos = counters
-            .staged_dtos
-            .checked_add(1)
-            .ok_or(BridgeError::Capacity)?;
-        drop(counters);
-        self.staged = true;
+        let staged = ResourceGuard::acquire(Arc::clone(&self.shared), ResourceKind::StagedDto)?;
+        self.staged = Some(staged);
         Ok(())
     }
 
-    pub(super) fn expose(mut self, message: BridgeMessage) -> Result<BridgeMessage, BridgeError> {
-        if self.staged {
-            let mut counters = self.shared.lock()?;
-            counters.staged_dtos = counters.staged_dtos.saturating_sub(1);
-            drop(counters);
-            self.staged = false;
-        }
-        Ok(message)
+    pub(super) fn expose(mut self, message: BridgeMessage) -> BridgeMessage {
+        drop(self.staged.take());
+        message
     }
 }
 
 impl Drop for Permit {
     fn drop(&mut self) {
         self.control.detach();
-        if let Ok(mut counters) = self.shared.counters.lock() {
-            counters.active = counters.active.saturating_sub(1);
-            counters.sockets = counters
-                .sockets
-                .saturating_sub(usize::from(self.socket_attached));
-            counters.staged_dtos = counters
-                .staged_dtos
-                .saturating_sub(usize::from(self.staged));
-            counters
-                .controls
-                .retain(|control| !Arc::ptr_eq(control, &self.control));
-            self.shared.changed.notify_one();
-        }
+        drop(self.staged.take());
+        drop(self.socket.take());
+        drop(self.active.take());
     }
 }

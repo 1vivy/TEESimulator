@@ -1,0 +1,6 @@
+85108c1b87a0146e8b874d15cd364bb09036d34b1ee50c7d0122c24e4fba3fac rka-v1/diagnostic/lifecycle.hex
+3548b1a66a624e1f5627a4f6f432d742a845ae3a83a62c471013589ec62ea1ad rka-v1/direct/changed-replay-request.hex
+94712bc55b6fa9f7e73aa03c21626d42ca2ff3c0d89718cfc028232081c04fcb rka-v1/direct/lifecycle.hex
+2d44865a387a6bf6ffabad93ae963e5aaf9282cb348fd6873d717ba185b89143 rka-v1/framing-probes/exact-max-frame-prefix.hex
+f580c754dc4399c0e9aea90206e7ad590a3f0dbd4021f9cf9879d493b2ba0521 rka-v1/shared/old-session-response.hex
+8bc78961d2293a4f8deb20f82847870c2eff4cb900cc49d0ba5b439787a505dc rka-v1/shared/ulong-max-request.hex

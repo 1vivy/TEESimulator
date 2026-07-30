@@ -1,75 +1,51 @@
-//! Bounded protocol primitives shared by the RKA runtime crates.
+//! Typed, bounded RKA v2 wire contract.
+#![allow(
+    missing_docs,
+    reason = "wire fields are exhaustively documented in docs/RKA_PROTOCOL_V2.md"
+)]
 
-use thiserror::Error;
+#[doc(hidden)]
+pub mod cbor;
+#[doc(hidden)]
+pub mod cbor_validate;
+mod constants;
+mod contract;
+#[doc(hidden)]
+pub mod envelope;
+mod error;
+mod frame;
+mod hash;
+#[doc(hidden)]
+pub mod identity;
+mod record;
+#[doc(hidden)]
+pub mod request;
+#[doc(hidden)]
+pub mod response;
+mod state;
+mod upstream;
 
-/// Maximum accepted protocol payload size.
-pub const MAX_PAYLOAD_BYTES: usize = 1_048_576;
-
-/// A payload that has passed the protocol size boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Payload<'a>(&'a [u8]);
-
-impl<'a> Payload<'a> {
-    /// Parses a nonempty payload without allocating.
-    pub const fn parse(bytes: &'a [u8]) -> Result<Self, ProtocolError> {
-        if bytes.is_empty() {
-            return Err(ProtocolError::EmptyPayload);
-        }
-        if bytes.len() > MAX_PAYLOAD_BYTES {
-            return Err(ProtocolError::PayloadTooLarge {
-                actual: bytes.len(),
-                maximum: MAX_PAYLOAD_BYTES,
-            });
-        }
-        Ok(Self(bytes))
-    }
-
-    /// Returns the validated wire bytes.
-    pub const fn as_bytes(self) -> &'a [u8] {
-        self.0
-    }
-}
-
-/// Failures produced while parsing the bounded protocol surface.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-#[non_exhaustive]
-pub enum ProtocolError {
-    /// The frame carried no payload.
-    #[error("protocol payload must not be empty")]
-    EmptyPayload,
-    /// The frame exceeded the fixed allocation boundary.
-    #[error("protocol payload is {actual} bytes; maximum is {maximum}")]
-    PayloadTooLarge {
-        /// Observed payload size.
-        actual: usize,
-        /// Accepted payload size.
-        maximum: usize,
-    },
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{MAX_PAYLOAD_BYTES, Payload, ProtocolError};
-
-    #[test]
-    fn payload_is_borrowed_when_within_limit() {
-        let bytes = [7_u8; 4];
-        let parsed = Payload::parse(&bytes);
-
-        assert_eq!(parsed.map(Payload::as_bytes), Ok(bytes.as_slice()));
-    }
-
-    #[test]
-    fn payload_is_rejected_when_over_limit() {
-        let bytes = vec![0_u8; MAX_PAYLOAD_BYTES + 1];
-        let parsed = Payload::parse(&bytes);
-
-        assert_eq!(
-            parsed,
-            Err(ProtocolError::PayloadTooLarge {
-                actual: MAX_PAYLOAD_BYTES + 1,
-                maximum: MAX_PAYLOAD_BYTES,
-            })
-        );
-    }
-}
+pub use cbor::CborWriter;
+pub use cbor_validate::validate_deterministic_cbor;
+pub use constants::*;
+pub use contract::{
+    AliasHandle, KeyMintError, OperationHandle, PeerSpkiHash, RkaErrorCode, Stage,
+    frozen_limits_cbor, operation_tombstone, request_tombstone, session_tombstone,
+};
+pub use envelope::{Envelope, decode_envelope};
+pub use error::ProtocolError;
+pub use frame::{
+    Frame, FrameBody, FrameContext, Hello, decode_frame, encode_frame,
+    encode_frame_without_transcript,
+};
+pub use hash::{HashDomain, hash_bytes, hash_cbor, sha256, transcript_hash};
+pub use identity::{
+    CandidateIdentity, PackageIdentity, admit_candidate_identity, decode_candidate_identity,
+};
+pub use record::{Payload, Record, decode_record, encode_record};
+pub use request::{ForegroundRequest, decode_foreground_request};
+pub use response::validate_response_body;
+pub use state::{
+    AliasState, CapabilityBitmap, MessageKind, ProtocolState, RequestId, SessionId, Transition,
+};
+pub use upstream::validate_upstream_rkp_bytes;

@@ -19,3 +19,9 @@ rootProject.name = "TEESimulator-RS"
 include(":stub")
 
 include(":app")
+
+include(":two-phone")
+
+include(":rka-host")
+
+include(":rka-fixture")

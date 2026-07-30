@@ -65,6 +65,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_21
     }
     buildFeatures { buildConfig = true }
+    testOptions { unitTests.isReturnDefaultValues = true }
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
@@ -79,6 +80,8 @@ dependencies {
     compileOnly(project(":stub"))
     compileOnly(libs.annotation)
     implementation(libs.bcpkix)
+    testImplementation(project(":stub"))
+    testImplementation(libs.junit)
 }
 
 // --- Rust native cert gen build task ---

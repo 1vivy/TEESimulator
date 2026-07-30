@@ -73,6 +73,17 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
     private const val GRANT_PUBLIC_API_SDK = 36
     private val deletedSoftwareKeys: MutableSet<KeyIdentifier> = ConcurrentHashMap.newKeySet()
     private val userUpdatedKeys = ConcurrentHashMap.newKeySet<KeyIdentifier>()
+    private val securityLevelRegistrar =
+        SecurityLevelRegistrar { backdoor, securityLevel, level ->
+            val interceptor = KeyMintSecurityLevelInterceptor(securityLevel, level)
+            register(
+                backdoor,
+                securityLevel.asBinder(),
+                interceptor,
+                KeyMintSecurityLevelInterceptor.INTERCEPTED_CODES,
+            )
+            RegisteredSecurityLevel(interceptor::loadPersistedKeys)
+        }
 
     fun forgetDeletedKey(keyId: KeyIdentifier) {
         if (deletedSoftwareKeys.remove(keyId)) {
@@ -131,41 +142,30 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             .onFailure { SystemLogger.error("Failed to intercept maintenance binder.", it) }
     }
 
-    private fun setupSecurityLevelInterceptors(service: IKeystoreService, backdoor: IBinder) {
-        // Attempt to get and intercept the TEE security level service.
-        runCatching {
-                service.getSecurityLevel(SecurityLevel.TRUSTED_ENVIRONMENT)?.let { tee ->
-                    SystemLogger.info("Found TEE SecurityLevel. Registering interceptor...")
-                    val interceptor =
-                        KeyMintSecurityLevelInterceptor(tee, SecurityLevel.TRUSTED_ENVIRONMENT)
-                    register(
-                        backdoor,
-                        tee.asBinder(),
-                        interceptor,
-                        KeyMintSecurityLevelInterceptor.INTERCEPTED_CODES,
-                    )
-                    interceptor.loadPersistedKeys()
+    private fun setupSecurityLevelInterceptors(
+        service: IKeystoreService,
+        backdoor: IBinder,
+        registrar: SecurityLevelRegistrar = securityLevelRegistrar,
+    ) {
+        val levels = intArrayOf(SecurityLevel.TRUSTED_ENVIRONMENT, SecurityLevel.STRONGBOX)
+        for (level in levels) {
+            val name = securityLevelName(level)
+            val securityLevel =
+                runCatching { service.getSecurityLevel(level) }
+                    .onFailure {
+                        SystemLogger.error("Failed to intercept $name SecurityLevel.", it)
+                    }
+                    .getOrNull() ?: continue
+            runCatching {
+                    SystemLogger.info("Found $name SecurityLevel. Registering interceptor...")
+                    registrar.register(backdoor, securityLevel, level).loadPersistedKeys()
                 }
-            }
-            .onFailure { SystemLogger.error("Failed to intercept TEE SecurityLevel.", it) }
-
-        // Attempt to get and intercept the StrongBox security level service.
-        runCatching {
-                service.getSecurityLevel(SecurityLevel.STRONGBOX)?.let { strongbox ->
-                    SystemLogger.info("Found StrongBox SecurityLevel. Registering interceptor...")
-                    val interceptor =
-                        KeyMintSecurityLevelInterceptor(strongbox, SecurityLevel.STRONGBOX)
-                    register(
-                        backdoor,
-                        strongbox.asBinder(),
-                        interceptor,
-                        KeyMintSecurityLevelInterceptor.INTERCEPTED_CODES,
-                    )
-                    interceptor.loadPersistedKeys()
-                }
-            }
-            .onFailure { SystemLogger.error("Failed to intercept StrongBox SecurityLevel.", it) }
+                .onFailure { SystemLogger.error("Failed to intercept $name SecurityLevel.", it) }
+        }
     }
+
+    private fun securityLevelName(level: Int): String =
+        if (level == SecurityLevel.TRUSTED_ENVIRONMENT) "TEE" else "StrongBox"
 
     override fun onPreTransact(
         txId: Long,

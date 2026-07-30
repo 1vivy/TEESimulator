@@ -93,6 +93,7 @@ val buildRustCertgen by
         workingDir = rootProject.projectDir.resolve("native-certgen")
 
         commandLine(
+            rootProject.projectDir.resolve("scripts/rka-toolchain.sh"),
             "cargo",
             "ndk",
             "-t",
@@ -109,16 +110,80 @@ val buildRustCertgen by
         outputs.dir(rootProject.projectDir.resolve("app/src/main/jniLibs"))
 
         environment("ANDROID_NDK_HOME", android.ndkDirectory.absolutePath)
-        environment(
-            "PATH",
-            "${System.getProperty("user.home")}/.cargo/bin:${System.getenv("PATH") ?: ""}",
+    }
+
+val rkaRuntimeAbi = providers.gradleProperty("rkaRuntimeAbi").orElse("arm64-v8a")
+val rkaRuntimeTargetDir =
+    providers.environmentVariable("CARGO_TARGET_DIR").orElse(
+        rootProject.layout.projectDirectory.dir(".omo/runtime/cargo-target").asFile.absolutePath
+    )
+val rkaRuntimeStageDir = layout.buildDirectory.dir("rka-runtime/arm64-v8a")
+
+val verifyRkaRuntimeAbis by
+    tasks.registering {
+        group = "TEESimulator-RS Native Build"
+        description = "Rejects unsupported RKA runtime ABIs before any sidecar build."
+
+        inputs.property("rkaRuntimeAbi", rkaRuntimeAbi)
+        doLast {
+            val selectedAbi = rkaRuntimeAbi.get()
+            require(selectedAbi == "arm64-v8a") {
+                "Unsupported RKA runtime ABI '$selectedAbi'; only arm64-v8a is supported."
+            }
+        }
+    }
+
+val buildRkaRuntimeArm64 by
+    tasks.registering(Exec::class) {
+        group = "TEESimulator-RS Native Build"
+        description = "Builds the separate rka-sidecar executable for Android arm64."
+        dependsOn(verifyRkaRuntimeAbis)
+
+        workingDir = rootProject.projectDir.resolve("rka-runtime")
+        commandLine(
+            rootProject.projectDir.resolve("scripts/rka-toolchain.sh"),
+            "cargo",
+            "ndk",
+            "-t",
+            "arm64-v8a",
+            "build",
+            "--package",
+            "rka-sidecar",
+            "--release",
         )
+        inputs.dir(rootProject.projectDir.resolve("rka-runtime/crates"))
+        inputs.file(rootProject.projectDir.resolve("rka-runtime/Cargo.toml"))
+        inputs.file(rootProject.projectDir.resolve("rka-runtime/Cargo.lock"))
+        inputs.file(rootProject.projectDir.resolve("rka-runtime/rust-toolchain.toml"))
+        outputs.file(
+            rkaRuntimeTargetDir.map {
+                file("$it/aarch64-linux-android/release/rka-sidecar")
+            }
+        )
+    }
+
+val stageRkaRuntimeArm64 by
+    tasks.registering(Sync::class) {
+        group = "TEESimulator-RS Native Build"
+        description = "Stages rka-sidecar separately from native-certgen."
+        dependsOn(buildRkaRuntimeArm64)
+
+        from(
+            rkaRuntimeTargetDir.map {
+                file("$it/aarch64-linux-android/release/rka-sidecar")
+            }
+        )
+        into(rkaRuntimeStageDir)
+        rename { "rka-sidecar" }
     }
 
 // AGP auto-detects jniLibs/ as an input to mergeJniLibFolders — wire the dependency
 tasks.configureEach {
     if (name.endsWith("JniLibFolders") && name.startsWith("merge")) {
         dependsOn(buildRustCertgen)
+    }
+    if (name == "assembleRelease") {
+        dependsOn(stageRkaRuntimeArm64)
     }
 }
 

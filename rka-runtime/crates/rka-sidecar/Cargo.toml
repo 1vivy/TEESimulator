@@ -1,0 +1,19 @@
+[package]
+name = "rka-sidecar"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Separate Android sidecar executable for TEESimulator RKA."
+publish = false
+
+[dependencies]
+rka-protocol = { version = "=0.1.0", path = "../rka-protocol" }
+rka-rkp = { version = "=0.1.0", path = "../rka-rkp" }
+rka-state = { version = "=0.1.0", path = "../rka-state" }
+rka-transport = { version = "=0.1.0", path = "../rka-transport" }
+thiserror.workspace = true
+
+[lints]
+workspace = true

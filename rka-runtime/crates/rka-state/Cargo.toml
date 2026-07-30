@@ -1,0 +1,15 @@
+[package]
+name = "rka-state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bounded persistence traits for the TEESimulator RKA sidecar."
+publish = false
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,27 @@
+[advisories]
+yanked = "deny"
+ignore = []
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "GPL-3.0-only",
+    "MIT",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+deny = [
+    { name = "actix-web", reason = "Use axum for HTTP services." },
+    { name = "async-std", reason = "Use tokio for asynchronous work." },
+    { name = "chrono", reason = "Use jiff for civil time." },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

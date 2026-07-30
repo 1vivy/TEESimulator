@@ -16,6 +16,9 @@ dependencyResolutionManagement {
 
 rootProject.name = "TEESimulator-RS"
 
+val rkaRuntimeManifest = file("rka-runtime/Cargo.toml")
+require(rkaRuntimeManifest.isFile) { "rka-runtime workspace manifest is required" }
+
 include(":stub")
 
 include(":app")

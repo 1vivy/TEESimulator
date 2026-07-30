@@ -28,6 +28,9 @@ fn bridge_material_source_has_no_generic_or_forbidden_serializer() {
         include_str!("../src/bridge/identity.rs"),
         include_str!("../src/bridge/trusted_record.rs"),
         include_str!("../src/bridge/runtime.rs"),
+        include_str!("../src/bridge/executor_state.rs"),
+        include_str!("../src/bridge/deadline.rs"),
+        include_str!("../src/bridge/socket.rs"),
     ]
     .concat();
     for forbidden in [
@@ -43,10 +46,27 @@ fn bridge_material_source_has_no_generic_or_forbidden_serializer() {
         "panic!(",
         "todo!(",
         "unimplemented!(",
+        "FnOnce",
+        "thread::spawn",
+        ".join()",
+        "execute_with_deadline",
+        "read_frame_with_timeout",
+        "write_frame_with_timeout",
     ] {
         assert!(
             !source.contains(forbidden),
             "forbidden source token {forbidden}"
+        );
+    }
+    for required in [
+        "write(&self.event",
+        "shutdown(stream, Shutdown::Both)",
+        "checked_duration_since(Instant::now())",
+        "socket_error(&descriptor)",
+    ] {
+        assert!(
+            source.contains(required),
+            "required deadline invariant {required}"
         );
     }
 }

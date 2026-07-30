@@ -19,6 +19,9 @@ pub enum BridgeError {
     #[doc = "Tag is invalid for this endpoint role."]
     #[error("bridge tag is invalid for role")]
     UnexpectedTag,
+    /// Operation topology differs from the fixed executor role.
+    #[error("bridge operation is invalid for role")]
+    WrongRole,
     #[doc = "Flags or reserved bytes are nonzero."]
     #[error("bridge reserved field rejected")]
     ReservedBits,

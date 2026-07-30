@@ -1,15 +1,11 @@
-use std::{
-    io::{Read, Write},
-    os::unix::net::UnixStream,
-    time::Duration,
-};
+use std::io::Read;
 
 use super::model::{
     BridgeMessage, ExchangeRole, HEADER_BYTES, MAGIC, MAX_FRAME_BYTES, RequestId, VERSION,
 };
 use super::{
     BridgeError,
-    decode_body::{array, byte, decode_body, map_io_error, map_read_error, put_bytes},
+    decode_body::{array, byte, decode_body, map_read_error, put_bytes},
 };
 
 /// Encoded bytes wiped on release.
@@ -138,39 +134,6 @@ pub fn read_frame(input: &mut impl Read, role: ExchangeRole) -> Result<BridgeMes
     let result = decode_frame(&frame, role);
     frame.fill(0);
     result
-}
-
-#[doc = "Reads one frame with a kernel-enforced timeout."]
-pub fn read_frame_with_timeout(
-    stream: &mut UnixStream,
-    role: ExchangeRole,
-    timeout: Duration,
-) -> Result<BridgeMessage, BridgeError> {
-    if timeout.is_zero() || timeout > Duration::from_secs(5) {
-        return Err(BridgeError::Deadline);
-    }
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|_| BridgeError::Io)?;
-    read_frame(stream, role)
-}
-
-#[doc = "Writes one frame with a kernel-enforced timeout."]
-pub fn write_frame_with_timeout(
-    stream: &mut UnixStream,
-    frame: &EncodedFrame,
-    timeout: Duration,
-) -> Result<(), BridgeError> {
-    if timeout.is_zero() || timeout > Duration::from_secs(5) {
-        return Err(BridgeError::Deadline);
-    }
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|_| BridgeError::Io)?;
-    stream
-        .write_all(frame.as_slice())
-        .map_err(|error| map_io_error(&error))?;
-    stream.flush().map_err(|error| map_io_error(&error))
 }
 
 fn body_length(message: &BridgeMessage) -> Result<usize, BridgeError> {

@@ -1,14 +1,15 @@
-use std::{
-    sync::{Arc, Condvar, Mutex, MutexGuard, mpsc},
-    thread,
-    time::{Duration, Instant},
+use std::{os::unix::net::UnixListener, path::Path, sync::Arc, time::Duration};
+
+use super::{
+    BridgeError, BridgeMessage, BrokerRole, Correlation, ExchangeRole,
+    deadline::{Control, Deadline},
+    encode_frame,
+    executor_state::{RuntimeSnapshot, Shared},
+    identity::authenticate_broker_peer,
+    socket::{accept_peer, connect_path, read_message, write_message},
 };
 
-use super::{BridgeError, CancellationToken, cancel::CancellationFlag};
-
-const MAX_ACTIVE: usize = 4;
-const MAX_QUEUED: usize = 4;
-const DEADLINE: Duration = Duration::from_secs(5);
+const DEFAULT_BUDGET: Duration = Duration::from_secs(5);
 
 /// Sidecar topology role with an independent executor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -20,38 +21,27 @@ pub enum SidecarRole {
     Candidate,
 }
 
+/// Closed bridge work accepted by the role executor.
 #[derive(Debug)]
-struct Counters {
-    active: usize,
-    queued: usize,
-    live_tasks: usize,
-    generation: u64,
-    closed: bool,
-}
-
-/// Binary-observable executor state used by cleanup checks.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub struct RuntimeSnapshot {
-    /// Currently executing handlers.
-    pub active: usize,
-    #[doc = "Handlers waiting for an active permit."]
-    pub queued: usize,
-    #[doc = "Spawned handler tasks not yet joined."]
-    pub live_tasks: usize,
-    #[doc = "Current reconnect generation."]
-    pub generation: u64,
-    #[doc = "Whether the executor is closed to new work."]
-    pub closed: bool,
+pub enum BrokerOperation<'a> {
+    /// Connect, authenticate, send a request, and receive its response.
+    Donor {
+        /// Root broker socket path.
+        socket_path: &'a Path,
+        /// Typed public-only request.
+        request: &'a BridgeMessage,
+    },
+    /// Accept, authenticate, receive a request, and send its response.
+    Candidate {
+        /// Root-owned listening socket.
+        listener: &'a UnixListener,
+        /// Typed public-only response.
+        response: &'a BridgeMessage,
+    },
 }
 
-#[derive(Debug)]
-struct Shared {
-    counters: Mutex<Counters>,
-    changed: Condvar,
-}
-
-/// Bounded per-role executor with one aggregate five-second budget.
+/// Bounded per-role executor for closed typed bridge operations.
 #[derive(Debug)]
 pub struct RoleExecutor {
     role: SidecarRole,
@@ -63,178 +53,87 @@ impl RoleExecutor {
     pub fn new(role: SidecarRole) -> Self {
         Self {
             role,
-            shared: Arc::new(Shared {
-                counters: Mutex::new(Counters {
-                    active: 0,
-                    queued: 0,
-                    live_tasks: 0,
-                    generation: 0,
-                    closed: false,
-                }),
-                changed: Condvar::new(),
-            }),
+            shared: Shared::new(),
         }
     }
 
-    #[doc = "Returns the fixed topology role."]
+    /// Returns the fixed topology role.
     pub const fn role(&self) -> SidecarRole {
         self.role
     }
 
-    #[doc = "Returns the current reconnect generation."]
-    pub fn generation(&self) -> Result<u64, BridgeError> {
-        Ok(lock(&self.shared)?.generation)
+    /// Dispatches closed bridge work within five seconds.
+    pub fn dispatch(&self, operation: BrokerOperation<'_>) -> Result<BridgeMessage, BridgeError> {
+        self.dispatch_with_budget(operation, DEFAULT_BUDGET)
     }
 
-    #[doc = "Executes within the fixed five-second aggregate budget."]
-    pub fn execute<T, F>(&self, operation: F) -> Result<T, BridgeError>
-    where
-        T: Send + 'static,
-        F: FnOnce(CancellationToken) -> Result<T, BridgeError> + Send + 'static,
-    {
-        self.execute_with_deadline(DEADLINE, operation)
-    }
-
-    #[doc = "Executes within a smaller injected aggregate budget."]
-    pub fn execute_with_deadline<T, F>(
+    /// Dispatches closed bridge work within a smaller aggregate budget.
+    pub fn dispatch_with_budget(
         &self,
+        operation: BrokerOperation<'_>,
         budget: Duration,
-        operation: F,
-    ) -> Result<T, BridgeError>
-    where
-        T: Send + 'static,
-        F: FnOnce(CancellationToken) -> Result<T, BridgeError> + Send + 'static,
-    {
-        if budget.is_zero() || budget > DEADLINE {
-            return Err(BridgeError::Deadline);
-        }
-        let started = Instant::now();
-        self.acquire(started, budget)?;
-        let cancellation = Arc::new(CancellationFlag::new());
-        let token = CancellationToken(Arc::clone(&cancellation));
-        let shared = Arc::clone(&self.shared);
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let worker = thread::Builder::new()
-            .name(match self.role {
-                SidecarRole::Donor => "rka-bridge-donor".to_owned(),
-                SidecarRole::Candidate => "rka-bridge-candidate".to_owned(),
-            })
-            .spawn(move || {
-                let result = operation(token);
-                let _sent = sender.send(result);
-                release(&shared);
-            })
-            .map_err(|_| {
-                release(&self.shared);
-                BridgeError::Capacity
-            })?;
-        let remaining = budget
-            .checked_sub(started.elapsed())
-            .ok_or(BridgeError::Deadline)?;
-        let result = match receiver.recv_timeout(remaining) {
-            Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                cancellation.cancel();
-                Err(BridgeError::Deadline)
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(BridgeError::PeerDied),
-        };
-        if result.is_err() {
-            cancellation.cancel();
-        }
-        worker.join().map_err(|_| BridgeError::PeerDied)?;
-        result
-    }
-
-    #[doc = "Advances the generation after old work is gone."]
-    pub fn reconnect(&self) -> Result<u64, BridgeError> {
-        let mut counters = lock(&self.shared)?;
-        if counters.active != 0 || counters.queued != 0 || counters.live_tasks != 0 {
-            return Err(BridgeError::Capacity);
-        }
-        counters.generation = counters
-            .generation
-            .checked_add(1)
-            .ok_or(BridgeError::Generation)?;
-        counters.closed = false;
-        Ok(counters.generation)
-    }
-
-    #[doc = "Rejects new work and wakes queued callers."]
-    pub fn close(&self) -> Result<(), BridgeError> {
-        let mut counters = lock(&self.shared)?;
-        counters.closed = true;
-        drop(counters);
-        self.shared.changed.notify_all();
-        Ok(())
-    }
-
-    #[doc = "Captures cleanup counters without handler material."]
-    pub fn snapshot(&self) -> Result<RuntimeSnapshot, BridgeError> {
-        let counters = lock(&self.shared)?;
-        Ok(RuntimeSnapshot {
-            active: counters.active,
-            queued: counters.queued,
-            live_tasks: counters.live_tasks,
-            generation: counters.generation,
-            closed: counters.closed,
-        })
-    }
-
-    fn acquire(&self, started: Instant, budget: Duration) -> Result<(), BridgeError> {
-        let mut counters = lock(&self.shared)?;
-        if counters.closed {
-            return Err(BridgeError::PeerDied);
-        }
-        if counters.active >= MAX_ACTIVE {
-            if counters.queued >= MAX_QUEUED {
-                return Err(BridgeError::QueueSaturated);
-            }
-            counters.queued = counters
-                .queued
-                .checked_add(1)
-                .ok_or(BridgeError::Capacity)?;
-            while counters.active >= MAX_ACTIVE && !counters.closed {
-                let remaining = budget
-                    .checked_sub(started.elapsed())
-                    .ok_or(BridgeError::Deadline)?;
-                let waited = self
-                    .shared
-                    .changed
-                    .wait_timeout(counters, remaining)
-                    .map_err(|_| BridgeError::Io)?;
-                counters = waited.0;
-                if waited.1.timed_out() {
-                    counters.queued = counters.queued.saturating_sub(1);
-                    return Err(BridgeError::Deadline);
+    ) -> Result<BridgeMessage, BridgeError> {
+        let control = Control::new()?;
+        let deadline = Deadline::new(budget, Arc::clone(&control))?;
+        let mut permit = self.shared.acquire(&deadline, control)?;
+        match (self.role, operation) {
+            (
+                SidecarRole::Donor,
+                BrokerOperation::Donor {
+                    socket_path,
+                    request,
+                },
+            ) => {
+                let stream = connect_path(socket_path, &deadline)?;
+                permit.attach(&stream)?;
+                deadline.remaining()?;
+                let authenticated = authenticate_broker_peer(&stream, BrokerRole::Donor)?;
+                deadline.remaining()?;
+                let correlation = Correlation::new(request, permit.generation)?;
+                let frame = encode_frame(request, ExchangeRole::DonorRequest)?;
+                write_message(&stream, &frame, &deadline)?;
+                let response = read_message(&stream, ExchangeRole::DonorResponse, &deadline)?;
+                permit.stage()?;
+                authenticated.revalidate(&stream)?;
+                deadline.remaining()?;
+                if !correlation.accepts(&response, permit.generation) {
+                    return Err(BridgeError::Correlation);
                 }
+                permit.expose(response)
             }
-            counters.queued = counters.queued.saturating_sub(1);
+            (SidecarRole::Candidate, BrokerOperation::Candidate { listener, response }) => {
+                let stream = accept_peer(listener, &deadline)?;
+                permit.attach(&stream)?;
+                deadline.remaining()?;
+                let authenticated = authenticate_broker_peer(&stream, BrokerRole::Candidate)?;
+                deadline.remaining()?;
+                let request = read_message(&stream, ExchangeRole::CandidateRequest, &deadline)?;
+                permit.stage()?;
+                if request.request_id() != response.request_id() {
+                    return Err(BridgeError::Correlation);
+                }
+                let frame = encode_frame(response, ExchangeRole::CandidateResponse)?;
+                write_message(&stream, &frame, &deadline)?;
+                authenticated.revalidate(&stream)?;
+                deadline.remaining()?;
+                permit.expose(request)
+            }
+            _ => Err(BridgeError::WrongRole),
         }
-        if counters.closed {
-            return Err(BridgeError::PeerDied);
-        }
-        counters.active = counters
-            .active
-            .checked_add(1)
-            .ok_or(BridgeError::Capacity)?;
-        counters.live_tasks = counters
-            .live_tasks
-            .checked_add(1)
-            .ok_or(BridgeError::Capacity)?;
-        drop(counters);
-        Ok(())
     }
-}
 
-fn lock(shared: &Shared) -> Result<MutexGuard<'_, Counters>, BridgeError> {
-    shared.counters.lock().map_err(|_| BridgeError::Io)
-}
+    /// Advances generation only after every prior operation is gone.
+    pub fn reconnect(&self) -> Result<u64, BridgeError> {
+        self.shared.reconnect()
+    }
 
-fn release(shared: &Shared) {
-    if let Ok(mut counters) = shared.counters.lock() {
-        counters.active = counters.active.saturating_sub(1);
-        counters.live_tasks = counters.live_tasks.saturating_sub(1);
-        shared.changed.notify_one();
+    /// Cancels active sockets and wakes every queued operation.
+    pub fn close(&self) -> Result<(), BridgeError> {
+        self.shared.close()
+    }
+
+    /// Captures cleanup counters without handler material.
+    pub fn snapshot(&self) -> Result<RuntimeSnapshot, BridgeError> {
+        self.shared.snapshot()
     }
 }

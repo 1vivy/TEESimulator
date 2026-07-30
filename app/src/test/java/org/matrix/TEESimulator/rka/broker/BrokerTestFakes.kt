@@ -12,7 +12,8 @@ internal object DirectCallRunner : BrokerCallRunner {
         if (cancellation.isCancelled()) return BrokerOutcome.Failure(BrokerError.Cancelled)
         if (deadline.hasExpired()) return BrokerOutcome.Failure(BrokerError.DeadlineExceeded)
         return try {
-            BrokerOutcome.Success(call())
+            val value = call()
+            brokerTerminalFailure(deadline, cancellation) ?: BrokerOutcome.Success(value)
         } catch (error: Throwable) {
             BrokerFailureMapper.map(service, error)
         }
@@ -50,10 +51,12 @@ internal class FakeIrpcEndpoint(
     override val supportedNumKeysInCsr: Int = 20,
     override val alive: AtomicBoolean = AtomicBoolean(true),
     private val dieOnGenerate: Boolean = false,
+    private val onGenerate: (() -> Unit)? = null,
     private val generated: IrpcGeneratedKey =
         IrpcGeneratedKey(byteArrayOf(1, 2, 3), byteArrayOf(9, 8, 7)),
 ) : IrpcServiceEndpoint {
     override fun generateKey(): IrpcGeneratedKey {
+        onGenerate?.invoke()
         if (dieOnGenerate) alive.set(false)
         return generated
     }

@@ -1,13 +1,5 @@
 package org.matrix.TEESimulator.rka.broker
 
-import java.util.concurrent.ArrayBlockingQueue
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
-import java.util.concurrent.atomic.AtomicBoolean
-
 enum class BrokerSecurityLevel {
     TEE
 }
@@ -99,42 +91,6 @@ internal interface BrokerServiceResolver {
     fun resolveKeyMint(name: String): KeyMintServiceEndpoint
 }
 
-class BrokerDeadline private constructor(internal val timeoutMillis: Long) {
-    internal fun hasExpired(): Boolean = timeoutMillis == 0L
-
-    companion object {
-        const val MAX_MILLIS = 5_000L
-
-        fun at(timeoutMillis: Long): BrokerDeadline {
-            require(timeoutMillis in 0L..MAX_MILLIS)
-            return BrokerDeadline(timeoutMillis)
-        }
-    }
-}
-
-class BrokerCancellation private constructor(private val cancelled: AtomicBoolean) {
-    fun cancel() {
-        cancelled.set(true)
-    }
-
-    internal fun isCancelled(): Boolean = cancelled.get()
-
-    companion object {
-        fun active(): BrokerCancellation = BrokerCancellation(AtomicBoolean(false))
-
-        fun cancelled(): BrokerCancellation = BrokerCancellation(AtomicBoolean(true))
-    }
-}
-
-internal interface BrokerCallRunner {
-    fun <T> run(
-        service: BrokerServiceKind,
-        deadline: BrokerDeadline,
-        cancellation: BrokerCancellation,
-        call: () -> T,
-    ): BrokerOutcome<T>
-}
-
 class BrokerCapability
 private constructor(private val irpcClient: IrpcClient, private val keyMintClient: KeyMintClient) {
     fun inspect(
@@ -143,9 +99,12 @@ private constructor(private val irpcClient: IrpcClient, private val keyMintClien
         cancellation: BrokerCancellation,
     ): BrokerOutcome<BrokerCapabilityReport> {
         if (caller.isSelfCall) return BrokerOutcome.SelfCallBypass
+        brokerTerminalFailure(deadline, cancellation)?.let { return it }
         val irpc = irpcClient.capability(deadline, cancellation)
+        brokerTerminalFailure(deadline, cancellation)?.let { return it }
         if (irpc is BrokerOutcome.Failure) return irpc
         val keyMint = keyMintClient.capability(deadline, cancellation)
+        brokerTerminalFailure(deadline, cancellation)?.let { return it }
         if (keyMint is BrokerOutcome.Failure) return keyMint
         return BrokerOutcome.Success(
             BrokerCapabilityReport(
@@ -167,61 +126,5 @@ private constructor(private val irpcClient: IrpcClient, private val keyMintClien
             runner: BrokerCallRunner,
         ): BrokerCapability =
             BrokerCapability(IrpcClient(resolver, runner), KeyMintClient(resolver, runner))
-    }
-}
-
-internal class ExecutorBrokerCallRunner(
-    private val executor: ExecutorService =
-        ThreadPoolExecutor(
-            2,
-            2,
-            0L,
-            TimeUnit.MILLISECONDS,
-            ArrayBlockingQueue(2),
-            { runnable -> Thread(runnable, "rka-broker").apply { isDaemon = true } },
-            ThreadPoolExecutor.AbortPolicy(),
-        )
-) : BrokerCallRunner {
-    override fun <T> run(
-        service: BrokerServiceKind,
-        deadline: BrokerDeadline,
-        cancellation: BrokerCancellation,
-        call: () -> T,
-    ): BrokerOutcome<T> {
-        if (cancellation.isCancelled()) return BrokerOutcome.Failure(BrokerError.Cancelled)
-        if (deadline.hasExpired()) return BrokerOutcome.Failure(BrokerError.DeadlineExceeded)
-        val future =
-            try {
-                executor.submit<T> { call() }
-            } catch (error: RejectedExecutionException) {
-                return BrokerFailureMapper.map(service, error)
-            }
-        val endNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(deadline.timeoutMillis)
-        while (true) {
-            if (cancellation.isCancelled()) {
-                future.cancel(true)
-                return BrokerOutcome.Failure(BrokerError.Cancelled)
-            }
-            val remainingNanos = endNanos - System.nanoTime()
-            if (remainingNanos <= 0L) {
-                future.cancel(true)
-                return BrokerOutcome.Failure(BrokerError.DeadlineExceeded)
-            }
-            try {
-                val pollNanos = minOf(remainingNanos, TimeUnit.MILLISECONDS.toNanos(25))
-                val value = future.get(pollNanos, TimeUnit.NANOSECONDS)
-                return if (cancellation.isCancelled()) {
-                    BrokerOutcome.Failure(BrokerError.Cancelled)
-                } else {
-                    BrokerOutcome.Success(value)
-                }
-            } catch (_: TimeoutException) {
-                continue
-            } catch (error: Throwable) {
-                future.cancel(true)
-                if (error is InterruptedException) Thread.currentThread().interrupt()
-                return BrokerFailureMapper.map(service, error)
-            }
-        }
     }
 }

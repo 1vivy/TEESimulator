@@ -110,7 +110,7 @@ class BrokerBridgeSecondFollowupTest {
         val transport =
             MemoryTransport(BridgeCodec.encode(request, BridgeDirection.SIDECAR_TO_BROKER))
         val endpoint =
-            BrokerBridgeEndpoints.forTest(
+            testBrokerBridgeEndpoint(
                 expected = { snapshot() },
                 processIdentity = ProcessIdentitySource { observed() },
                 socketMetadata = { SocketMetadata.secureRootOwned() },

@@ -27,8 +27,7 @@ object BrokerBridgeFactory {
             transport.set(connected)
             try {
                 val created =
-                    BrokerBridgeEndpoints.production(
-                        ProtectedSupervisorIdentitySource(),
+                    createProductionBrokerEndpoint(
                         value::socketMetadata,
                         connected,
                         InlineBridgeExecution,
@@ -36,7 +35,11 @@ object BrokerBridgeFactory {
                 if (created is BridgeResult.Failure) return@run created
                 val valueEndpoint = (created as BridgeResult.Success).value
                 endpoint.set(valueEndpoint)
-                valueEndpoint.acceptAndDispatch(dispatch)
+                try {
+                    valueEndpoint.acceptAndDispatch(dispatch)
+                } finally {
+                    valueEndpoint.peerDied()
+                }
             } finally {
                 connected.close()
                 value.close()
@@ -63,8 +66,7 @@ object BrokerBridgeFactory {
                 },
             ) {
                 val client =
-                    BrokerBridgeClients.production(
-                        ProtectedSupervisorIdentitySource(),
+                    createProductionBrokerClient(
                         { SocketMetadata.secureRootOwned() },
                         transport,
                         InlineBridgeExecution,
@@ -77,7 +79,11 @@ object BrokerBridgeFactory {
                 try {
                     val valueClient = (client as BridgeResult.Success).value
                     clientReference.set(valueClient)
-                    valueClient.exchange(request)
+                    try {
+                        valueClient.exchange(request)
+                    } finally {
+                        valueClient.peerDied()
+                    }
                 } finally {
                     clientReference.set(null)
                     transport.close()

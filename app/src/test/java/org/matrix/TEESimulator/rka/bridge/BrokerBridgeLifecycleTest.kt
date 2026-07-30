@@ -24,7 +24,7 @@ class BrokerBridgeLifecycleTest {
                 PeerCredentials(0, 0, 42),
             )
         val client =
-            BrokerBridgeClients.forTest(
+            testBrokerBridgeClient(
                 expected = { snapshot },
                 processIdentity = ProcessIdentitySource { observed() },
                 socketMetadata = { SocketMetadata.secureRootOwned() },
@@ -55,7 +55,7 @@ class BrokerBridgeLifecycleTest {
                 PeerCredentials(0, 0, 42),
             )
         val endpoint =
-            BrokerBridgeEndpoints.forTest(
+            testBrokerBridgeEndpoint(
                 expected = { snapshot() },
                 processIdentity = ProcessIdentitySource { observed() },
                 socketMetadata = { SocketMetadata.secureRootOwned() },
@@ -111,7 +111,7 @@ class BrokerBridgeLifecycleTest {
                 }
             }
         endpoint =
-            BrokerBridgeEndpoints.forTest(
+            testBrokerBridgeEndpoint(
                 expected = { snapshot() },
                 processIdentity =
                     ProcessIdentitySource {

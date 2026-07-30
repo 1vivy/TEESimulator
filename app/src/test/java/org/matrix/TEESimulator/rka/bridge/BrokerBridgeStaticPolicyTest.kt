@@ -37,8 +37,8 @@ class BrokerBridgeStaticPolicyTest {
     @Test
     fun sepolicy_is_exact_and_not_broad() {
         val policy = String(Files.readAllBytes(repositoryRoot().resolve("module/sepolicy.rule")))
-        assertTrue(policy.contains("allow ksu self:unix_stream_socket"))
-        assertTrue(policy.contains("allow magisk self:unix_stream_socket"))
+        assertTrue(policy.contains("allow ksu self unix_stream_socket"))
+        assertTrue(policy.contains("allow magisk self unix_stream_socket"))
         assertFalse(
             policy.lineSequence().any { it.contains("unix_stream_socket") && it.contains("*") }
         )
@@ -56,7 +56,7 @@ class BrokerBridgeStaticPolicyTest {
             val permissions = fields[3].split(",").joinToString(" ")
             assertTrue(
                 "missing exact policy probe entry: $entry",
-                policy.contains("allow ${fields[0]} ${fields[1]}:${fields[2]} { $permissions }"),
+                policy.contains("allow ${fields[0]} ${fields[1]} ${fields[2]} { $permissions }"),
             )
         }
     }

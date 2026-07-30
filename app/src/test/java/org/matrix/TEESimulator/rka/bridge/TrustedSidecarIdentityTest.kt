@@ -1,89 +1,51 @@
 package org.matrix.TEESimulator.rka.bridge
 
-import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.attribute.PosixFilePermission
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TrustedSidecarIdentityTest {
     @Test
-    fun fixed_schema_fails_typed_when_absent_malformed_or_weakly_protected() {
-        val root = Files.createTempDirectory("trusted-sidecar")
-        try {
-            val parent = root.resolve("pids")
-            Files.createDirectory(parent)
-            Files.setPosixFilePermissions(parent, DIRECTORY_MODE)
-            val uid = unixId(parent, "unix:uid")
-            val gid = unixId(parent, "unix:gid")
-            val record = parent.resolve("sidecar.identity")
-            val source = source(record, uid, gid)
-
-            assertEquals(BridgeError.TrustedStateMissing, source.capture().failure())
-            Files.write(record, "version=1\n".toByteArray())
-            Files.setPosixFilePermissions(record, FILE_MODE)
-            assertEquals(BridgeError.TrustedStateInvalid, source.capture().failure())
-            Files.write(record, validRecord().toByteArray())
-            Files.setPosixFilePermissions(record, DIRECTORY_MODE)
-            assertEquals(BridgeError.TrustedStateInvalid, source.capture().failure())
-        } finally {
-            Files.walk(root).use { paths ->
-                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
-            }
-        }
+    fun fixed_schema_rejects_missing_reordered_or_noncanonical_fields() {
+        assertNull(SupervisorRecordTextParser.parse("version=1\n"))
+        assertNull(
+            SupervisorRecordTextParser.parse(
+                validRecord()
+                    .replace(
+                        "generation=9\nlaunch_nonce=",
+                        "launch_nonce=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\ngeneration=",
+                    )
+            )
+        )
+        assertNull(
+            SupervisorRecordTextParser.parse(validRecord().replace("role=DONOR", "role=root"))
+        )
+        assertNull(
+            SupervisorRecordTextParser.parse(
+                validRecord()
+                    .replace(SupervisorRecordFields.FIXED_EXECUTABLE, "/data/local/tmp/rka-sidecar")
+            )
+        )
     }
 
     @Test
-    fun captured_launch_nonce_and_inode_must_remain_exact_during_revalidation() {
-        val root = Files.createTempDirectory("trusted-sidecar")
-        try {
-            val parent = root.resolve("pids")
-            Files.createDirectory(parent)
-            Files.setPosixFilePermissions(parent, DIRECTORY_MODE)
-            val record = parent.resolve("sidecar.identity")
-            Files.write(record, validRecord().toByteArray())
-            Files.setPosixFilePermissions(record, FILE_MODE)
-            val source = source(record, unixId(parent, "unix:uid"), unixId(parent, "unix:gid"))
-            val captured = source.capture()
-            assertTrue(captured is BridgeResult.Success)
+    fun fixed_schema_parses_exact_root_launch_identity() {
+        val parsed = SupervisorRecordTextParser.parse(validRecord())
 
-            Files.write(
-                record,
-                validRecord().replace("generation=9", "generation=10").toByteArray(),
-            )
-            Files.setPosixFilePermissions(record, FILE_MODE)
-
-            assertEquals(
-                BridgeError.TrustedStateChanged,
-                source.revalidate((captured as BridgeResult.Success).value).failure(),
-            )
-        } finally {
-            Files.walk(root).use { paths ->
-                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
-            }
-        }
-    }
-
-    private fun source(record: Path, uid: Int, gid: Int) =
-        ProtectedSupervisorIdentitySource(
-            processIdentity =
-                ProcessIdentitySource {
-                    ObservedProcessIdentity(
-                        777,
-                        listOf(
-                            ProtectedSupervisorIdentitySource.FIXED_EXECUTABLE,
-                            "--role",
-                            "donor",
-                        ),
-                        ProtectedSupervisorIdentitySource.FIXED_EXECUTABLE,
-                        1234,
-                    )
-                },
-            recordPath = record,
-            requiredUid = uid,
-            requiredGid = gid,
+        assertTrue(parsed != null)
+        requireNotNull(parsed)
+        assertEquals(9L, parsed.generation)
+        assertEquals(0, parsed.uid)
+        assertEquals(0, parsed.gid)
+        assertEquals(42, parsed.pid)
+        assertEquals(777L, parsed.startTimeTicks)
+        assertEquals(1234L, parsed.executableInode)
+        assertEquals(
+            listOf(SupervisorRecordFields.FIXED_EXECUTABLE, "--role", "donor"),
+            parsed.snapshot().cmdline,
         )
+    }
 
     private fun validRecord() =
         """
@@ -99,19 +61,4 @@ class TrustedSidecarIdentityTest {
         role=DONOR
         """
             .trimIndent() + "\n"
-
-    private fun unixId(path: Path, attribute: String): Int =
-        (Files.getAttribute(path, attribute) as Number).toInt()
-
-    private fun BridgeResult<*>.failure(): BridgeError = (this as BridgeResult.Failure).error
-
-    private companion object {
-        val DIRECTORY_MODE =
-            setOf(
-                PosixFilePermission.OWNER_READ,
-                PosixFilePermission.OWNER_WRITE,
-                PosixFilePermission.OWNER_EXECUTE,
-            )
-        val FILE_MODE = setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)
-    }
 }

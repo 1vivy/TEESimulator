@@ -211,7 +211,7 @@ class BrokerBridgeGateRegressionTest {
                 )
             )
         val client =
-            BrokerBridgeClients.forTest(
+            testBrokerBridgeClient(
                 expected = { snapshot() },
                 processIdentity = ProcessIdentitySource { observed() },
                 socketMetadata = { SocketMetadata.secureRootOwned() },
@@ -238,7 +238,7 @@ class BrokerBridgeGateRegressionTest {
             MemoryTransport(BridgeCodec.encode(response, BridgeExchangeRole.CANDIDATE_RESPONSE))
         val expectedCalls = java.util.concurrent.atomic.AtomicInteger()
         val client =
-            BrokerBridgeClients.forTest(
+            testBrokerBridgeClient(
                 expected = {
                     if (expectedCalls.incrementAndGet() == 2) generation.incrementAndGet()
                     snapshot(generation.get())
@@ -324,7 +324,7 @@ class BrokerBridgeGateRegressionTest {
         transport: BridgeTransport,
         expected: () -> SupervisorSnapshot = { snapshot() },
     ) =
-        BrokerBridgeEndpoints.forTest(
+        testBrokerBridgeEndpoint(
             expected = expected,
             processIdentity = ProcessIdentitySource { observed() },
             socketMetadata = { SocketMetadata.secureRootOwned() },
@@ -409,16 +409,8 @@ class BrokerBridgeGateRegressionTest {
         BridgeSocketDirectoryHandle {
         override fun secureDirectory(): BridgeResult<Unit> = BridgeResult.Success(Unit)
 
-        override fun inspectSocket(): BridgeResult<BridgePathIdentity> =
+        override fun openSocketNode(): BridgeResult<BridgeSocketNodeHandle> =
             BridgeResult.Failure(BridgeError.SocketPathChanged)
-
-        override fun verifySocketInode(inode: Long): BridgeResult<Unit> =
-            BridgeResult.Failure(BridgeError.SocketPathChanged)
-
-        override fun labelExactSocket(inode: Long): BridgeResult<Unit> =
-            BridgeResult.Failure(BridgeError.SocketPathChanged)
-
-        override fun deleteExactSocket(inode: Long) = Unit
 
         override fun close() = Unit
     }

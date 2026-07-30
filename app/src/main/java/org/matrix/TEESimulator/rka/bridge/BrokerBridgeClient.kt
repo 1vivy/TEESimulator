@@ -8,18 +8,13 @@ interface BrokerBridgeClient {
     fun peerDied()
 }
 
-internal interface TestBrokerBridgeClient : BrokerBridgeClient {
-    fun correlationCountForTest(): Int
-}
-
 private class DefaultBrokerBridgeClient(
-    private val trustedSource: TrustedSidecarIdentitySource,
-    private val trustedIdentity: TrustedSidecarIdentity,
+    private val peerAuthorization: ProductionPeerAuthorization,
     private val socketMetadata: () -> SocketMetadata,
     private val transport: BridgeTransport,
     private val execution: BridgeExecution,
     private val timeoutMillis: Long,
-) : TestBrokerBridgeClient {
+) : BrokerBridgeClient {
     private val lock = Any()
     private var generation = -1L
     private var closed = false
@@ -55,18 +50,7 @@ private class DefaultBrokerBridgeClient(
             } catch (_: Exception) {
                 return BridgeResult.Failure(BridgeError.PeerDied)
             }
-        val revalidated = trustedSource.revalidate(trustedIdentity)
-        if (revalidated is BridgeResult.Failure) return revalidated
-        val snapshot = (revalidated as BridgeResult.Success).value
-        return if (
-            credentials.uid == snapshot.uid &&
-                credentials.gid == snapshot.gid &&
-                credentials.pid == snapshot.pid
-        ) {
-            BridgeResult.Success(snapshot)
-        } else {
-            BridgeResult.Failure(BridgeError.PeerIdentityMismatch)
-        }
+        return peerAuthorization.authenticate(credentials)
     }
 
     private fun exchangeOne(request: BridgeMessage): BridgeResult<BridgeMessage> {
@@ -160,52 +144,25 @@ private class DefaultBrokerBridgeClient(
         if (!shouldClose) return
         workers.filter { it !== Thread.currentThread() }.forEach(Thread::interrupt)
         runCatching { transport.close() }
+        runCatching { peerAuthorization.close() }
     }
-
-    override fun correlationCountForTest(): Int = synchronized(lock) { correlations.size }
 }
 
-internal object BrokerBridgeClients {
-    @JvmSynthetic
-    fun forTest(
-        expected: () -> SupervisorSnapshot,
-        processIdentity: ProcessIdentitySource,
-        socketMetadata: () -> SocketMetadata,
-        transport: BridgeTransport,
-        execution: BridgeExecution = BoundedBridgeExecution(),
-        timeoutMillis: Long = BridgeLimits.DEADLINE_MILLIS,
-    ): TestBrokerBridgeClient {
-        val source = testTrustedSidecarIdentitySource(expected, processIdentity)
-        val captured = source.capture() as BridgeResult.Success
-        return DefaultBrokerBridgeClient(
-            source,
-            captured.value,
-            socketMetadata,
-            transport,
-            execution,
-            timeoutMillis,
-        )
-    }
-
-    @JvmSynthetic
-    fun production(
-        trustedSource: TrustedSidecarIdentitySource,
-        socketMetadata: () -> SocketMetadata,
-        transport: BridgeTransport,
-        execution: BridgeExecution = BoundedBridgeExecution(),
-    ): BridgeResult<BrokerBridgeClient> =
-        when (val captured = trustedSource.capture()) {
-            is BridgeResult.Failure -> captured
-            is BridgeResult.Success ->
-                BridgeResult.Success(
-                    DefaultBrokerBridgeClient(
-                        trustedSource,
-                        captured.value,
-                        socketMetadata,
-                        transport,
-                        execution,
-                        BridgeLimits.DEADLINE_MILLIS,
-                    )
+internal fun createProductionBrokerClient(
+    socketMetadata: () -> SocketMetadata,
+    transport: BridgeTransport,
+    execution: BridgeExecution = BoundedBridgeExecution(),
+): BridgeResult<BrokerBridgeClient> =
+    when (val authorization = captureProductionPeerAuthorization()) {
+        is BridgeResult.Failure -> authorization
+        is BridgeResult.Success ->
+            BridgeResult.Success(
+                DefaultBrokerBridgeClient(
+                    authorization.value,
+                    socketMetadata,
+                    transport,
+                    execution,
+                    BridgeLimits.DEADLINE_MILLIS,
                 )
-        }
-}
+            )
+    }

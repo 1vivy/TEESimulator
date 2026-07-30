@@ -3,132 +3,70 @@ package org.matrix.TEESimulator.rka.bridge
 import android.net.LocalServerSocket
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
-import android.system.Os
-import android.system.OsConstants
 import java.io.Closeable
-import java.io.FileDescriptor
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicReference
 
 internal interface BridgeServerBinding : Closeable {
+    val socketNode: BridgeSocketNodeHandle
+
     fun acceptTransport(): BridgeTransport
-
-    fun boundSocketInode(): Long
-
-    fun chownBoundSocket(inode: Long): BridgeResult<Unit>
-
-    fun chmodBoundSocket(inode: Long): BridgeResult<Unit>
 }
 
 internal fun interface BridgeServerBinder {
-    fun bind(socketPath: Path): BridgeResult<BridgeServerBinding>
+    fun bind(directory: BridgeSocketDirectoryHandle): BridgeResult<BridgeServerBinding>
 }
 
 private object AndroidBridgeServerBinder : BridgeServerBinder {
-    override fun bind(socketPath: Path): BridgeResult<BridgeServerBinding> {
+    override fun bind(directory: BridgeSocketDirectoryHandle): BridgeResult<BridgeServerBinding> {
         val bound = LocalSocket()
-        var pendingPathDescriptor: FileDescriptor? = null
+        var pendingNode: BridgeSocketNodeHandle? = null
         return try {
             bound.bind(
-                LocalSocketAddress(socketPath.toString(), LocalSocketAddress.Namespace.FILESYSTEM)
-            )
-            val pathDescriptor =
-                Os.open(
-                    socketPath.toString(),
-                    O_PATH or OsConstants.O_NOFOLLOW or OsConstants.O_CLOEXEC,
-                    0,
+                LocalSocketAddress(
+                    directory.anchoredSocketPath.toString(),
+                    LocalSocketAddress.Namespace.FILESYSTEM,
                 )
-            pendingPathDescriptor = pathDescriptor
-            val pathStat = Os.fstat(pathDescriptor)
-            if (pathStat.st_mode and OsConstants.S_IFMT != OsConstants.S_IFSOCK) {
-                Os.close(pathDescriptor)
-                pendingPathDescriptor = null
+            )
+            val openedNode = directory.openSocketNode()
+            if (openedNode is BridgeResult.Failure) {
                 bound.close()
-                return BridgeResult.Failure(BridgeError.SocketPathChanged)
+                return openedNode
             }
-            val inode = pathStat.st_ino
-            val descriptorPath = "/proc/self/fd/${descriptorNumber(pathDescriptor)}"
+            val node = (openedNode as BridgeResult.Success).value
+            pendingNode = node
             val server = LocalServerSocket(bound.fileDescriptor)
             BridgeResult.Success(
                     object : BridgeServerBinding {
+                        override val socketNode: BridgeSocketNodeHandle = node
+
                         override fun acceptTransport(): BridgeTransport =
                             AndroidLocalSocketTransport(server.accept())
-
-                        override fun boundSocketInode(): Long = inode
-
-                        override fun chownBoundSocket(inode: Long): BridgeResult<Unit> {
-                            if (Os.fstat(pathDescriptor).st_ino != inode) {
-                                return BridgeResult.Failure(BridgeError.SocketPathChanged)
-                            }
-                            try {
-                                Os.chown(descriptorPath, 0, 0)
-                            } catch (_: Exception) {
-                                return BridgeResult.Failure(BridgeError.SocketChownDenied)
-                            }
-                            val after = Os.fstat(pathDescriptor)
-                            return if (
-                                after.st_ino == inode &&
-                                    after.st_uid == 0 &&
-                                    after.st_gid == 0 &&
-                                    after.st_mode and OsConstants.S_IFMT == OsConstants.S_IFSOCK
-                            ) {
-                                BridgeResult.Success(Unit)
-                            } else {
-                                BridgeResult.Failure(BridgeError.SocketPathChanged)
-                            }
-                        }
-
-                        override fun chmodBoundSocket(inode: Long): BridgeResult<Unit> {
-                            if (Os.fstat(pathDescriptor).st_ino != inode) {
-                                return BridgeResult.Failure(BridgeError.SocketPathChanged)
-                            }
-                            try {
-                                Os.chmod(descriptorPath, 0x180)
-                            } catch (_: Exception) {
-                                return BridgeResult.Failure(BridgeError.SocketChmodDenied)
-                            }
-                            val after = Os.fstat(pathDescriptor)
-                            return if (
-                                after.st_ino == inode &&
-                                    after.st_mode and OsConstants.S_IFMT == OsConstants.S_IFSOCK &&
-                                    after.st_mode and 0x1ff == 0x180
-                            ) {
-                                BridgeResult.Success(Unit)
-                            } else {
-                                BridgeResult.Failure(BridgeError.SocketPathChanged)
-                            }
-                        }
 
                         override fun close() {
                             runCatching { server.close() }
                             runCatching { bound.close() }
-                            runCatching { Os.close(pathDescriptor) }
                         }
                     }
                 )
-                .also { pendingPathDescriptor = null }
+                .also { pendingNode = null }
         } catch (_: SecurityException) {
-            pendingPathDescriptor?.let { runCatching { Os.close(it) } }
+            pendingNode?.close()
             runCatching { bound.close() }
             BridgeResult.Failure(BridgeError.SelinuxDenied)
         } catch (_: Exception) {
-            pendingPathDescriptor?.let { runCatching { Os.close(it) } }
+            pendingNode?.close()
             runCatching { bound.close() }
             BridgeResult.Failure(BridgeError.SocketBindDenied)
         }
     }
-
-    private fun descriptorNumber(descriptor: FileDescriptor): Int =
-        FileDescriptor::class.java.getDeclaredMethod("getInt$").invoke(descriptor) as Int
-
-    private const val O_PATH = 0x200000
 }
 
 internal class DonorBridgeServer
 private constructor(
     private val binding: BridgeServerBinding,
     private val directory: BridgeSocketDirectoryHandle,
-    private val socketInode: Long,
+    private val socketNode: BridgeSocketNodeHandle,
 ) : Closeable {
     internal fun boundedTransport(): BridgeTransport =
         DeferredBridgeTransport(
@@ -137,19 +75,15 @@ private constructor(
         )
 
     internal fun socketMetadata(): SocketMetadata =
-        when (val inspected = directory.inspectSocket()) {
-            is BridgeResult.Success ->
-                if (inspected.value.inode == socketInode) {
-                    SocketMetadata.secureRootOwned()
-                } else {
-                    SocketMetadata.insecure()
-                }
+        when (socketNode.inspect()) {
+            is BridgeResult.Success -> SocketMetadata.secureRootOwned()
             is BridgeResult.Failure -> SocketMetadata.insecure()
         }
 
     override fun close() {
         runCatching { binding.close() }
-        directory.deleteExactSocket(socketInode)
+        socketNode.deleteIfStillNamed()
+        socketNode.close()
         directory.close()
     }
 
@@ -180,67 +114,56 @@ private constructor(
             directory: BridgeSocketDirectoryHandle,
             binder: BridgeServerBinder,
         ): BridgeResult<DonorBridgeServer> {
-            val bound = binder.bind(directory.anchoredSocketPath)
+            val bound = binder.bind(directory)
             if (bound is BridgeResult.Failure) {
                 directory.close()
                 return bound
             }
             val binding = (bound as BridgeResult.Success).value
-            val inode =
-                try {
-                    binding.boundSocketInode()
-                } catch (_: Exception) {
-                    runCatching { binding.close() }
-                    directory.close()
-                    return BridgeResult.Failure(BridgeError.SocketPathChanged)
-                }
-            val verified = directory.verifySocketInode(inode)
-            if (verified is BridgeResult.Failure) {
-                runCatching { binding.close() }
-                directory.close()
-                return verified
-            }
-            val chowned = binding.chownBoundSocket(inode)
+            val node = binding.socketNode
+            val chowned = node.chownRoot()
             if (chowned is BridgeResult.Failure) {
-                runCatching { binding.close() }
-                directory.deleteExactSocket(inode)
-                directory.close()
-                return chowned
+                return failAfterBind(binding, directory, node, chowned)
             }
-            val afterChown = directory.verifySocketInode(inode)
+            val afterChown = node.verifyStillNamed()
             if (afterChown is BridgeResult.Failure) {
-                runCatching { binding.close() }
-                directory.close()
-                return afterChown
+                return failAfterBind(binding, directory, node, afterChown, delete = false)
             }
-            val chmodded = binding.chmodBoundSocket(inode)
+            val chmodded = node.chmodOwnerOnly()
             if (chmodded is BridgeResult.Failure) {
-                runCatching { binding.close() }
-                directory.deleteExactSocket(inode)
-                directory.close()
-                return chmodded
+                return failAfterBind(binding, directory, node, chmodded)
             }
-            val afterChmod = directory.verifySocketInode(inode)
+            val afterChmod = node.verifyStillNamed()
             if (afterChmod is BridgeResult.Failure) {
-                runCatching { binding.close() }
-                directory.close()
-                return afterChmod
+                return failAfterBind(binding, directory, node, afterChmod, delete = false)
             }
-            val labeled = directory.labelExactSocket(inode)
+            val labeled = node.labelDedicated()
             if (labeled is BridgeResult.Failure) {
-                runCatching { binding.close() }
-                directory.deleteExactSocket(inode)
-                directory.close()
-                return labeled
+                return failAfterBind(binding, directory, node, labeled)
             }
-            val inspected = directory.inspectSocket()
-            if (inspected !is BridgeResult.Success || inspected.value.inode != inode) {
-                runCatching { binding.close() }
-                directory.deleteExactSocket(inode)
-                directory.close()
-                return BridgeResult.Failure(BridgeError.SocketPathChanged)
+            if (node.inspect() is BridgeResult.Failure) {
+                return failAfterBind(
+                    binding,
+                    directory,
+                    node,
+                    BridgeResult.Failure(BridgeError.SocketPathChanged),
+                )
             }
-            return BridgeResult.Success(DonorBridgeServer(binding, directory, inode))
+            return BridgeResult.Success(DonorBridgeServer(binding, directory, node))
+        }
+
+        private fun failAfterBind(
+            binding: BridgeServerBinding,
+            directory: BridgeSocketDirectoryHandle,
+            node: BridgeSocketNodeHandle,
+            failure: BridgeResult.Failure,
+            delete: Boolean = true,
+        ): BridgeResult.Failure {
+            runCatching { binding.close() }
+            if (delete) node.deleteIfStillNamed()
+            node.close()
+            directory.close()
+            return failure
         }
     }
 }
@@ -255,12 +178,18 @@ internal object CandidateBridgeConnector {
                     throw BridgeTransportException(opened.error)
                 }
                 val directory = (opened as BridgeResult.Success).value
-                val before = directory.inspectSocket()
+                val openedNode = directory.openSocketNode()
+                if (openedNode is BridgeResult.Failure) {
+                    directory.close()
+                    throw BridgeTransportException(openedNode.error)
+                }
+                val node = (openedNode as BridgeResult.Success).value
+                val before = node.inspect()
                 if (before is BridgeResult.Failure) {
+                    node.close()
                     directory.close()
                     throw BridgeTransportException(before.error)
                 }
-                val expectedInode = (before as BridgeResult.Success).value.inode
                 val socket = LocalSocket()
                 pending.set(socket)
                 try {
@@ -270,25 +199,40 @@ internal object CandidateBridgeConnector {
                             LocalSocketAddress.Namespace.FILESYSTEM,
                         )
                     )
-                    val after = directory.inspectSocket()
-                    if (after !is BridgeResult.Success || after.value.inode != expectedInode) {
+                    if (node.verifyStillNamed() is BridgeResult.Failure) {
                         throw BridgeTransportException(BridgeError.SocketPathChanged)
                     }
-                    AndroidLocalSocketTransport(socket)
+                    HeldSocketTransport(AndroidLocalSocketTransport(socket), node, directory)
                 } catch (error: BridgeTransportException) {
                     runCatching { socket.close() }
+                    node.close()
+                    directory.close()
                     throw error
                 } catch (_: SecurityException) {
                     runCatching { socket.close() }
+                    node.close()
+                    directory.close()
                     throw BridgeTransportException(BridgeError.SelinuxDenied)
                 } catch (_: Exception) {
                     runCatching { socket.close() }
-                    throw BridgeTransportException(BridgeError.SocketBindDenied)
-                } finally {
+                    node.close()
                     directory.close()
+                    throw BridgeTransportException(BridgeError.SocketBindDenied)
                 }
             },
             abortPending = { runCatching { pending.get()?.close() } },
         )
+    }
+}
+
+private class HeldSocketTransport(
+    private val delegate: BridgeTransport,
+    private val node: BridgeSocketNodeHandle,
+    private val directory: BridgeSocketDirectoryHandle,
+) : BridgeTransport by delegate {
+    override fun close() {
+        runCatching { delegate.close() }
+        node.close()
+        directory.close()
     }
 }

@@ -1,159 +1,48 @@
 package org.matrix.TEESimulator.rka.bridge
 
+import android.system.Os
+import android.system.OsConstants
+import android.system.StructStat
+import java.io.Closeable
+import java.io.FileDescriptor
 import java.nio.charset.StandardCharsets
-import java.nio.file.Files
-import java.nio.file.LinkOption
-import java.nio.file.Path
 
-/**
- * Opaque authorization captured from the supervisor-owned immutable launch record. Construction is
- * private so a bridge consumer cannot nominate a peer process.
- */
-class TrustedSidecarIdentity
-private constructor(
-    internal val snapshot: SupervisorSnapshot,
-    private val launchNonce: String,
-    private val recordInode: Long,
+internal sealed interface ProductionPeerAuthorization : Closeable {
+    fun authenticate(credentials: PeerCredentials): BridgeResult<SupervisorSnapshot>
+}
+
+internal fun captureProductionPeerAuthorization(): BridgeResult<ProductionPeerAuthorization> =
+    FixedSupervisorAuthorization.capture()
+
+internal data class SupervisorRecordFields(
+    val generation: Long,
+    val launchNonce: String,
+    val uid: Int,
+    val gid: Int,
+    val pid: Int,
+    val startTimeTicks: Long,
+    val executableInode: Long,
+    val role: String,
 ) {
-    internal fun sameLaunch(other: TrustedSidecarIdentity): Boolean =
-        snapshot == other.snapshot &&
-            launchNonce == other.launchNonce &&
-            recordInode == other.recordInode
+    fun snapshot(): SupervisorSnapshot =
+        SupervisorSnapshot(
+            generation = generation,
+            uid = uid,
+            gid = gid,
+            pid = pid,
+            startTimeTicks = startTimeTicks,
+            cmdline = listOf(FIXED_EXECUTABLE, "--role", role.lowercase()),
+            executablePath = FIXED_EXECUTABLE,
+            executableInode = executableInode,
+        )
 
-    internal companion object {
-        fun captured(
-            snapshot: SupervisorSnapshot,
-            launchNonce: String,
-            recordInode: Long,
-        ): TrustedSidecarIdentity = TrustedSidecarIdentity(snapshot, launchNonce, recordInode)
+    companion object {
+        const val FIXED_EXECUTABLE = "/data/adb/teesimulator-rka/bin/rka-sidecar"
     }
 }
 
-internal interface TrustedSidecarIdentitySource {
-    fun capture(): BridgeResult<TrustedSidecarIdentity>
-
-    fun revalidate(identity: TrustedSidecarIdentity): BridgeResult<SupervisorSnapshot>
-}
-
-/**
- * Reads only the Task-3 protected runtime record. Task 11 must atomically publish this exact v1
- * schema at [RECORD_PATH] after exec identity is known:
- *
- * version, generation, launch_nonce (64 lowercase hex), uid, gid, pid, start_time_ticks,
- * executable_inode, executable_path and role (DONOR or CANDIDATE), one `key=value` line each in
- * that order. The argv authorized by the record is exactly `[executable_path, "--role",
- * role.lowercase()]`.
- */
-internal class ProtectedSupervisorIdentitySource(
-    private val processIdentity: ProcessIdentitySource = LinuxProcessIdentitySource(),
-    private val recordPath: Path = RECORD_PATH,
-    private val requiredUid: Int = 0,
-    private val requiredGid: Int = 0,
-) : TrustedSidecarIdentitySource {
-    override fun capture(): BridgeResult<TrustedSidecarIdentity> = readValidated()
-
-    override fun revalidate(identity: TrustedSidecarIdentity): BridgeResult<SupervisorSnapshot> =
-        when (val current = readValidated()) {
-            is BridgeResult.Failure -> current
-            is BridgeResult.Success ->
-                if (identity.sameLaunch(current.value)) {
-                    BridgeResult.Success(current.value.snapshot)
-                } else {
-                    BridgeResult.Failure(BridgeError.TrustedStateChanged)
-                }
-        }
-
-    private fun readValidated(): BridgeResult<TrustedSidecarIdentity> {
-        if (!Files.exists(recordPath, LinkOption.NOFOLLOW_LINKS)) {
-            return BridgeResult.Failure(BridgeError.TrustedStateMissing)
-        }
-        if (hasSymlinkAncestor(recordPath)) {
-            return BridgeResult.Failure(BridgeError.TrustedStateInvalid)
-        }
-        val parent =
-            recordPath.parent ?: return BridgeResult.Failure(BridgeError.TrustedStateInvalid)
-        val before =
-            runCatching { attributes(recordPath) }
-                .getOrElse {
-                    return BridgeResult.Failure(BridgeError.TrustedStateInvalid)
-                }
-        val parentAttributes =
-            runCatching { attributes(parent) }
-                .getOrElse {
-                    return BridgeResult.Failure(BridgeError.TrustedStateInvalid)
-                }
-        if (
-            !before.regular ||
-                before.symlink ||
-                before.uid != requiredUid ||
-                before.gid != requiredGid ||
-                before.mode != FILE_MODE ||
-                before.size !in 1..MAX_RECORD_BYTES ||
-                !parentAttributes.directory ||
-                parentAttributes.symlink ||
-                parentAttributes.uid != requiredUid ||
-                parentAttributes.gid != requiredGid ||
-                parentAttributes.mode != DIRECTORY_MODE
-        ) {
-            return BridgeResult.Failure(BridgeError.TrustedStateInvalid)
-        }
-        if (recordPath == RECORD_PATH && !fixedProtectedDirectoriesAreValid()) {
-            return BridgeResult.Failure(BridgeError.TrustedStateInvalid)
-        }
-        val raw =
-            runCatching { Files.readAllBytes(recordPath) }
-                .getOrElse {
-                    return BridgeResult.Failure(BridgeError.TrustedStateInvalid)
-                }
-        try {
-            if (raw.size.toLong() != before.size || raw.any { it < 0 }) {
-                return BridgeResult.Failure(BridgeError.TrustedStateInvalid)
-            }
-            val after =
-                runCatching { attributes(recordPath) }
-                    .getOrElse {
-                        return BridgeResult.Failure(BridgeError.TrustedStateChanged)
-                    }
-            if (after != before) return BridgeResult.Failure(BridgeError.TrustedStateChanged)
-            val fields =
-                parse(String(raw, StandardCharsets.US_ASCII))
-                    ?: return BridgeResult.Failure(BridgeError.TrustedStateInvalid)
-            val snapshot =
-                SupervisorSnapshot(
-                    generation = fields.generation,
-                    uid = fields.uid,
-                    gid = fields.gid,
-                    pid = fields.pid,
-                    startTimeTicks = fields.startTimeTicks,
-                    cmdline = listOf(FIXED_EXECUTABLE, "--role", fields.role.lowercase()),
-                    executablePath = FIXED_EXECUTABLE,
-                    executableInode = fields.executableInode,
-                )
-            val observed =
-                runCatching { processIdentity.read(snapshot.pid) }
-                    .getOrElse {
-                        return BridgeResult.Failure(BridgeError.PeerDied)
-                    }
-            if (
-                snapshot.uid != 0 ||
-                    snapshot.gid != 0 ||
-                    !identityMatches(
-                        PeerCredentials(snapshot.uid, snapshot.gid, snapshot.pid),
-                        snapshot,
-                        observed,
-                    )
-            ) {
-                return BridgeResult.Failure(BridgeError.PeerIdentityMismatch)
-            }
-            return BridgeResult.Success(
-                TrustedSidecarIdentity.captured(snapshot, fields.launchNonce, before.inode)
-            )
-        } finally {
-            raw.fill(0)
-        }
-    }
-
-    private fun parse(text: String): RecordFields? {
+internal object SupervisorRecordTextParser {
+    fun parse(text: String): SupervisorRecordFields? {
         if (!text.endsWith("\n")) return null
         val lines = text.dropLast(1).split("\n")
         if (lines.size != KEYS.size) return null
@@ -171,8 +60,10 @@ internal class ProtectedSupervisorIdentitySource(
         if (nonce.length != 64 || nonce.any { it !in '0'..'9' && it !in 'a'..'f' }) return null
         val role = values.getValue("role")
         if (role != "DONOR" && role != "CANDIDATE") return null
-        if (values.getValue("executable_path") != FIXED_EXECUTABLE) return null
-        return RecordFields(
+        if (values.getValue("executable_path") != SupervisorRecordFields.FIXED_EXECUTABLE) {
+            return null
+        }
+        return SupervisorRecordFields(
             generation =
                 values.getValue("generation").toLongOrNull()?.takeIf { it >= 0 } ?: return null,
             launchNonce = nonce,
@@ -189,140 +80,341 @@ internal class ProtectedSupervisorIdentitySource(
         )
     }
 
-    private fun attributes(path: Path): RecordAttributes {
-        val values =
-            Files.readAttributes(
-                path,
-                "unix:ino,uid,gid,mode,size,isRegularFile,isDirectory,isSymbolicLink",
-                LinkOption.NOFOLLOW_LINKS,
-            )
-        return RecordAttributes(
-            inode = (values.getValue("ino") as Number).toLong(),
-            uid = (values.getValue("uid") as Number).toInt(),
-            gid = (values.getValue("gid") as Number).toInt(),
-            mode = (values.getValue("mode") as Number).toInt() and 0x1ff,
-            size = (values.getValue("size") as Number).toLong(),
-            regular = values.getValue("isRegularFile") as Boolean,
-            directory = values.getValue("isDirectory") as Boolean,
-            symlink = values.getValue("isSymbolicLink") as Boolean,
-        )
-    }
-
-    private fun hasSymlinkAncestor(path: Path): Boolean {
-        var current: Path? = path.toAbsolutePath().root
-        for (component in path.toAbsolutePath()) {
-            current = requireNotNull(current).resolve(component)
-            if (Files.isSymbolicLink(current)) return true
-        }
-        return false
-    }
-
-    private fun fixedProtectedDirectoriesAreValid(): Boolean =
+    private val KEYS =
         listOf(
-                Path.of("/data/adb/teesimulator-rka"),
-                Path.of("/data/adb/teesimulator-rka/run"),
-                Path.of("/data/adb/teesimulator-rka/run/pids"),
-            )
-            .all { path ->
-                runCatching {
-                        val value = attributes(path)
-                        value.directory &&
-                            !value.symlink &&
-                            value.uid == requiredUid &&
-                            value.gid == requiredGid &&
-                            value.mode == DIRECTORY_MODE
-                    }
-                    .getOrDefault(false)
-            }
+            "version",
+            "generation",
+            "launch_nonce",
+            "uid",
+            "gid",
+            "pid",
+            "start_time_ticks",
+            "executable_inode",
+            "executable_path",
+            "role",
+        )
+}
 
-    private data class RecordFields(
-        val generation: Long,
-        val launchNonce: String,
-        val uid: Int,
-        val gid: Int,
-        val pid: Int,
-        val startTimeTicks: Long,
-        val executableInode: Long,
-        val role: String,
-    )
+private object FixedSupervisorAuthorization {
+    fun capture(): BridgeResult<ProductionPeerAuthorization> {
+        val opened = TrustedRecordHandle.open()
+        if (opened is BridgeResult.Failure) return opened
+        val handle = (opened as BridgeResult.Success).value
+        val record = handle.readStable(initial = true)
+        if (record is BridgeResult.Failure) {
+            handle.close()
+            return record
+        }
+        val initial = (record as BridgeResult.Success).value
+        if (!processMatches(initial.snapshot())) {
+            handle.close()
+            return BridgeResult.Failure(BridgeError.PeerIdentityMismatch)
+        }
+        return BridgeResult.Success(DescriptorPeerAuthorization(handle, initial))
+    }
 
-    private data class RecordAttributes(
-        val inode: Long,
-        val uid: Int,
-        val gid: Int,
-        val mode: Int,
-        val size: Long,
-        val regular: Boolean,
-        val directory: Boolean,
-        val symlink: Boolean,
-    )
-
-    internal companion object {
-        val RECORD_PATH: Path = Path.of("/data/adb/teesimulator-rka/run/pids/sidecar.identity")
-        const val FIXED_EXECUTABLE = "/data/adb/teesimulator-rka/bin/rka-sidecar"
-        private const val DIRECTORY_MODE = 0x1c0
-        private const val FILE_MODE = 0x180
-        private const val MAX_RECORD_BYTES = 4096L
-        private val KEYS =
-            listOf(
-                "version",
-                "generation",
-                "launch_nonce",
-                "uid",
-                "gid",
-                "pid",
-                "start_time_ticks",
-                "executable_inode",
-                "executable_path",
-                "role",
-            )
+    private fun processMatches(snapshot: SupervisorSnapshot): Boolean {
+        val observed =
+            runCatching { LinuxProcessIdentitySource().read(snapshot.pid) }.getOrNull()
+                ?: return false
+        return identityMatches(
+            PeerCredentials(snapshot.uid, snapshot.gid, snapshot.pid),
+            snapshot,
+            observed,
+        )
     }
 }
 
-private class TestTrustedSidecarIdentitySource(
-    private val expected: () -> SupervisorSnapshot,
-    private val processIdentity: ProcessIdentitySource,
-) : TrustedSidecarIdentitySource {
-    private lateinit var capturedSnapshot: SupervisorSnapshot
-    private var validations = 0
-
-    override fun capture(): BridgeResult<TrustedSidecarIdentity> {
-        capturedSnapshot = expected()
-        return BridgeResult.Success(
-            TrustedSidecarIdentity.captured(capturedSnapshot, TEST_NONCE, 1)
-        )
-    }
-
-    override fun revalidate(identity: TrustedSidecarIdentity): BridgeResult<SupervisorSnapshot> {
-        val snapshot = if (validations++ == 0) capturedSnapshot else expected()
-        if (identity.snapshot.generation != snapshot.generation) {
-            return BridgeResult.Failure(BridgeError.TrustedStateChanged)
-        }
+private class DescriptorPeerAuthorization(
+    private val handle: TrustedRecordHandle,
+    private val initial: SupervisorRecordFields,
+) : ProductionPeerAuthorization {
+    override fun authenticate(credentials: PeerCredentials): BridgeResult<SupervisorSnapshot> {
+        val current = handle.readStable(initial = false)
+        if (current is BridgeResult.Failure) return current
+        val fields = (current as BridgeResult.Success).value
+        if (fields != initial) return BridgeResult.Failure(BridgeError.TrustedStateChanged)
+        val snapshot = fields.snapshot()
         val observed =
-            runCatching { processIdentity.read(snapshot.pid) }
+            runCatching { LinuxProcessIdentitySource().read(snapshot.pid) }
                 .getOrElse {
                     return BridgeResult.Failure(BridgeError.PeerDied)
                 }
-        return if (
-            identityMatches(
-                PeerCredentials(snapshot.uid, snapshot.gid, snapshot.pid),
-                snapshot,
-                observed,
-            )
-        ) {
+        return if (identityMatches(credentials, snapshot, observed)) {
             BridgeResult.Success(snapshot)
         } else {
             BridgeResult.Failure(BridgeError.PeerIdentityMismatch)
         }
     }
 
-    private companion object {
-        const val TEST_NONCE = "0000000000000000000000000000000000000000000000000000000000000000"
+    override fun close() {
+        handle.close()
     }
 }
 
-@JvmSynthetic
-internal fun testTrustedSidecarIdentitySource(
-    expected: () -> SupervisorSnapshot,
-    processIdentity: ProcessIdentitySource,
-): TrustedSidecarIdentitySource = TestTrustedSidecarIdentitySource(expected, processIdentity)
+private class TrustedRecordHandle
+private constructor(
+    private val directories: List<HeldDirectory>,
+    private val recordDescriptor: FileDescriptor,
+    private val recordSignature: RecordSignature,
+) : Closeable {
+    fun readStable(initial: Boolean): BridgeResult<SupervisorRecordFields> {
+        val changedError =
+            if (initial) BridgeError.TrustedStateInvalid else BridgeError.TrustedStateChanged
+        if (!chainStillNamed() || !recordStillNamed()) {
+            return BridgeResult.Failure(changedError)
+        }
+        val before =
+            runCatching { RecordSignature.from(Os.fstat(recordDescriptor)) }
+                .getOrElse {
+                    return BridgeResult.Failure(changedError)
+                }
+        if (before != recordSignature) return BridgeResult.Failure(changedError)
+        val raw = ByteArray(before.size.toInt())
+        try {
+            var offset = 0
+            while (offset < raw.size) {
+                val read =
+                    try {
+                        Os.pread(recordDescriptor, raw, offset, raw.size - offset, offset.toLong())
+                    } catch (_: Exception) {
+                        return BridgeResult.Failure(changedError)
+                    }
+                if (read <= 0) return BridgeResult.Failure(changedError)
+                offset += read
+            }
+            val overflow = ByteArray(1)
+            if (
+                runCatching { Os.pread(recordDescriptor, overflow, 0, 1, raw.size.toLong()) }
+                    .getOrDefault(-1) != 0
+            ) {
+                return BridgeResult.Failure(changedError)
+            }
+            val after =
+                runCatching { RecordSignature.from(Os.fstat(recordDescriptor)) }
+                    .getOrElse {
+                        return BridgeResult.Failure(changedError)
+                    }
+            if (
+                after != before ||
+                    after != recordSignature ||
+                    !chainStillNamed() ||
+                    !recordStillNamed()
+            ) {
+                return BridgeResult.Failure(changedError)
+            }
+            if (raw.any { it < 0 }) return BridgeResult.Failure(BridgeError.TrustedStateInvalid)
+            val parsed = SupervisorRecordTextParser.parse(String(raw, StandardCharsets.US_ASCII))
+            return if (parsed == null) {
+                BridgeResult.Failure(BridgeError.TrustedStateInvalid)
+            } else {
+                BridgeResult.Success(parsed)
+            }
+        } finally {
+            raw.fill(0)
+        }
+    }
+
+    private fun chainStillNamed(): Boolean {
+        if (directories.isEmpty()) return false
+        for (directory in directories) {
+            val held =
+                runCatching { DirectorySignature.from(Os.fstat(directory.descriptor)) }
+                    .getOrElse {
+                        return false
+                    }
+            if (held != directory.signature) return false
+        }
+        for (index in 1 until directories.size) {
+            val parent = directories[index - 1]
+            val child = directories[index]
+            val named =
+                runCatching {
+                        DirectorySignature.from(
+                            Os.lstat("${descriptorPath(parent.descriptor)}/${child.name}")
+                        )
+                    }
+                    .getOrElse {
+                        return false
+                    }
+            if (named != child.signature) return false
+        }
+        return true
+    }
+
+    private fun recordStillNamed(): Boolean {
+        val parent = directories.lastOrNull() ?: return false
+        val named =
+            runCatching {
+                    RecordSignature.from(
+                        Os.lstat("${descriptorPath(parent.descriptor)}/$RECORD_NAME")
+                    )
+                }
+                .getOrElse {
+                    return false
+                }
+        return named == recordSignature
+    }
+
+    override fun close() {
+        runCatching { Os.close(recordDescriptor) }
+        directories.asReversed().forEach { runCatching { Os.close(it.descriptor) } }
+    }
+
+    companion object {
+        fun open(): BridgeResult<TrustedRecordHandle> {
+            val held = mutableListOf<HeldDirectory>()
+            var record: FileDescriptor? = null
+            try {
+                val root = openDirectory("/")
+                held += HeldDirectory("", root, DirectorySignature.from(Os.fstat(root)))
+                for (name in COMPONENTS) {
+                    val descriptor =
+                        openDirectory("${descriptorPath(held.last().descriptor)}/$name")
+                    val signature = DirectorySignature.from(Os.fstat(descriptor))
+                    if (!signature.directory) {
+                        Os.close(descriptor)
+                        return closeAndFail(held, BridgeError.TrustedStateInvalid)
+                    }
+                    held += HeldDirectory(name, descriptor, signature)
+                }
+                if (!protectedDirectoriesAreValid(held)) {
+                    return closeAndFail(held, BridgeError.TrustedStateInvalid)
+                }
+                record =
+                    Os.open(
+                        "${descriptorPath(held.last().descriptor)}/$RECORD_NAME",
+                        OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW or OsConstants.O_CLOEXEC,
+                        0,
+                    )
+                val signature = RecordSignature.from(Os.fstat(record))
+                if (
+                    !signature.regular ||
+                        signature.uid != 0 ||
+                        signature.gid != 0 ||
+                        signature.mode != FILE_MODE ||
+                        signature.size !in 1..MAX_RECORD_BYTES
+                ) {
+                    Os.close(record)
+                    record = null
+                    return closeAndFail(held, BridgeError.TrustedStateInvalid)
+                }
+                return BridgeResult.Success(TrustedRecordHandle(held.toList(), record, signature))
+            } catch (error: android.system.ErrnoException) {
+                record?.let { runCatching { Os.close(it) } }
+                held.asReversed().forEach { runCatching { Os.close(it.descriptor) } }
+                return BridgeResult.Failure(
+                    if (error.errno == OsConstants.ENOENT) {
+                        BridgeError.TrustedStateMissing
+                    } else {
+                        BridgeError.TrustedStateInvalid
+                    }
+                )
+            } catch (_: Exception) {
+                record?.let { runCatching { Os.close(it) } }
+                held.asReversed().forEach { runCatching { Os.close(it.descriptor) } }
+                return BridgeResult.Failure(BridgeError.TrustedStateInvalid)
+            }
+        }
+
+        private fun openDirectory(path: String): FileDescriptor =
+            Os.open(
+                path,
+                OsConstants.O_RDONLY or
+                    O_DIRECTORY or
+                    OsConstants.O_NOFOLLOW or
+                    OsConstants.O_CLOEXEC,
+                0,
+            )
+
+        private fun protectedDirectoriesAreValid(held: List<HeldDirectory>): Boolean =
+            held
+                .filter { it.name in PROTECTED_COMPONENTS }
+                .all {
+                    it.signature.directory &&
+                        it.signature.uid == 0 &&
+                        it.signature.gid == 0 &&
+                        it.signature.mode == DIRECTORY_MODE
+                }
+
+        private fun closeAndFail(
+            held: List<HeldDirectory>,
+            error: BridgeError,
+        ): BridgeResult.Failure {
+            held.asReversed().forEach { runCatching { Os.close(it.descriptor) } }
+            return BridgeResult.Failure(error)
+        }
+
+        private val COMPONENTS = listOf("data", "adb", "teesimulator-rka", "run", "pids")
+        private val PROTECTED_COMPONENTS = setOf("teesimulator-rka", "run", "pids")
+        private const val RECORD_NAME = "sidecar.identity"
+        private const val DIRECTORY_MODE = 0x1c0
+        private const val FILE_MODE = 0x180
+        private const val MAX_RECORD_BYTES = 4096L
+        private const val O_DIRECTORY = 0x10000
+    }
+}
+
+private data class HeldDirectory(
+    val name: String,
+    val descriptor: FileDescriptor,
+    val signature: DirectorySignature,
+)
+
+private data class DirectorySignature(
+    val device: Long,
+    val inode: Long,
+    val uid: Int,
+    val gid: Int,
+    val mode: Int,
+    val directory: Boolean,
+) {
+    companion object {
+        fun from(stat: StructStat): DirectorySignature =
+            DirectorySignature(
+                stat.st_dev,
+                stat.st_ino,
+                stat.st_uid,
+                stat.st_gid,
+                stat.st_mode and 0x1ff,
+                stat.st_mode and OsConstants.S_IFMT == OsConstants.S_IFDIR,
+            )
+    }
+}
+
+private data class RecordSignature(
+    val device: Long,
+    val inode: Long,
+    val uid: Int,
+    val gid: Int,
+    val mode: Int,
+    val size: Long,
+    val modifiedSeconds: Long,
+    val modifiedNanos: Long,
+    val changedSeconds: Long,
+    val changedNanos: Long,
+    val regular: Boolean,
+) {
+    companion object {
+        fun from(stat: StructStat): RecordSignature =
+            RecordSignature(
+                stat.st_dev,
+                stat.st_ino,
+                stat.st_uid,
+                stat.st_gid,
+                stat.st_mode and 0x1ff,
+                stat.st_size,
+                stat.st_mtim.tv_sec,
+                stat.st_mtim.tv_nsec,
+                stat.st_ctim.tv_sec,
+                stat.st_ctim.tv_nsec,
+                stat.st_mode and OsConstants.S_IFMT == OsConstants.S_IFREG,
+            )
+    }
+}
+
+private fun descriptorPath(descriptor: FileDescriptor): String =
+    "/proc/self/fd/${descriptorNumber(descriptor)}"
+
+private fun descriptorNumber(descriptor: FileDescriptor): Int =
+    FileDescriptor::class.java.getDeclaredMethod("getInt$").invoke(descriptor) as Int

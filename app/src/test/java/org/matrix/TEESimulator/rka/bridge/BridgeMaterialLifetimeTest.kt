@@ -54,7 +54,7 @@ class BridgeMaterialLifetimeTest {
         val release = CountDownLatch(1)
         var decodedBacking: ByteArray? = null
         val endpoint =
-            BrokerBridgeEndpoints.forTest(
+            testBrokerBridgeEndpoint(
                 expected = { snapshot() },
                 processIdentity = ProcessIdentitySource { observed() },
                 socketMetadata = { SocketMetadata.secureRootOwned() },

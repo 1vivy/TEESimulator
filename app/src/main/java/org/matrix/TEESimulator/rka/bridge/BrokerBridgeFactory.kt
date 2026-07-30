@@ -11,41 +11,48 @@ object BrokerBridgeFactory {
         val server = AtomicReference<DonorBridgeServer?>()
         val transport = AtomicReference<BridgeTransport?>()
         val endpoint = AtomicReference<BrokerBridgeEndpoint?>()
+        val authorization = AtomicReference<ProductionPeerAuthorization?>()
         return BoundedBridgeExecution().run(
             BridgeLimits.DEADLINE_MILLIS,
             {
                 endpoint.get()?.peerDied()
+                authorization.get()?.close()
                 runCatching { transport.get()?.close() }
                 runCatching { server.get()?.close() }
             },
         ) {
-            val bound = DonorBridgeServer.bind()
-            if (bound is BridgeResult.Failure) return@run bound
-            val value = (bound as BridgeResult.Success).value
-            server.set(value)
-            val connected = value.boundedTransport()
-            transport.set(connected)
+            val captured = captureProductionPeerAuthorization(BrokerSidecarRole.DONOR)
+            if (captured is BridgeResult.Failure) return@run captured
+            val peerAuthorization = (captured as BridgeResult.Success).value
+            authorization.set(peerAuthorization)
             try {
-                val created =
+                val bound = DonorBridgeServer.bind()
+                if (bound is BridgeResult.Failure) return@run bound
+                val value = (bound as BridgeResult.Success).value
+                server.set(value)
+                val connected = value.boundedTransport()
+                transport.set(connected)
+                val valueEndpoint =
                     createProductionBrokerEndpoint(
+                        peerAuthorization,
                         value::socketMetadata,
                         connected,
                         InlineBridgeExecution,
                     )
-                if (created is BridgeResult.Failure) return@run created
-                val valueEndpoint = (created as BridgeResult.Success).value
                 endpoint.set(valueEndpoint)
                 try {
                     valueEndpoint.acceptAndDispatch(dispatch)
                 } finally {
                     valueEndpoint.peerDied()
+                    connected.close()
+                    value.close()
+                    transport.set(null)
+                    server.set(null)
+                    endpoint.set(null)
                 }
             } finally {
-                connected.close()
-                value.close()
-                transport.set(null)
-                server.set(null)
-                endpoint.set(null)
+                peerAuthorization.close()
+                authorization.set(null)
             }
         }
     }
@@ -55,38 +62,44 @@ object BrokerBridgeFactory {
      * response remains live and ownership transfers to the caller, which must close it.
      */
     fun exchangeCandidate(request: BridgeMessage): BridgeResult<BridgeMessage> {
-        val transport = CandidateBridgeConnector.boundedTransport()
+        val transport = AtomicReference<BridgeTransport?>()
         val clientReference = AtomicReference<BrokerBridgeClient?>()
+        val authorization = AtomicReference<ProductionPeerAuthorization?>()
         val result =
             BoundedBridgeExecution().run(
                 BridgeLimits.DEADLINE_MILLIS,
                 {
                     clientReference.get()?.peerDied()
-                    transport.close()
+                    authorization.get()?.close()
+                    transport.get()?.close()
                 },
             ) {
-                val client =
-                    createProductionBrokerClient(
-                        { SocketMetadata.secureRootOwned() },
-                        transport,
-                        InlineBridgeExecution,
-                    )
-                if (client is BridgeResult.Failure) {
-                    request.close()
-                    transport.close()
-                    return@run client
-                }
+                val captured = captureProductionPeerAuthorization(BrokerSidecarRole.CANDIDATE)
+                if (captured is BridgeResult.Failure) return@run captured
+                val peerAuthorization = (captured as BridgeResult.Success).value
+                authorization.set(peerAuthorization)
                 try {
-                    val valueClient = (client as BridgeResult.Success).value
+                    val connected = CandidateBridgeConnector.boundedTransport()
+                    transport.set(connected)
+                    val valueClient =
+                        createProductionBrokerClient(
+                            peerAuthorization,
+                            { SocketMetadata.secureRootOwned() },
+                            connected,
+                            InlineBridgeExecution,
+                        )
                     clientReference.set(valueClient)
                     try {
                         valueClient.exchange(request)
                     } finally {
                         valueClient.peerDied()
+                        clientReference.set(null)
+                        connected.close()
+                        transport.set(null)
                     }
                 } finally {
-                    clientReference.set(null)
-                    transport.close()
+                    peerAuthorization.close()
+                    authorization.set(null)
                 }
             }
         if (result is BridgeResult.Failure) request.close()

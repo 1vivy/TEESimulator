@@ -137,9 +137,9 @@ private constructor(
             if (afterChmod is BridgeResult.Failure) {
                 return failAfterBind(binding, directory, node, afterChmod, delete = false)
             }
-            val labeled = node.labelDedicated()
-            if (labeled is BridgeResult.Failure) {
-                return failAfterBind(binding, directory, node, labeled)
+            val context = node.verifyDedicatedContext()
+            if (context is BridgeResult.Failure) {
+                return failAfterBind(binding, directory, node, context)
             }
             if (node.inspect() is BridgeResult.Failure) {
                 return failAfterBind(

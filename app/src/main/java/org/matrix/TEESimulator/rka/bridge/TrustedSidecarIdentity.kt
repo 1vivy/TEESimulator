@@ -11,8 +11,14 @@ internal sealed interface ProductionPeerAuthorization : Closeable {
     fun authenticate(credentials: PeerCredentials): BridgeResult<SupervisorSnapshot>
 }
 
-internal fun captureProductionPeerAuthorization(): BridgeResult<ProductionPeerAuthorization> =
-    FixedSupervisorAuthorization.capture()
+internal enum class BrokerSidecarRole(val recordValue: String, val argvValue: String) {
+    DONOR("DONOR", "donor"),
+    CANDIDATE("CANDIDATE", "candidate"),
+}
+
+internal fun captureProductionPeerAuthorization(
+    expectedRole: BrokerSidecarRole
+): BridgeResult<ProductionPeerAuthorization> = FixedSupervisorAuthorization.capture(expectedRole)
 
 internal data class SupervisorRecordFields(
     val generation: Long,
@@ -22,8 +28,13 @@ internal data class SupervisorRecordFields(
     val pid: Int,
     val startTimeTicks: Long,
     val executableInode: Long,
-    val role: String,
+    val role: BrokerSidecarRole,
 ) {
+    fun snapshotFor(expectedRole: BrokerSidecarRole): SupervisorSnapshot? {
+        if (role != expectedRole) return null
+        return snapshot()
+    }
+
     fun snapshot(): SupervisorSnapshot =
         SupervisorSnapshot(
             generation = generation,
@@ -31,7 +42,7 @@ internal data class SupervisorRecordFields(
             gid = gid,
             pid = pid,
             startTimeTicks = startTimeTicks,
-            cmdline = listOf(FIXED_EXECUTABLE, "--role", role.lowercase()),
+            cmdline = listOf(FIXED_EXECUTABLE, "--role", role.argvValue),
             executablePath = FIXED_EXECUTABLE,
             executableInode = executableInode,
         )
@@ -58,8 +69,9 @@ internal object SupervisorRecordTextParser {
         if (values.getValue("version") != "1") return null
         val nonce = values.getValue("launch_nonce")
         if (nonce.length != 64 || nonce.any { it !in '0'..'9' && it !in 'a'..'f' }) return null
-        val role = values.getValue("role")
-        if (role != "DONOR" && role != "CANDIDATE") return null
+        val role =
+            BrokerSidecarRole.entries.singleOrNull { it.recordValue == values.getValue("role") }
+                ?: return null
         if (values.getValue("executable_path") != SupervisorRecordFields.FIXED_EXECUTABLE) {
             return null
         }
@@ -96,7 +108,7 @@ internal object SupervisorRecordTextParser {
 }
 
 private object FixedSupervisorAuthorization {
-    fun capture(): BridgeResult<ProductionPeerAuthorization> {
+    fun capture(expectedRole: BrokerSidecarRole): BridgeResult<ProductionPeerAuthorization> {
         val opened = TrustedRecordHandle.open()
         if (opened is BridgeResult.Failure) return opened
         val handle = (opened as BridgeResult.Success).value
@@ -106,11 +118,12 @@ private object FixedSupervisorAuthorization {
             return record
         }
         val initial = (record as BridgeResult.Success).value
-        if (!processMatches(initial.snapshot())) {
+        val snapshot = initial.snapshotFor(expectedRole)
+        if (snapshot == null || !processMatches(snapshot)) {
             handle.close()
             return BridgeResult.Failure(BridgeError.PeerIdentityMismatch)
         }
-        return BridgeResult.Success(DescriptorPeerAuthorization(handle, initial))
+        return BridgeResult.Success(DescriptorPeerAuthorization(handle, initial, expectedRole))
     }
 
     private fun processMatches(snapshot: SupervisorSnapshot): Boolean {
@@ -128,13 +141,16 @@ private object FixedSupervisorAuthorization {
 private class DescriptorPeerAuthorization(
     private val handle: TrustedRecordHandle,
     private val initial: SupervisorRecordFields,
+    private val expectedRole: BrokerSidecarRole,
 ) : ProductionPeerAuthorization {
     override fun authenticate(credentials: PeerCredentials): BridgeResult<SupervisorSnapshot> {
         val current = handle.readStable(initial = false)
         if (current is BridgeResult.Failure) return current
         val fields = (current as BridgeResult.Success).value
         if (fields != initial) return BridgeResult.Failure(BridgeError.TrustedStateChanged)
-        val snapshot = fields.snapshot()
+        val snapshot =
+            fields.snapshotFor(expectedRole)
+                ?: return BridgeResult.Failure(BridgeError.PeerIdentityMismatch)
         val observed =
             runCatching { LinuxProcessIdentitySource().read(snapshot.pid) }
                 .getOrElse {

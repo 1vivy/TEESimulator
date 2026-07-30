@@ -22,6 +22,14 @@ class TrustedSidecarIdentityTest {
             SupervisorRecordTextParser.parse(validRecord().replace("role=DONOR", "role=root"))
         )
         assertNull(
+            SupervisorRecordTextParser.parse(validRecord().replace("role=DONOR", "role=donor"))
+        )
+        assertNull(
+            SupervisorRecordTextParser.parse(
+                validRecord().replace("role=DONOR", "role=DONOR\nrole=CANDIDATE")
+            )
+        )
+        assertNull(
             SupervisorRecordTextParser.parse(
                 validRecord()
                     .replace(SupervisorRecordFields.FIXED_EXECUTABLE, "/data/local/tmp/rka-sidecar")
@@ -41,10 +49,47 @@ class TrustedSidecarIdentityTest {
         assertEquals(42, parsed.pid)
         assertEquals(777L, parsed.startTimeTicks)
         assertEquals(1234L, parsed.executableInode)
+        assertEquals(BrokerSidecarRole.DONOR, parsed.role)
         assertEquals(
             listOf(SupervisorRecordFields.FIXED_EXECUTABLE, "--role", "donor"),
             parsed.snapshot().cmdline,
         )
+    }
+
+    @Test
+    fun role_binding_rejects_both_cross_role_records() {
+        val donor = requireNotNull(SupervisorRecordTextParser.parse(validRecord()))
+        val candidate =
+            requireNotNull(
+                SupervisorRecordTextParser.parse(
+                    validRecord().replace("role=DONOR", "role=CANDIDATE")
+                )
+            )
+
+        assertNull(donor.snapshotFor(BrokerSidecarRole.CANDIDATE))
+        assertNull(candidate.snapshotFor(BrokerSidecarRole.DONOR))
+        assertEquals(BrokerSidecarRole.DONOR, donor.role)
+        assertEquals(BrokerSidecarRole.CANDIDATE, candidate.role)
+    }
+
+    @Test
+    fun role_record_snapshot_rejects_a_live_process_with_mismatched_role_argv() {
+        val donor = requireNotNull(SupervisorRecordTextParser.parse(validRecord()))
+        val snapshot = requireNotNull(donor.snapshotFor(BrokerSidecarRole.DONOR))
+        val observed =
+            ObservedProcessIdentity(
+                startTimeTicks = snapshot.startTimeTicks,
+                cmdline =
+                    listOf(
+                        SupervisorRecordFields.FIXED_EXECUTABLE,
+                        "--role",
+                        BrokerSidecarRole.CANDIDATE.argvValue,
+                    ),
+                executablePath = snapshot.executablePath,
+                executableInode = snapshot.executableInode,
+            )
+
+        assertTrue(!identityMatches(PeerCredentials(0, 0, snapshot.pid), snapshot, observed))
     }
 
     private fun validRecord() =

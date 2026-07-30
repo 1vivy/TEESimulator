@@ -27,7 +27,7 @@ internal interface BridgeSocketNodeHandle : Closeable {
 
     fun chmodOwnerOnly(): BridgeResult<Unit>
 
-    fun labelDedicated(): BridgeResult<Unit>
+    fun verifyDedicatedContext(): BridgeResult<Unit>
 
     fun inspect(): BridgeResult<BridgePathIdentity>
 
@@ -165,27 +165,26 @@ private class AndroidBridgeSocketDirectoryHandle(
         } catch (_: Exception) {
             return BridgeResult.Failure(BridgeError.SocketChmodDenied)
         }
-        if (!setAndVerifyContext(directoryAnchor, DIRECTORY_CONTEXT)) {
-            return BridgeResult.Failure(BridgeError.SocketLabelDenied)
-        }
         val stat =
             runCatching { Os.fstat(directory.descriptor) }
                 .getOrElse {
                     return BridgeResult.Failure(BridgeError.SocketPathChanged)
                 }
-        return if (
-            chainStillNamed() &&
-                stat.st_ino == directory.signature.inode &&
-                stat.st_dev == directory.signature.device &&
-                stat.st_uid == 0 &&
-                stat.st_gid == 0 &&
-                stat.st_mode and OsConstants.S_IFMT == OsConstants.S_IFDIR &&
-                stat.st_mode and 0x1ff == DIRECTORY_MODE &&
-                fileContext(directoryAnchor) == DIRECTORY_CONTEXT
+        if (
+            !chainStillNamed() ||
+                stat.st_ino != directory.signature.inode ||
+                stat.st_dev != directory.signature.device ||
+                stat.st_uid != 0 ||
+                stat.st_gid != 0 ||
+                stat.st_mode and OsConstants.S_IFMT != OsConstants.S_IFDIR ||
+                stat.st_mode and 0x1ff != DIRECTORY_MODE
         ) {
+            return BridgeResult.Failure(BridgeError.SocketPathChanged)
+        }
+        return if (fileContext(directoryAnchor) == DIRECTORY_CONTEXT) {
             BridgeResult.Success(Unit)
         } else {
-            BridgeResult.Failure(BridgeError.SocketPathChanged)
+            BridgeResult.Failure(BridgeError.SocketLabelDenied)
         }
     }
 
@@ -319,16 +318,13 @@ private class AndroidBridgeSocketNodeHandle(
         }
     }
 
-    override fun labelDedicated(): BridgeResult<Unit> {
+    override fun verifyDedicatedContext(): BridgeResult<Unit> {
         if (!heldNodeUnchanged()) return BridgeResult.Failure(BridgeError.SocketPathChanged)
-        if (!setAndVerifyContext(nodeAnchor, SOCKET_CONTEXT)) {
+        if (fileContext(nodeAnchor) != SOCKET_CONTEXT) {
             return BridgeResult.Failure(BridgeError.SocketLabelDenied)
         }
-        return if (heldNodeUnchanged()) {
-            BridgeResult.Success(Unit)
-        } else {
-            BridgeResult.Failure(BridgeError.SocketPathChanged)
-        }
+        return if (heldNodeUnchanged()) BridgeResult.Success(Unit)
+        else BridgeResult.Failure(BridgeError.SocketPathChanged)
     }
 
     override fun inspect(): BridgeResult<BridgePathIdentity> {
@@ -494,14 +490,6 @@ private data class SocketDirectorySignature(
             )
     }
 }
-
-private fun setAndVerifyContext(path: Path, context: String): Boolean =
-    runCatching {
-            val selinux = Class.forName("android.os.SELinux")
-            val set = selinux.getMethod("setFileContext", String::class.java, String::class.java)
-            set.invoke(null, path.toString(), context) == true && fileContext(path) == context
-        }
-        .getOrDefault(false)
 
 private fun fileContext(path: Path): String? =
     runCatching {

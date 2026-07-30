@@ -40,6 +40,17 @@ class SecureSocketPathTest {
                 },
             )
         assertEquals(BridgeError.SocketChmodDenied, result.failure())
+        val wrongContext = FakeDirectory(socket, nodeContextError = BridgeError.SocketLabelDenied)
+        val contextResult =
+            DonorBridgeServer.bind(
+                socket,
+                SecureSocketPath(BridgeSocketPathOperations { BridgeResult.Success(wrongContext) }),
+                BridgeServerBinder {
+                    wrongContext.createOwnedSocket()
+                    BridgeResult.Success(FakeBinding(wrongContext.openedNode()))
+                },
+            )
+        assertEquals(BridgeError.SocketLabelDenied, contextResult.failure())
     }
 
     @Test
@@ -115,7 +126,7 @@ class SecureSocketPathTest {
         AFTER_BIND,
         AFTER_CHOWN,
         AFTER_CHMOD,
-        DURING_LABEL,
+        DURING_CONTEXT_VERIFY,
         BEFORE_FINAL_INSPECT,
         ANCESTOR_AFTER_OPEN,
         DURING_DELETE,
@@ -133,6 +144,7 @@ class SecureSocketPathTest {
         private val secureError: BridgeError? = null,
         private val swapPhase: SwapPhase? = null,
         private val nodeChmodError: BridgeError? = null,
+        private val nodeContextError: BridgeError? = null,
     ) : BridgeSocketDirectoryHandle {
         private var namedInode: Long? = null
         private var node: FakeNode? = null
@@ -176,8 +188,9 @@ class SecureSocketPathTest {
                 return verifyStillNamed()
             }
 
-            override fun labelDedicated(): BridgeResult<Unit> {
-                if (swapPhase == SwapPhase.DURING_LABEL) insertCompetitor()
+            override fun verifyDedicatedContext(): BridgeResult<Unit> {
+                if (nodeContextError != null) return BridgeResult.Failure(nodeContextError)
+                if (swapPhase == SwapPhase.DURING_CONTEXT_VERIFY) insertCompetitor()
                 return verifyStillNamed()
             }
 

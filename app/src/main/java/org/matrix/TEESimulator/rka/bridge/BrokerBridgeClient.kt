@@ -149,20 +149,15 @@ private class DefaultBrokerBridgeClient(
 }
 
 internal fun createProductionBrokerClient(
+    peerAuthorization: ProductionPeerAuthorization,
     socketMetadata: () -> SocketMetadata,
     transport: BridgeTransport,
     execution: BridgeExecution = BoundedBridgeExecution(),
-): BridgeResult<BrokerBridgeClient> =
-    when (val authorization = captureProductionPeerAuthorization()) {
-        is BridgeResult.Failure -> authorization
-        is BridgeResult.Success ->
-            BridgeResult.Success(
-                DefaultBrokerBridgeClient(
-                    authorization.value,
-                    socketMetadata,
-                    transport,
-                    execution,
-                    BridgeLimits.DEADLINE_MILLIS,
-                )
-            )
-    }
+): BrokerBridgeClient =
+    DefaultBrokerBridgeClient(
+        peerAuthorization,
+        socketMetadata,
+        transport,
+        execution,
+        BridgeLimits.DEADLINE_MILLIS,
+    )

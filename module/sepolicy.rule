@@ -18,3 +18,8 @@ allow ksu port:udp_socket name_connect
 allow magisk self:udp_socket { create connect read write getopt setopt }
 allow magisk node:udp_socket node_bind
 allow magisk port:udp_socket name_connect
+
+# Root broker/sidecar bridge only: both processes remain in the module launcher domain and use
+# the root-owned /data/adb/teesimulator-rka/run/sockets Unix stream endpoint.
+allow ksu self:unix_stream_socket { create bind connect listen accept read write getattr getopt setopt shutdown }
+allow magisk self:unix_stream_socket { create bind connect listen accept read write getattr getopt setopt shutdown }

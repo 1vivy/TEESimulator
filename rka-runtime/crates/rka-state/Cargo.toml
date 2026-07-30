@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 ring.workspace = true
+rka-protocol = { version = "=0.1.0", path = "../rka-protocol" }
 thiserror.workspace = true
 zeroize.workspace = true
 

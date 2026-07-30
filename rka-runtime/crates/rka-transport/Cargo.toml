@@ -12,6 +12,7 @@ publish = false
 rcgen.workspace = true
 ring.workspace = true
 rka-protocol = { version = "=0.1.0", path = "../rka-protocol" }
+rka-state = { version = "=0.1.0", path = "../rka-state" }
 rustls.workspace = true
 rustls-webpki.workspace = true
 thiserror.workspace = true

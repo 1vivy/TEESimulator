@@ -314,6 +314,7 @@ name = "rka-state"
 version = "0.1.0"
 dependencies = [
  "ring",
+ "rka-protocol",
  "thiserror",
  "zeroize",
 ]
@@ -325,6 +326,7 @@ dependencies = [
  "rcgen",
  "ring",
  "rka-protocol",
+ "rka-state",
  "rustls",
  "rustls-webpki",
  "thiserror",

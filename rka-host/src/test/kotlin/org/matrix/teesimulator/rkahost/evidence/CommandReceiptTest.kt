@@ -66,10 +66,9 @@ class CommandReceiptTest {
 
     @Test
     fun receipts_reject_nonce_binding_signature_and_chain_attacks() {
-        // Given: a deterministic signer and canonical signed receipt.
+        // Given: a deterministic signer and a sentinel-derived canonical signed receipt.
         val signer = DigestSigner("test-key")
-        val receipt = ReceiptFactory.valid("nonce-A")
-        val encoded = ReceiptCodec.encode(receipt, signer)
+        val encoded = issue("nonce-A", signer)
 
         // When/Then: verification rejects wrong binding, replay, tamper, noncanonical, reorder, and
         // truncation.
@@ -96,11 +95,11 @@ class CommandReceiptTest {
                 ReceiptBinding("commit-X", "profile-A", EndpointRole.DONOR, "session-A", "nonce-A"),
             )
         }
-        assertThrows(IllegalArgumentException::class.java) {
-            ReceiptCodec.decode(encoded.replace("version=1\n", "role=DONOR\nversion=1\n"))
-        }
-        assertThrows(IllegalArgumentException::class.java) {
-            ReceiptCodec.decode(encoded.substringBeforeLast("signature=") + "signature=")
+        assertThrows(ReceiptException::class.java) {
+            ReceiptVerifier(signer).verify(
+                encoded.replace("version=1\n", "role=DONOR\nversion=1\n"),
+                ReceiptBinding("commit-A", "profile-A", EndpointRole.DONOR, "session-A", "nonce-A"),
+            )
         }
         val tamperedSignature = encoded.replace(Regex("(?m)^signature=."), "signature=A")
         val signatureFailure =
@@ -121,24 +120,34 @@ class CommandReceiptTest {
     }
 
     @Test
+    fun only_sentinel_derived_capability_can_be_signed() {
+        val signer = DigestSigner("test-key")
+        val encoded = issue("nonce-capability", signer)
+        val verified =
+            ReceiptVerifier(signer).verify(
+                encoded,
+                ReceiptBinding(
+                    "commit-A",
+                    "profile-A",
+                    EndpointRole.DONOR,
+                    "session-A",
+                    "nonce-capability",
+                ),
+            )
+        assertEquals(2, verified.sampleCount)
+    }
+
+    @Test
     fun atomic_store_leaves_old_or_new_never_partial_and_rejects_paths_modes_and_symlinks() {
-        // Given: a secure temporary root and a receipt store.
         val root = Files.createTempDirectory("rka-receipt-")
         try {
-            val store = AtomicReceiptStore(root, DigestSigner("test-key"))
-            val first = ReceiptFactory.valid("nonce-1")
-
-            // When: an interrupted replacement occurs after the durable temporary write.
+            val signer = DigestSigner("test-key")
+            val store = AtomicReceiptStore(root)
+            val first = issue("nonce-1", signer)
             store.write("receipt", first)
             assertThrows(ReceiptException::class.java) {
-                store.write(
-                    "receipt",
-                    ReceiptFactory.valid("nonce-2"),
-                    interruptBeforeRename = true,
-                )
+                store.write("receipt", issue("nonce-2", signer), interruptBeforeRename = true)
             }
-
-            // Then: only the previous complete receipt remains; unsafe paths are refused.
             assertTrue(Files.readString(root.resolve("receipt.receipt")).contains("nonce-1"))
             assertThrows(ReceiptException::class.java) { store.write("../escape", first) }
             Files.createSymbolicLink(root.resolve("link.receipt"), root.resolve("receipt.receipt"))
@@ -146,6 +155,22 @@ class CommandReceiptTest {
         } finally {
             root.toFile().deleteRecursively()
         }
+    }
+
+    private fun issue(nonce: String, signer: ReceiptSigner): String {
+        val service = ServiceIdentity("keystore2", "init", 42, 100, "/system/bin/keystore2", 0)
+        val properties = mapOf("ro.build.fingerprint" to "build-A")
+        val live =
+            NoRebootSentinel("serial-A", EndpointRole.DONOR, "profile-A", MonotonicClock { 2_000 })
+                .observe(SentinelSample("boot-A", 0, properties, emptySet(), 0), service)
+                .observe(SentinelSample("boot-A", 2_000, properties, emptySet(), 2_000), service)
+                .assertLive(2_000)
+        return EvidenceIssuer.sign(
+            live,
+            ReceiptBinding("commit-A", "profile-A", EndpointRole.DONOR, "session-A", nonce),
+            ReceiptMaterial(EvidenceHash.sha256("trace"), EvidenceHash.sha256("artifact"), monotonicMillis = 2_000),
+            signer,
+        )
     }
 
     private class RecordingRunner : LiteralCommandRunner {

@@ -1,8 +1,8 @@
 package org.matrix.teesimulator.rkahost.evidence
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ContinuousLivenessTest {
@@ -17,7 +17,7 @@ class ContinuousLivenessTest {
 
         // When: liveness is asserted.
         val failure =
-            assertThrows(SentinelViolation::class.java) { sentinel.assertLive("commit-A") }
+            assertThrows(SentinelViolation::class.java) { sentinel.assertLive(1_000) }
 
         // Then: one or truncated streams are not live.
         assertEquals(Violation.INSUFFICIENT_SAMPLES, failure.violation)
@@ -33,13 +33,14 @@ class ContinuousLivenessTest {
                 .observe(sample(3_000, 3_000), service)
 
         // When: a fresh assertion is made.
-        val receipt = sentinel.assertLive("commit-A")
+        val receipt = sentinel.assertLive(3_000)
 
         // Then: both observation endpoints and assertion time are receipt-bound.
-        assertEquals(1_000, receipt.headObservedAtMillis)
-        assertEquals(3_000, receipt.tailObservedAtMillis)
-        assertEquals(3_000, receipt.assertedAtMillis)
-        assertFalse(receipt.sampleChainHash.isEmpty())
+        val encoded = issue(receipt, "nonce-observed")
+        assertTrue(encoded.contains("head_observed_at=1000\n"))
+        assertTrue(encoded.contains("tail_observed_at=3000\n"))
+        assertTrue(encoded.contains("asserted_at=3000\n"))
+        assertTrue(encoded.contains("sample_chain_hash="))
     }
 
     @Test
@@ -99,7 +100,7 @@ class ContinuousLivenessTest {
 
         // When: the old tail is asserted after its freshness budget.
         val failure =
-            assertThrows(SentinelViolation::class.java) { sentinel.assertLive("commit-A") }
+            assertThrows(SentinelViolation::class.java) { sentinel.assertLive(3_001) }
 
         // Then: an old valid stream cannot be replayed as live.
         assertEquals(Violation.STALE_ASSERTION, failure.violation)
@@ -112,7 +113,7 @@ class ContinuousLivenessTest {
         val rejected = sentinel(FakeClock(1_749)).observe(sample(0, 0), service)
 
         // When/Then: the inclusive boundary remains narrow and deterministic.
-        accepted.observe(sample(1_250, 1_000), service).assertLive("commit-A")
+        accepted.observe(sample(1_250, 1_000), service).assertLive(1_750)
         assertEquals(
             Violation.CLOCK_DRIFT,
             assertThrows(SentinelViolation::class.java) {
@@ -127,6 +128,14 @@ class ContinuousLivenessTest {
 
     private fun sample(uptime: Long, observedAt: Long) =
         SentinelSample("boot-A", uptime, properties, emptySet(), observedAt)
+
+    private fun issue(live: LiveSentinelEvidence, nonce: String) =
+        EvidenceIssuer.sign(
+            live,
+            ReceiptBinding("commit-A", "profile-A", EndpointRole.DONOR, "session-A", nonce),
+            ReceiptMaterial(EvidenceHash.sha256("trace"), EvidenceHash.sha256("artifact"), monotonicMillis = 3_000),
+            DigestSigner("test-key"),
+        )
 
     private class FakeClock(var now: Long) : MonotonicClock {
         override fun nowMillis(): Long = now

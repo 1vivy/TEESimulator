@@ -1,8 +1,8 @@
 package org.matrix.teesimulator.rkahost.evidence
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NoRebootSentinelTest {
@@ -17,16 +17,17 @@ class NoRebootSentinelTest {
             NoRebootSentinel("serial-A", EndpointRole.DONOR, "profile-A", MonotonicClock { 2_000 })
 
         // When: a synthetic stream stays on the same boot, properties, and service.
-        val receipt =
+        val live =
             sentinel
                 .observe(sample(0), service)
                 .observe(sample(2_000), service)
-                .assertLive("commit-A")
+                .assertLive(2_000)
 
         // Then: the receipt binds only the serial hash and the two second edge is valid.
-        assertEquals(2, receipt.sampleCount)
-        assertFalse(receipt.canonical().contains("serial-A"))
-        assertEquals(2_000, receipt.tailUptimeMillis)
+        val encoded = issue(live, "nonce-valid")
+        assertTrue(encoded.contains("sample_count=2\n"))
+        assertTrue(encoded.contains("sample_tail=2000\n"))
+        assertTrue(!encoded.contains("serial-A"))
     }
 
     @Test
@@ -126,7 +127,7 @@ class NoRebootSentinelTest {
 
         // Then: neither raw serial nor a value is admitted to the receipt surface.
         assertEquals("PROPERTY_NOT_ALLOWLISTED", failure.message)
-        assertFalse(Quarantine.redacted(Violation.BOOT_ID_DRIFT).contains("serial"))
+        assertTrue(!Quarantine.redacted(Violation.BOOT_ID_DRIFT).contains("serial"))
     }
 
     private fun sample(
@@ -135,4 +136,12 @@ class NoRebootSentinelTest {
         properties: Map<String, String> = this.properties,
         forbidden: Set<Int> = emptySet(),
     ) = SentinelSample(boot, uptime, properties, forbidden, uptime)
+
+    private fun issue(live: LiveSentinelEvidence, nonce: String) =
+        EvidenceIssuer.sign(
+            live,
+            ReceiptBinding("commit-A", "profile-A", EndpointRole.DONOR, "session-A", nonce),
+            ReceiptMaterial(EvidenceHash.sha256("trace"), EvidenceHash.sha256("artifact"), monotonicMillis = 2_000),
+            DigestSigner("test-key"),
+        )
 }

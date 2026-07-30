@@ -17,7 +17,54 @@ data class ReceiptBinding(
     val nonce: String,
 )
 
-data class EvidenceReceipt(
+data class ReceiptMaterial(
+    val commandTraceHash: String,
+    val artifactHash: String,
+    val previousHash: String = "0",
+    val monotonicMillis: Long,
+)
+
+object EvidenceIssuer {
+    fun sign(
+        live: LiveSentinelEvidence,
+        binding: ReceiptBinding,
+        material: ReceiptMaterial,
+        signer: ReceiptSigner,
+    ): String {
+        val values = live.values
+        require(binding.profile == values.profileId && binding.role == values.role) {
+            "RECEIPT_BINDING_MISMATCH"
+        }
+        return ReceiptCodec.encode(
+            EvidenceReceipt(
+                binding.commit,
+                binding.profile,
+                binding.role,
+                binding.session,
+                binding.nonce,
+                values.serialHash,
+                values.bootId,
+                values.headUptimeMillis,
+                values.tailUptimeMillis,
+                values.sampleCount,
+                values.headObservedAtMillis,
+                values.tailObservedAtMillis,
+                values.assertedAtMillis,
+                values.sampleChainHash,
+                EvidenceHash.sha256(values.service.canonical()),
+                EvidenceHash.sha256(values.propertyNames.joinToString(",")),
+                values.propertyHash,
+                material.commandTraceHash,
+                material.artifactHash,
+                material.previousHash,
+                material.monotonicMillis,
+            ),
+            signer,
+        )
+    }
+}
+
+private data class EvidenceReceipt(
     val commit: String,
     val profile: String,
     val role: EndpointRole,
@@ -88,8 +135,9 @@ class DigestSigner(override val keyId: String) : ReceiptSigner {
 
 class ReceiptException(message: String) : IllegalStateException(message)
 
-object ReceiptCodec {
+private object ReceiptCodec {
     private val text = Regex("[A-Za-z0-9._/-]{1,160}")
+    private val hash = Regex("[0-9a-f]{64}")
 
     fun encode(receipt: EvidenceReceipt, signer: ReceiptSigner): String {
         validate(receipt)
@@ -204,9 +252,25 @@ object ReceiptCodec {
             "RECEIPT_FIELD_INVALID"
         }
         require(
+            listOf(
+                    receipt.serialHash,
+                    receipt.sampleChainHash,
+                    receipt.serviceHash,
+                    receipt.propertyDefinitionHash,
+                    receipt.propertyHash,
+                    receipt.commandTraceHash,
+                    receipt.artifactHash,
+                )
+                .all(hash::matches) &&
+                (receipt.previousHash == "0" || hash.matches(receipt.previousHash))
+        ) {
+            "RECEIPT_HASH_INVALID"
+        }
+        require(
             receipt.sampleHead >= 0 &&
                 receipt.sampleTail >= receipt.sampleHead &&
                 receipt.sampleCount >= 2 &&
+                receipt.sampleCount <= NoRebootSentinel.MAXIMUM_SAMPLES &&
                 receipt.headObservedAt >= 0 &&
                 receipt.tailObservedAt > receipt.headObservedAt &&
                 receipt.tailObservedAt - receipt.headObservedAt <= 2_000 &&
@@ -219,7 +283,7 @@ object ReceiptCodec {
     }
 }
 
-data class DecodedReceipt(
+private data class DecodedReceipt(
     val receipt: EvidenceReceipt,
     val signerId: String,
     val signature: ByteArray,
@@ -230,7 +294,7 @@ class ReceiptVerifier(private val signer: ReceiptSigner) {
     private val consumedNonces = mutableSetOf<String>()
     private var previousHash: String? = null
 
-    fun verify(encoded: String, binding: ReceiptBinding): EvidenceReceipt {
+    fun verify(encoded: String, binding: ReceiptBinding): VerifiedEvidence {
         val decoded =
             try {
                 ReceiptCodec.decode(encoded)
@@ -253,45 +317,23 @@ class ReceiptVerifier(private val signer: ReceiptSigner) {
         if (receipt.previousHash != expectedPrevious)
             throw ReceiptException("RECEIPT_CHAIN_INVALID")
         previousHash = EvidenceHash.sha256(encoded)
-        return receipt
+        return VerifiedEvidence(receipt.sampleCount, receipt.sampleChainHash)
     }
 }
 
-object ReceiptFactory {
-    fun valid(nonce: String): EvidenceReceipt =
-        EvidenceReceipt(
-            "commit-A",
-            "profile-A",
-            EndpointRole.DONOR,
-            "session-A",
-            nonce,
-            EvidenceHash.sha256("serial-A"),
-            "boot-A",
-            0,
-            2_000,
-            2,
-            0,
-            2_000,
-            2_000,
-            EvidenceHash.sha256("sample-chain"),
-            EvidenceHash.sha256("service"),
-            EvidenceHash.sha256("properties"),
-            EvidenceHash.sha256("values"),
-            EvidenceHash.sha256("trace"),
-            EvidenceHash.sha256("artifact"),
-            "0",
-            2_000,
-        )
-}
+class VerifiedEvidence internal constructor(
+    val sampleCount: Int,
+    val sampleChainHash: String,
+)
 
-class AtomicReceiptStore(private val root: Path, private val signer: ReceiptSigner) {
+class AtomicReceiptStore(private val root: Path) {
     init {
         require(Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(root)) {
             "RECEIPT_ROOT_INVALID"
         }
     }
 
-    fun write(name: String, receipt: EvidenceReceipt, interruptBeforeRename: Boolean = false) {
+    fun write(name: String, encoded: String, interruptBeforeRename: Boolean = false) {
         val target = target(name)
         if (
             Files.exists(target, LinkOption.NOFOLLOW_LINKS) &&
@@ -307,7 +349,7 @@ class AtomicReceiptStore(private val root: Path, private val signer: ReceiptSign
             )
             FileChannel.open(temporary, StandardOpenOption.WRITE).use { channel ->
                 channel.write(
-                    java.nio.ByteBuffer.wrap(ReceiptCodec.encode(receipt, signer).toByteArray())
+                    java.nio.ByteBuffer.wrap(encoded.toByteArray())
                 )
                 channel.force(true)
             }

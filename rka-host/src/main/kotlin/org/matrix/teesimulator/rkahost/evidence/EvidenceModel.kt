@@ -91,11 +91,17 @@ object DonorPropertyPolicy {
     }
 }
 
-data class SentinelReceipt(
+class LiveSentinelEvidence private constructor(internal val values: LiveValues) {
+
+    internal companion object {
+        fun derived(values: LiveValues): LiveSentinelEvidence = LiveSentinelEvidence(values)
+    }
+}
+
+internal data class LiveValues(
     val serialHash: String,
     val role: EndpointRole,
     val profileId: String,
-    val commit: String,
     val bootId: String,
     val headUptimeMillis: Long,
     val tailUptimeMillis: Long,
@@ -107,29 +113,7 @@ data class SentinelReceipt(
     val service: ServiceIdentity,
     val propertyNames: List<String>,
     val propertyHash: String,
-    val commandTraceHash: String,
-) {
-    fun canonical(): String =
-        listOf(
-                serialHash,
-                role.name,
-                profileId,
-                commit,
-                bootId,
-                headUptimeMillis,
-                tailUptimeMillis,
-                headObservedAtMillis,
-                tailObservedAtMillis,
-                assertedAtMillis,
-                sampleChainHash,
-                sampleCount,
-                service.canonical(),
-                propertyNames.joinToString(","),
-                propertyHash,
-                commandTraceHash,
-            )
-            .joinToString("\n")
-}
+)
 
 enum class Violation {
     BOOT_ID_DRIFT,

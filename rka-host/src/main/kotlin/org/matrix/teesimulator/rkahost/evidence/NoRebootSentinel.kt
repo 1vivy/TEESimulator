@@ -12,6 +12,7 @@ class NoRebootSentinel(
     private var service: ServiceIdentity? = null
     private var count = 0
     private var sampleChainHash = EvidenceHash.sha256("sentinel-sample-chain-v1")
+    private val samples = mutableListOf<Pair<SentinelSample, ServiceIdentity>>()
 
     init {
         require(serial.matches(Regex("[A-Za-z0-9._:-]{1,128}"))) { "SERIAL_INVALID" }
@@ -55,25 +56,23 @@ class NoRebootSentinel(
         return this
     }
 
-    fun assertLive(
-        commit: String,
-        commandTraceHash: String = EvidenceHash.sha256("no-command"),
-    ): SentinelReceipt {
-        require(commit.matches(Regex("[A-Za-z0-9._/-]{1,160}"))) { "COMMIT_INVALID" }
+    fun assertLive(assertedAtMillis: Long = clock.nowMillis()): LiveSentinelEvidence {
         val head = checkNotNull(first) { "SENTINEL_EMPTY" }
         val tail = checkNotNull(previous)
         val selectedService = checkNotNull(service)
-        if (count < MINIMUM_SAMPLES) throw SentinelViolation(Violation.INSUFFICIENT_SAMPLES)
-        val assertedAtMillis = clock.nowMillis()
+        if (count < MINIMUM_SAMPLES || count != samples.size || count > MAXIMUM_SAMPLES)
+            throw SentinelViolation(Violation.INSUFFICIENT_SAMPLES)
+        val (derivedChainHash, derivedCount) = deriveSamples()
+        if (derivedCount != count || derivedChainHash != sampleChainHash)
+            throw SentinelViolation(Violation.INSUFFICIENT_SAMPLES)
         if (assertedAtMillis < 0 || assertedAtMillis < tail.observedAtMillis)
             throw SentinelViolation(Violation.STALE_ASSERTION)
         if (assertedAtMillis - tail.observedAtMillis > MAX_GAP_MILLIS)
             throw SentinelViolation(Violation.STALE_ASSERTION)
-        return SentinelReceipt(
+        return LiveSentinelEvidence.derived(LiveValues(
             serialHash,
             role,
             profileId,
-            commit,
             head.bootId,
             head.uptimeMillis,
             tail.uptimeMillis,
@@ -85,17 +84,18 @@ class NoRebootSentinel(
             selectedService,
             head.donorProperties.keys.sorted(),
             EvidenceHash.propertyHash(head.donorProperties),
-            commandTraceHash,
-        )
+        ))
     }
 
     companion object {
         const val MAX_GAP_MILLIS = 2_000L
         const val MAX_SCHEDULING_DRIFT_MILLIS = 250L
         const val MINIMUM_SAMPLES = 2
+        const val MAXIMUM_SAMPLES = 1_024
     }
 
     private fun appendSample(sample: SentinelSample, identity: ServiceIdentity) {
+        samples += sample to identity
         sampleChainHash =
             EvidenceHash.sha256(
                 listOf(
@@ -109,6 +109,26 @@ class NoRebootSentinel(
                     )
                     .joinToString("\n")
             )
+    }
+
+    private fun deriveSamples(): Pair<String, Int> {
+        var chain = EvidenceHash.sha256("sentinel-sample-chain-v1")
+        samples.forEach { (sample, identity) ->
+            chain =
+                EvidenceHash.sha256(
+                    listOf(
+                            chain,
+                            sample.bootId,
+                            sample.uptimeMillis,
+                            sample.observedAtMillis,
+                            EvidenceHash.propertyHash(sample.donorProperties),
+                            sample.forbiddenProcessPids.sorted().joinToString(","),
+                            identity.canonical(),
+                        )
+                        .joinToString("\n")
+                )
+        }
+        return chain to samples.size
     }
 }
 

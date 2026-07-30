@@ -18,7 +18,10 @@ trace() {
 
 continuity() {
   [ "$#" -eq 5 ] || die LIVENESS_ARGV_INVALID
-  for value in "$@"; do case "$value" in *[!0-9]*|'') die LIVENESS_ARGV_INVALID;; esac; done
+  for value in "$@"; do
+    case "$value" in 0|[1-9][0-9]*) ;; *) die LIVENESS_INTEGER_INVALID;; esac
+    (( ${#value} < 19 )) || { (( ${#value} == 19 )) && [[ "$value" < "9223372036854775807" || "$value" == "9223372036854775807" ]] || die LIVENESS_INTEGER_RANGE; }
+  done
   local head_uptime="$1" tail_uptime="$2" head_observed="$3" tail_observed="$4" asserted="$5"
   (( tail_uptime > head_uptime )) || die UPTIME_NOT_INCREASING
   (( tail_observed > head_observed )) || die OBSERVATION_NOT_INCREASING

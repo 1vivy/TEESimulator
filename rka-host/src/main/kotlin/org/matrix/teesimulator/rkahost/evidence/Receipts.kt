@@ -27,6 +27,10 @@ data class EvidenceReceipt(
     val bootId: String,
     val sampleHead: Long,
     val sampleTail: Long,
+    val headObservedAt: Long,
+    val tailObservedAt: Long,
+    val assertedAt: Long,
+    val sampleChainHash: String,
     val serviceHash: String,
     val propertyDefinitionHash: String,
     val propertyHash: String,
@@ -47,6 +51,10 @@ data class EvidenceReceipt(
             "boot_id" to bootId,
             "sample_head" to sampleHead.toString(),
             "sample_tail" to sampleTail.toString(),
+            "head_observed_at" to headObservedAt.toString(),
+            "tail_observed_at" to tailObservedAt.toString(),
+            "asserted_at" to assertedAt.toString(),
+            "sample_chain_hash" to sampleChainHash,
             "service_hash" to serviceHash,
             "property_definition_hash" to propertyDefinitionHash,
             "property_hash" to propertyHash,
@@ -94,7 +102,7 @@ object ReceiptCodec {
     fun decode(encoded: String): DecodedReceipt {
         require(!encoded.contains('\r')) { "RECEIPT_NONCANONICAL" }
         val lines = encoded.split('\n').dropLast(1)
-        require(encoded.endsWith("\n") && lines.size == 19) { "RECEIPT_TRUNCATED" }
+        require(encoded.endsWith("\n") && lines.size == 23) { "RECEIPT_TRUNCATED" }
         val pairs =
             lines.map { line ->
                 line.split('=', limit = 2).let {
@@ -113,6 +121,10 @@ object ReceiptCodec {
                     "b",
                     0,
                     1,
+                    0,
+                    1,
+                    1,
+                    "h",
                     "h",
                     "h",
                     "h",
@@ -137,6 +149,10 @@ object ReceiptCodec {
                 fields.getValue("boot_id"),
                 fields.getValue("sample_head").toLong(),
                 fields.getValue("sample_tail").toLong(),
+                fields.getValue("head_observed_at").toLong(),
+                fields.getValue("tail_observed_at").toLong(),
+                fields.getValue("asserted_at").toLong(),
+                fields.getValue("sample_chain_hash"),
                 fields.getValue("service_hash"),
                 fields.getValue("property_definition_hash"),
                 fields.getValue("property_hash"),
@@ -177,6 +193,7 @@ object ReceiptCodec {
                     receipt.commandTraceHash,
                     receipt.artifactHash,
                     receipt.previousHash,
+                    receipt.sampleChainHash,
                 )
                 .all(text::matches)
         ) {
@@ -185,6 +202,10 @@ object ReceiptCodec {
         require(
             receipt.sampleHead >= 0 &&
                 receipt.sampleTail >= receipt.sampleHead &&
+                receipt.headObservedAt >= 0 &&
+                receipt.tailObservedAt > receipt.headObservedAt &&
+                receipt.assertedAt >= receipt.tailObservedAt &&
+                receipt.assertedAt - receipt.tailObservedAt <= 2_000 &&
                 receipt.monotonicMillis >= 0
         ) {
             "RECEIPT_TIME_INVALID"
@@ -242,6 +263,10 @@ object ReceiptFactory {
             "boot-A",
             0,
             2_000,
+            0,
+            2_000,
+            2_000,
+            EvidenceHash.sha256("sample-chain"),
             EvidenceHash.sha256("service"),
             EvidenceHash.sha256("properties"),
             EvidenceHash.sha256("values"),

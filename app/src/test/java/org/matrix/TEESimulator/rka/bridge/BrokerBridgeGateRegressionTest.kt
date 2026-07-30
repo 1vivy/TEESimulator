@@ -4,6 +4,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.nio.file.Files
+import java.nio.file.Path
 import java.util.Comparator
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -210,7 +211,7 @@ class BrokerBridgeGateRegressionTest {
                 )
             )
         val client =
-            BrokerBridgeClient(
+            BrokerBridgeClients.forTest(
                 expected = { snapshot() },
                 processIdentity = ProcessIdentitySource { observed() },
                 socketMetadata = { SocketMetadata.secureRootOwned() },
@@ -237,7 +238,7 @@ class BrokerBridgeGateRegressionTest {
             MemoryTransport(BridgeCodec.encode(response, BridgeExchangeRole.CANDIDATE_RESPONSE))
         val expectedCalls = java.util.concurrent.atomic.AtomicInteger()
         val client =
-            BrokerBridgeClient(
+            BrokerBridgeClients.forTest(
                 expected = {
                     if (expectedCalls.incrementAndGet() == 2) generation.incrementAndGet()
                     snapshot(generation.get())
@@ -260,8 +261,18 @@ class BrokerBridgeGateRegressionTest {
         val parent = Files.createTempDirectory("rka-bridge-red")
         val directory = parent.resolve("run").resolve("sockets")
         try {
-            runCatching { DonorBridgeServer.bind(directory.resolve("broker.sock")) }
+            val socket = directory.resolve("broker.sock")
+            val result =
+                SecureSocketPath(
+                        BridgeSocketPathOperations {
+                            Files.createDirectories(directory)
+                            BridgeResult.Success(NoopDirectoryHandle(socket))
+                        }
+                    )
+                    .open(socket)
             assertTrue("secure socket directory was never created", Files.isDirectory(directory))
+            assertTrue(result is BridgeResult.Success)
+            (result as BridgeResult.Success).value.close()
         } finally {
             Files.walk(parent).use { paths ->
                 paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
@@ -313,7 +324,7 @@ class BrokerBridgeGateRegressionTest {
         transport: BridgeTransport,
         expected: () -> SupervisorSnapshot = { snapshot() },
     ) =
-        BrokerBridgeEndpoint(
+        BrokerBridgeEndpoints.forTest(
             expected = expected,
             processIdentity = ProcessIdentitySource { observed() },
             socketMetadata = { SocketMetadata.secureRootOwned() },
@@ -392,5 +403,23 @@ class BrokerBridgeGateRegressionTest {
             super.close()
             release.countDown()
         }
+    }
+
+    private class NoopDirectoryHandle(override val anchoredSocketPath: Path) :
+        BridgeSocketDirectoryHandle {
+        override fun secureDirectory(): BridgeResult<Unit> = BridgeResult.Success(Unit)
+
+        override fun inspectSocket(): BridgeResult<BridgePathIdentity> =
+            BridgeResult.Failure(BridgeError.SocketPathChanged)
+
+        override fun verifySocketInode(inode: Long): BridgeResult<Unit> =
+            BridgeResult.Failure(BridgeError.SocketPathChanged)
+
+        override fun labelExactSocket(inode: Long): BridgeResult<Unit> =
+            BridgeResult.Failure(BridgeError.SocketPathChanged)
+
+        override fun deleteExactSocket(inode: Long) = Unit
+
+        override fun close() = Unit
     }
 }

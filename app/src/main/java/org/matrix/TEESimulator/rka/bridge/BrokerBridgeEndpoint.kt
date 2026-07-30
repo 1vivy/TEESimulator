@@ -20,38 +20,51 @@ interface BridgeTransport : Closeable {
  * Role-neutral root endpoint: DONOR supplies an accepted transport; CANDIDATE supplies a connected
  * transport. Authentication and lifecycle are identical in both directions.
  */
-class BrokerBridgeEndpoint(
-    private val expected: () -> SupervisorSnapshot,
-    private val processIdentity: ProcessIdentitySource,
+interface BrokerBridgeEndpoint {
+    fun acceptAndDispatch(dispatch: (BridgeMessage) -> BridgeMessage): BridgeResult<BridgeMessage>
+
+    fun cancel(requestId: RequestId): BridgeResult<Unit>
+
+    fun peerDied()
+}
+
+internal interface TestBrokerBridgeEndpoint : BrokerBridgeEndpoint {
+    fun stateLockHeldByCurrentThread(): Boolean
+
+    fun correlationCountForTest(): Int
+}
+
+private class DefaultBrokerBridgeEndpoint(
+    private val trustedSource: TrustedSidecarIdentitySource,
+    private val trustedIdentity: TrustedSidecarIdentity,
     private val socketMetadata: () -> SocketMetadata,
-    @Suppress("UNUSED_PARAMETER") private val capacity: BridgeCapacity = BridgeCapacity(),
-    @Suppress("UNUSED_PARAMETER") private val clock: () -> Long = System::nanoTime,
     private val onDispatch: () -> Unit = {},
     private val transport: BridgeTransport,
-    private val execution: BridgeExecution = BoundedBridgeExecution(),
-    private val timeoutMillis: Long = BridgeLimits.DEADLINE_MILLIS,
-) {
+    private val execution: BridgeExecution,
+    private val timeoutMillis: Long,
+) : TestBrokerBridgeEndpoint {
     private val stateLock = Any()
     private var closed = false
     private val correlations = mutableMapOf<RequestId, BridgeCorrelation>()
 
-    fun acceptAndDispatch(dispatch: (BridgeMessage) -> BridgeMessage): BridgeResult<BridgeMessage> =
-        execution.run(timeoutMillis, ::close) { dispatchOne(dispatch) }
+    override fun acceptAndDispatch(
+        dispatch: (BridgeMessage) -> BridgeMessage
+    ): BridgeResult<BridgeMessage> = execution.run(timeoutMillis, ::close) { dispatchOne(dispatch) }
 
-    fun cancel(requestId: RequestId): BridgeResult<Unit> =
+    override fun cancel(requestId: RequestId): BridgeResult<Unit> =
         takeCorrelation(requestId)?.let { correlation ->
             correlation.worker.interrupt()
             close()
             BridgeResult.Success(Unit)
         } ?: run { BridgeResult.Failure(BridgeError.UnknownCorrelation) }
 
-    fun peerDied() {
+    override fun peerDied() {
         close()
     }
 
-    internal fun stateLockHeldByCurrentThread(): Boolean = Thread.holdsLock(stateLock)
+    override fun stateLockHeldByCurrentThread(): Boolean = Thread.holdsLock(stateLock)
 
-    internal fun correlationCountForTest(): Int = synchronized(stateLock) { correlations.size }
+    override fun correlationCountForTest(): Int = synchronized(stateLock) { correlations.size }
 
     private fun dispatchOne(
         dispatch: (BridgeMessage) -> BridgeMessage
@@ -85,6 +98,7 @@ class BrokerBridgeEndpoint(
             }
             onDispatch()
             val response = dispatch(request)
+            var transferred = false
             try {
                 if (!reauthenticate(initial)) {
                     return failureAndClose(BridgeError.PeerIdentityChanged)
@@ -106,9 +120,10 @@ class BrokerBridgeEndpoint(
                 } finally {
                     encoded.fill(0)
                 }
+                transferred = true
                 return BridgeResult.Success(response)
             } finally {
-                response.close()
+                if (!transferred) response.close()
             }
         } finally {
             request.close()
@@ -129,16 +144,14 @@ class BrokerBridgeEndpoint(
             } catch (_: Exception) {
                 return BridgeResult.Failure(BridgeError.PeerDied)
             }
-        val snapshot = expected()
-        val observed =
-            try {
-                processIdentity.read(credentials.pid)
-            } catch (_: SecurityException) {
-                return BridgeResult.Failure(BridgeError.SelinuxDenied)
-            } catch (_: Exception) {
-                return BridgeResult.Failure(BridgeError.PeerDied)
-            }
-        return if (identityMatches(credentials, snapshot, observed)) {
+        val revalidated = trustedSource.revalidate(trustedIdentity)
+        if (revalidated is BridgeResult.Failure) return revalidated
+        val snapshot = (revalidated as BridgeResult.Success).value
+        return if (
+            credentials.uid == snapshot.uid &&
+                credentials.gid == snapshot.gid &&
+                credentials.pid == snapshot.pid
+        ) {
             BridgeResult.Success(snapshot)
         } else {
             BridgeResult.Failure(BridgeError.PeerIdentityMismatch)
@@ -184,4 +197,51 @@ class BrokerBridgeEndpoint(
         workers.filter { it !== Thread.currentThread() }.forEach(Thread::interrupt)
         runCatching { transport.close() }
     }
+}
+
+internal object BrokerBridgeEndpoints {
+    @JvmSynthetic
+    fun forTest(
+        expected: () -> SupervisorSnapshot,
+        processIdentity: ProcessIdentitySource,
+        socketMetadata: () -> SocketMetadata,
+        onDispatch: () -> Unit = {},
+        transport: BridgeTransport,
+        execution: BridgeExecution = BoundedBridgeExecution(),
+        timeoutMillis: Long = BridgeLimits.DEADLINE_MILLIS,
+    ): TestBrokerBridgeEndpoint {
+        val source = testTrustedSidecarIdentitySource(expected, processIdentity)
+        val captured = source.capture() as BridgeResult.Success
+        return DefaultBrokerBridgeEndpoint(
+            source,
+            captured.value,
+            socketMetadata,
+            onDispatch,
+            transport,
+            execution,
+            timeoutMillis,
+        )
+    }
+
+    @JvmSynthetic
+    fun production(
+        trustedSource: TrustedSidecarIdentitySource,
+        socketMetadata: () -> SocketMetadata,
+        transport: BridgeTransport,
+        execution: BridgeExecution = BoundedBridgeExecution(),
+    ): BridgeResult<BrokerBridgeEndpoint> =
+        when (val captured = trustedSource.capture()) {
+            is BridgeResult.Failure -> captured
+            is BridgeResult.Success ->
+                BridgeResult.Success(
+                    DefaultBrokerBridgeEndpoint(
+                        trustedSource,
+                        captured.value,
+                        socketMetadata,
+                        transport = transport,
+                        execution = execution,
+                        timeoutMillis = BridgeLimits.DEADLINE_MILLIS,
+                    )
+                )
+        }
 }

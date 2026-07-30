@@ -16,6 +16,14 @@ interface BridgeExecution {
     ): BridgeResult<T>
 }
 
+internal object InlineBridgeExecution : BridgeExecution {
+    override fun <T> run(
+        timeoutMillis: Long,
+        abort: () -> Unit,
+        operation: () -> BridgeResult<T>,
+    ): BridgeResult<T> = operation()
+}
+
 internal class BoundedBridgeExecution(private val executor: ThreadPoolExecutor = sharedExecutor) :
     BridgeExecution {
     override fun <T> run(

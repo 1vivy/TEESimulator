@@ -299,12 +299,10 @@ class BrokerUdsContractTest {
             )
 
         fun endpoint(transport: FakeTransport): BrokerBridgeEndpoint =
-            BrokerBridgeEndpoint(
+            BrokerBridgeEndpoints.forTest(
                 expected = { snapshot },
                 processIdentity = proc,
                 socketMetadata = { socketMetadata },
-                capacity = BridgeCapacity(4),
-                clock = { 0L },
                 onDispatch = { dispatches.incrementAndGet() },
                 transport = transport,
             )

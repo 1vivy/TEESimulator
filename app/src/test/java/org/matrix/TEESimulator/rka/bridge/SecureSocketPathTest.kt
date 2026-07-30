@@ -8,132 +8,218 @@ import org.junit.Test
 
 class SecureSocketPathTest {
     @Test
-    fun create_chown_chmod_label_and_bind_failures_stay_typed() {
+    fun directory_and_bound_socket_failures_stay_typed() {
         val socket = Path.of("/runtime/run/sockets/broker.sock")
-        val cases =
-            listOf(
-                "create" to BridgeError.SocketCreateDenied,
-                "chown" to BridgeError.SocketChownDenied,
-                "chmod" to BridgeError.SocketChmodDenied,
-                "label" to BridgeError.SocketLabelDenied,
-            )
-        for ((failure, expected) in cases) {
-            val operations = FakePathOperations(failure)
-            assertEquals(expected, SecureSocketPath(operations).prepare(socket).failure())
-        }
-        val operations = FakePathOperations()
+        assertEquals(
+            BridgeError.SocketCreateDenied,
+            SecureSocketPath(
+                    BridgeSocketPathOperations {
+                        BridgeResult.Failure(BridgeError.SocketCreateDenied)
+                    }
+                )
+                .open(socket)
+                .failure(),
+        )
+        val directory = FakeDirectory(socket, secureError = BridgeError.SocketLabelDenied)
+        assertEquals(
+            BridgeError.SocketLabelDenied,
+            SecureSocketPath(BridgeSocketPathOperations { BridgeResult.Success(directory) })
+                .open(socket)
+                .failure(),
+        )
+        val validDirectory = FakeDirectory(socket)
         val result =
             DonorBridgeServer.bind(
                 socket,
-                SecureSocketPath(operations),
-                BridgeServerBinder { BridgeResult.Failure(BridgeError.SocketBindDenied) },
+                SecureSocketPath(
+                    BridgeSocketPathOperations { BridgeResult.Success(validDirectory) }
+                ),
+                BridgeServerBinder {
+                    validDirectory.createOwnedSocket()
+                    BridgeResult.Success(FakeBinding(chmodError = BridgeError.SocketChmodDenied))
+                },
             )
-        assertEquals(BridgeError.SocketBindDenied, result.failure())
+        assertEquals(BridgeError.SocketChmodDenied, result.failure())
     }
 
     @Test
-    fun parent_inode_replacement_after_bind_is_rejected() {
-        val socket = Path.of("/runtime/run/sockets/broker.sock")
-        val operations = FakePathOperations()
-        val result =
-            DonorBridgeServer.bind(
-                socket,
-                SecureSocketPath(operations),
-                BridgeServerBinder {
-                    operations.createSocket(socket)
-                    operations.replaceDirectoryInode()
-                    BridgeResult.Success(FakeBinding { operations.bindingClosed = true })
-                },
-            )
+    fun ancestor_or_leaf_swap_between_each_phase_is_rejected_without_competitor_deletion() {
+        for (phase in SwapPhase.entries) {
+            val socket = Path.of("/runtime/run/sockets/broker.sock")
+            val directory = FakeDirectory(socket, swapPhase = phase)
+            val result =
+                DonorBridgeServer.bind(
+                    socket,
+                    SecureSocketPath(
+                        BridgeSocketPathOperations { BridgeResult.Success(directory) }
+                    ),
+                    BridgeServerBinder {
+                        directory.createOwnedSocket()
+                        if (phase == SwapPhase.AFTER_BIND) directory.insertCompetitor()
+                        BridgeResult.Success(
+                            FakeBinding(
+                                onChown = {
+                                    if (phase == SwapPhase.AFTER_CHOWN) {
+                                        directory.insertCompetitor()
+                                    }
+                                },
+                                onChmod = {
+                                    if (phase == SwapPhase.AFTER_CHMOD) {
+                                        directory.insertCompetitor()
+                                    }
+                                },
+                            )
+                        )
+                    },
+                )
 
-        assertEquals(BridgeError.SocketPathChanged, result.failure())
+            assertEquals("phase=$phase", BridgeError.SocketPathChanged, result.failure())
+            assertFalse("phase=$phase deleted competitor", directory.deleted)
+            assertTrue("phase=$phase competitor missing", directory.socketStillExists())
+        }
     }
 
     @Test
     fun cleanup_unlinks_only_the_exact_bound_socket_inode() {
         val socket = Path.of("/runtime/run/sockets/broker.sock")
-        val operations = FakePathOperations()
+        val directory = FakeDirectory(socket)
         val result =
             DonorBridgeServer.bind(
                 socket,
-                SecureSocketPath(operations),
+                SecureSocketPath(BridgeSocketPathOperations { BridgeResult.Success(directory) }),
                 BridgeServerBinder {
-                    operations.createSocket(socket)
-                    BridgeResult.Success(FakeBinding { operations.bindingClosed = true })
+                    directory.createOwnedSocket()
+                    BridgeResult.Success(FakeBinding())
                 },
             )
         val server = (result as BridgeResult.Success).value
-        operations.replaceSocketInode()
+        directory.insertCompetitor()
 
         server.close()
 
-        assertFalse(operations.deleted)
-        assertTrue(operations.bindingClosed)
+        assertFalse(directory.deleted)
+        assertTrue(directory.closed)
+    }
+
+    @Test
+    fun bind_failure_never_deletes_a_competing_socket() {
+        val socket = Path.of("/runtime/run/sockets/broker.sock")
+        val directory = FakeDirectory(socket)
+
+        val result =
+            DonorBridgeServer.bind(
+                socket,
+                SecureSocketPath(BridgeSocketPathOperations { BridgeResult.Success(directory) }),
+                BridgeServerBinder {
+                    directory.insertCompetitor()
+                    BridgeResult.Failure(BridgeError.SocketBindDenied)
+                },
+            )
+
+        assertEquals(BridgeError.SocketBindDenied, result.failure())
+        assertFalse("bind failure deleted a socket it never owned", directory.deleted)
+        assertTrue(directory.socketStillExists())
     }
 
     private fun BridgeResult<*>.failure(): BridgeError = (this as BridgeResult.Failure).error
 
-    private class FakeBinding(private val onClose: () -> Unit) : BridgeServerBinding {
-        override fun accept(): BridgeTransport = error("unused")
+    private enum class SwapPhase {
+        AFTER_BIND,
+        AFTER_CHOWN,
+        AFTER_CHMOD,
+        DURING_LABEL,
+        BEFORE_FINAL_INSPECT,
+    }
+
+    private class FakeBinding(
+        private val chownError: BridgeError? = null,
+        private val chmodError: BridgeError? = null,
+        private val onChown: () -> Unit = {},
+        private val onChmod: () -> Unit = {},
+    ) : BridgeServerBinding {
+        var closed = false
+
+        override fun acceptTransport(): BridgeTransport = error("unused")
+
+        override fun boundSocketInode(): Long = OWNED_INODE
+
+        override fun chownBoundSocket(inode: Long): BridgeResult<Unit> =
+            chownError?.let { BridgeResult.Failure(it) }
+                ?: BridgeResult.Success(Unit).also { onChown() }
+
+        override fun chmodBoundSocket(inode: Long): BridgeResult<Unit> =
+            chmodError?.let { BridgeResult.Failure(it) }
+                ?: BridgeResult.Success(Unit).also { onChmod() }
 
         override fun close() {
-            onClose()
+            closed = true
         }
     }
 
-    private class FakePathOperations(private val failAt: String? = null) :
-        BridgeSocketPathOperations {
-        private val directory = Path.of("/runtime/run/sockets")
-        private var directoryIdentity = BridgePathIdentity(10, 0, 0, 0x1c0, true, false, false)
-        private var socketIdentity = BridgePathIdentity(20, 0, 0, 0x180, false, true, false)
-        private var socketExists = false
+    private class FakeDirectory(
+        override val anchoredSocketPath: Path,
+        private val secureError: BridgeError? = null,
+        private val swapPhase: SwapPhase? = null,
+    ) : BridgeSocketDirectoryHandle {
+        private var inode: Long? = null
         var deleted = false
-        var bindingClosed = false
+        var closed = false
 
-        override fun createDirectories(path: Path) {
-            if (failAt == "create") error("create denied")
+        override fun secureDirectory(): BridgeResult<Unit> =
+            secureError?.let { BridgeResult.Failure(it) } ?: BridgeResult.Success(Unit)
+
+        override fun inspectSocket(): BridgeResult<BridgePathIdentity> {
+            if (swapPhase == SwapPhase.BEFORE_FINAL_INSPECT) insertCompetitor()
+            val current = inode ?: return BridgeResult.Failure(BridgeError.SocketPathChanged)
+            return BridgeResult.Success(
+                BridgePathIdentity(
+                    current,
+                    0,
+                    0,
+                    0x180,
+                    isDirectory = false,
+                    isSocket = true,
+                    context = "u:object_r:teesimulator_rka_socket:s0",
+                )
+            )
         }
 
-        override fun exists(path: Path): Boolean = socketExists
-
-        override fun rejectSymlinkAncestors(path: Path) = Unit
-
-        override fun chown(path: Path, uid: Int, gid: Int) {
-            if (failAt == "chown") error("chown denied")
-        }
-
-        override fun chmod(path: Path, mode: Int) {
-            if (failAt == "chmod") error("chmod denied")
-        }
-
-        override fun restoreLabel(path: Path): Boolean {
-            if (failAt == "label") return false
-            return true
-        }
-
-        override fun stat(path: Path): BridgePathIdentity =
-            if (path == directory) {
-                directoryIdentity
+        override fun verifySocketInode(inode: Long): BridgeResult<Unit> =
+            if (this.inode == inode) {
+                BridgeResult.Success(Unit)
             } else {
-                check(socketExists)
-                socketIdentity
+                BridgeResult.Failure(BridgeError.SocketPathChanged)
             }
 
-        override fun delete(path: Path) {
-            deleted = true
+        override fun labelExactSocket(inode: Long): BridgeResult<Unit> {
+            if (swapPhase == SwapPhase.DURING_LABEL) insertCompetitor()
+            return verifySocketInode(inode)
         }
 
-        fun createSocket(path: Path) {
-            socketExists = true
-            socketIdentity = socketIdentity.copy(inode = 20)
+        override fun deleteExactSocket(inode: Long) {
+            if (this.inode == inode) {
+                deleted = true
+                this.inode = null
+            }
         }
 
-        fun replaceDirectoryInode() {
-            directoryIdentity = directoryIdentity.copy(inode = 11)
+        override fun close() {
+            closed = true
         }
 
-        fun replaceSocketInode() {
-            socketIdentity = socketIdentity.copy(inode = 21)
+        fun createOwnedSocket() {
+            inode = OWNED_INODE
         }
+
+        fun insertCompetitor() {
+            inode = COMPETITOR_INODE
+        }
+
+        fun socketStillExists(): Boolean = inode != null
+    }
+
+    private companion object {
+        const val OWNED_INODE = 20L
+        const val COMPETITOR_INODE = 21L
     }
 }

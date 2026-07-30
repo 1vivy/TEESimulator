@@ -73,6 +73,8 @@ data class SocketMetadata(
                 setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
                 false,
             )
+
+        internal fun insecure() = SocketMetadata(-1, -1, emptySet(), true, -1, -1, emptySet(), true)
     }
 }
 

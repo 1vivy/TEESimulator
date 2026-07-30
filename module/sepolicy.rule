@@ -21,9 +21,15 @@ allow magisk port:udp_socket name_connect
 
 # Root broker/sidecar bridge only: both processes remain in the module launcher domain and use
 # the root-owned /data/adb/teesimulator-rka/run/sockets Unix stream endpoint.
+type teesimulator_rka_socket_dir file_type
+type teesimulator_rka_socket file_type
+type_transition ksu adb_data_file dir teesimulator_rka_socket_dir sockets
+type_transition magisk adb_data_file dir teesimulator_rka_socket_dir sockets
+type_transition ksu teesimulator_rka_socket_dir sock_file teesimulator_rka_socket broker.sock
+type_transition magisk teesimulator_rka_socket_dir sock_file teesimulator_rka_socket broker.sock
 allow ksu self:unix_stream_socket { create bind connect listen accept read write getattr getopt setopt shutdown }
 allow magisk self:unix_stream_socket { create bind connect listen accept read write getattr getopt setopt shutdown }
-allow ksu adb_data_file:dir { search open read getattr write add_name remove_name setattr }
-allow ksu adb_data_file:sock_file { create open read write getattr setattr unlink }
-allow magisk adb_data_file:dir { search open read getattr write add_name remove_name setattr }
-allow magisk adb_data_file:sock_file { create open read write getattr setattr unlink }
+allow ksu teesimulator_rka_socket_dir:dir { search open read getattr write add_name remove_name setattr }
+allow ksu teesimulator_rka_socket:sock_file { create open read write getattr setattr unlink }
+allow magisk teesimulator_rka_socket_dir:dir { search open read getattr write add_name remove_name setattr }
+allow magisk teesimulator_rka_socket:sock_file { create open read write getattr setattr unlink }

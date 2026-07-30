@@ -389,6 +389,12 @@ sealed class BridgeError {
 
     data object PeerIdentityChanged : BridgeError()
 
+    data object TrustedStateMissing : BridgeError()
+
+    data object TrustedStateInvalid : BridgeError()
+
+    data object TrustedStateChanged : BridgeError()
+
     data object SocketPolicy : BridgeError()
 
     data object SocketCreateDenied : BridgeError()

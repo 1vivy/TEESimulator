@@ -1,29 +1,43 @@
 package org.matrix.TEESimulator.rka.bridge
 
-class BrokerBridgeClient(
-    private val expected: () -> SupervisorSnapshot,
-    private val processIdentity: ProcessIdentitySource,
+interface BrokerBridgeClient {
+    fun exchange(request: BridgeMessage): BridgeResult<BridgeMessage>
+
+    fun cancel(requestId: RequestId): BridgeResult<Unit>
+
+    fun peerDied()
+}
+
+internal interface TestBrokerBridgeClient : BrokerBridgeClient {
+    fun correlationCountForTest(): Int
+}
+
+private class DefaultBrokerBridgeClient(
+    private val trustedSource: TrustedSidecarIdentitySource,
+    private val trustedIdentity: TrustedSidecarIdentity,
     private val socketMetadata: () -> SocketMetadata,
     private val transport: BridgeTransport,
-    @Suppress("UNUSED_PARAMETER") private val capacity: BridgeCapacity = BridgeCapacity(),
-    @Suppress("UNUSED_PARAMETER") private val clock: () -> Long = System::nanoTime,
-    private val execution: BridgeExecution = BoundedBridgeExecution(),
-    private val timeoutMillis: Long = BridgeLimits.DEADLINE_MILLIS,
-) {
+    private val execution: BridgeExecution,
+    private val timeoutMillis: Long,
+) : TestBrokerBridgeClient {
     private val lock = Any()
     private var generation = -1L
     private var closed = false
     private val correlations = mutableMapOf<RequestId, BridgeCorrelation>()
 
-    fun exchange(request: BridgeMessage): BridgeResult<BridgeMessage> =
+    override fun exchange(request: BridgeMessage): BridgeResult<BridgeMessage> =
         execution.run(timeoutMillis, ::closeTransport) { exchangeOne(request) }
 
-    fun cancel(requestId: RequestId): BridgeResult<Unit> =
+    override fun cancel(requestId: RequestId): BridgeResult<Unit> =
         take(requestId)?.let { correlation ->
             correlation.worker.interrupt()
             closeTransport()
             BridgeResult.Success(Unit)
         } ?: run { BridgeResult.Failure(BridgeError.UnknownCorrelation) }
+
+    override fun peerDied() {
+        closeTransport()
+    }
 
     private fun authenticate(): BridgeResult<SupervisorSnapshot> {
         if (synchronized(lock) { closed }) {
@@ -41,16 +55,14 @@ class BrokerBridgeClient(
             } catch (_: Exception) {
                 return BridgeResult.Failure(BridgeError.PeerDied)
             }
-        val snapshot = expected()
-        val observed =
-            try {
-                processIdentity.read(credentials.pid)
-            } catch (_: SecurityException) {
-                return BridgeResult.Failure(BridgeError.SelinuxDenied)
-            } catch (_: Exception) {
-                return BridgeResult.Failure(BridgeError.PeerDied)
-            }
-        return if (identityMatches(credentials, snapshot, observed)) {
+        val revalidated = trustedSource.revalidate(trustedIdentity)
+        if (revalidated is BridgeResult.Failure) return revalidated
+        val snapshot = (revalidated as BridgeResult.Success).value
+        return if (
+            credentials.uid == snapshot.uid &&
+                credentials.gid == snapshot.gid &&
+                credentials.pid == snapshot.pid
+        ) {
             BridgeResult.Success(snapshot)
         } else {
             BridgeResult.Failure(BridgeError.PeerIdentityMismatch)
@@ -150,5 +162,50 @@ class BrokerBridgeClient(
         runCatching { transport.close() }
     }
 
-    internal fun correlationCountForTest(): Int = synchronized(lock) { correlations.size }
+    override fun correlationCountForTest(): Int = synchronized(lock) { correlations.size }
+}
+
+internal object BrokerBridgeClients {
+    @JvmSynthetic
+    fun forTest(
+        expected: () -> SupervisorSnapshot,
+        processIdentity: ProcessIdentitySource,
+        socketMetadata: () -> SocketMetadata,
+        transport: BridgeTransport,
+        execution: BridgeExecution = BoundedBridgeExecution(),
+        timeoutMillis: Long = BridgeLimits.DEADLINE_MILLIS,
+    ): TestBrokerBridgeClient {
+        val source = testTrustedSidecarIdentitySource(expected, processIdentity)
+        val captured = source.capture() as BridgeResult.Success
+        return DefaultBrokerBridgeClient(
+            source,
+            captured.value,
+            socketMetadata,
+            transport,
+            execution,
+            timeoutMillis,
+        )
+    }
+
+    @JvmSynthetic
+    fun production(
+        trustedSource: TrustedSidecarIdentitySource,
+        socketMetadata: () -> SocketMetadata,
+        transport: BridgeTransport,
+        execution: BridgeExecution = BoundedBridgeExecution(),
+    ): BridgeResult<BrokerBridgeClient> =
+        when (val captured = trustedSource.capture()) {
+            is BridgeResult.Failure -> captured
+            is BridgeResult.Success ->
+                BridgeResult.Success(
+                    DefaultBrokerBridgeClient(
+                        trustedSource,
+                        captured.value,
+                        socketMetadata,
+                        transport,
+                        execution,
+                        BridgeLimits.DEADLINE_MILLIS,
+                    )
+                )
+        }
 }

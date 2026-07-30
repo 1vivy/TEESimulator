@@ -24,7 +24,7 @@ class BrokerBridgeLifecycleTest {
                 PeerCredentials(0, 0, 42),
             )
         val client =
-            BrokerBridgeClient(
+            BrokerBridgeClients.forTest(
                 expected = { snapshot },
                 processIdentity = ProcessIdentitySource { observed() },
                 socketMetadata = { SocketMetadata.secureRootOwned() },
@@ -55,7 +55,7 @@ class BrokerBridgeLifecycleTest {
                 PeerCredentials(0, 0, 42),
             )
         val endpoint =
-            BrokerBridgeEndpoint(
+            BrokerBridgeEndpoints.forTest(
                 expected = { snapshot() },
                 processIdentity = ProcessIdentitySource { observed() },
                 socketMetadata = { SocketMetadata.secureRootOwned() },
@@ -87,7 +87,7 @@ class BrokerBridgeLifecycleTest {
 
     @Test
     fun no_state_lock_is_held_across_peer_io_procfs_or_dispatch() {
-        lateinit var endpoint: BrokerBridgeEndpoint
+        lateinit var endpoint: TestBrokerBridgeEndpoint
         val request = BridgeMessage.Cancel(RequestId(93))
         val transport =
             object :
@@ -111,7 +111,7 @@ class BrokerBridgeLifecycleTest {
                 }
             }
         endpoint =
-            BrokerBridgeEndpoint(
+            BrokerBridgeEndpoints.forTest(
                 expected = { snapshot() },
                 processIdentity =
                     ProcessIdentitySource {

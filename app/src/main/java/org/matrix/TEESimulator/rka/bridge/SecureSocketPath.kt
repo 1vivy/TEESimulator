@@ -1,9 +1,9 @@
 package org.matrix.TEESimulator.rka.bridge
 
 import android.system.Os
-import java.io.File
-import java.nio.file.Files
-import java.nio.file.LinkOption
+import android.system.OsConstants
+import java.io.Closeable
+import java.io.FileDescriptor
 import java.nio.file.Path
 
 internal data class BridgePathIdentity(
@@ -13,201 +13,282 @@ internal data class BridgePathIdentity(
     val mode: Int,
     val isDirectory: Boolean,
     val isSocket: Boolean,
-    val isSymlink: Boolean,
+    val context: String,
 )
 
-internal interface BridgeSocketPathOperations {
-    fun createDirectories(path: Path)
+internal interface BridgeSocketDirectoryHandle : Closeable {
+    val anchoredSocketPath: Path
 
-    fun exists(path: Path): Boolean
+    fun secureDirectory(): BridgeResult<Unit>
 
-    fun rejectSymlinkAncestors(path: Path)
+    fun inspectSocket(): BridgeResult<BridgePathIdentity>
 
-    fun chown(path: Path, uid: Int, gid: Int)
+    fun verifySocketInode(inode: Long): BridgeResult<Unit>
 
-    fun chmod(path: Path, mode: Int)
+    fun labelExactSocket(inode: Long): BridgeResult<Unit>
 
-    fun restoreLabel(path: Path): Boolean
+    fun deleteExactSocket(inode: Long)
+}
 
-    fun stat(path: Path): BridgePathIdentity
-
-    fun delete(path: Path)
+internal fun interface BridgeSocketPathOperations {
+    fun openFixedDirectory(socketPath: Path): BridgeResult<BridgeSocketDirectoryHandle>
 }
 
 internal object AndroidBridgeSocketPathOperations : BridgeSocketPathOperations {
-    override fun createDirectories(path: Path) {
-        Files.createDirectories(path)
-    }
-
-    override fun exists(path: Path): Boolean = Files.exists(path, LinkOption.NOFOLLOW_LINKS)
-
-    override fun rejectSymlinkAncestors(path: Path) {
-        var current: Path? = path.toAbsolutePath().root
-        for (component in path.toAbsolutePath()) {
-            current = requireNotNull(current).resolve(component)
-            require(!Files.isSymbolicLink(current))
+    override fun openFixedDirectory(socketPath: Path): BridgeResult<BridgeSocketDirectoryHandle> {
+        if (socketPath != SecureSocketPath.FIXED_SOCKET_PATH) {
+            return BridgeResult.Failure(BridgeError.SocketPolicy)
+        }
+        val parentDescriptor =
+            try {
+                Os.open(
+                    socketPath.parent.parent.toString(),
+                    OsConstants.O_RDONLY or
+                        O_DIRECTORY or
+                        OsConstants.O_NOFOLLOW or
+                        OsConstants.O_CLOEXEC,
+                    0,
+                )
+            } catch (_: Exception) {
+                return BridgeResult.Failure(BridgeError.SocketCreateDenied)
+            }
+        try {
+            if (!isSecureDirectory(Os.fstat(parentDescriptor))) {
+                return BridgeResult.Failure(BridgeError.SocketPolicy)
+            }
+            val parentAnchor = descriptorPath(parentDescriptor)
+            val directoryPath = Path.of(parentAnchor, socketPath.parent.fileName.toString())
+            try {
+                Os.mkdir(directoryPath.toString(), DIRECTORY_MODE)
+            } catch (error: android.system.ErrnoException) {
+                if (error.errno != OsConstants.EEXIST) {
+                    return BridgeResult.Failure(BridgeError.SocketCreateDenied)
+                }
+            }
+            val descriptor =
+                try {
+                    Os.open(
+                        directoryPath.toString(),
+                        OsConstants.O_RDONLY or
+                            O_DIRECTORY or
+                            OsConstants.O_NOFOLLOW or
+                            OsConstants.O_CLOEXEC,
+                        0,
+                    )
+                } catch (_: Exception) {
+                    return BridgeResult.Failure(BridgeError.SocketPathChanged)
+                }
+            return try {
+                BridgeResult.Success(
+                    AndroidBridgeSocketDirectoryHandle(descriptor, socketPath.fileName.toString())
+                )
+            } catch (_: Exception) {
+                runCatching { Os.close(descriptor) }
+                BridgeResult.Failure(BridgeError.SocketPathChanged)
+            }
+        } finally {
+            runCatching { Os.close(parentDescriptor) }
         }
     }
 
-    override fun chown(path: Path, uid: Int, gid: Int) {
-        Os.chown(path.toString(), uid, gid)
-    }
+    private fun isSecureDirectory(stat: android.system.StructStat): Boolean =
+        stat.st_uid == 0 &&
+            stat.st_gid == 0 &&
+            stat.st_mode and OsConstants.S_IFMT == OsConstants.S_IFDIR &&
+            stat.st_mode and 0x1ff == DIRECTORY_MODE
 
-    override fun chmod(path: Path, mode: Int) {
-        Os.chmod(path.toString(), mode)
-    }
+    private fun descriptorPath(descriptor: FileDescriptor): String =
+        "/proc/self/fd/${descriptorNumber(descriptor)}"
 
-    override fun restoreLabel(path: Path): Boolean =
-        (Class.forName("android.os.SELinux")
-            .getMethod("restorecon", File::class.java)
-            .invoke(null, File(path.toString())) as? Boolean) == true
+    private fun descriptorNumber(descriptor: FileDescriptor): Int =
+        FileDescriptor::class.java.getDeclaredMethod("getInt$").invoke(descriptor) as Int
 
-    override fun stat(path: Path): BridgePathIdentity {
-        val attributes =
-            Files.readAttributes(
-                path,
-                "unix:ino,uid,gid,mode,isDirectory,isSymbolicLink",
-                LinkOption.NOFOLLOW_LINKS,
-            )
-        val mode = (attributes.getValue("mode") as Number).toInt()
-        return BridgePathIdentity(
-            inode = (attributes.getValue("ino") as Number).toLong(),
-            uid = (attributes.getValue("uid") as Number).toInt(),
-            gid = (attributes.getValue("gid") as Number).toInt(),
-            mode = mode and 0x1ff,
-            isDirectory = attributes.getValue("isDirectory") as Boolean,
-            isSocket = mode and 0xf000 == 0xc000,
-            isSymlink = attributes.getValue("isSymbolicLink") as Boolean,
-        )
-    }
-
-    override fun delete(path: Path) {
-        Files.deleteIfExists(path)
-    }
+    private const val DIRECTORY_MODE = 0x1c0
+    private const val O_DIRECTORY = 0x10000
 }
 
-internal data class SecureSocketDirectory(val path: Path, val inode: Long)
+private class AndroidBridgeSocketDirectoryHandle(
+    private val descriptor: FileDescriptor,
+    socketName: String,
+) : BridgeSocketDirectoryHandle {
+    private val directoryAnchor = Path.of("/proc/self/fd/${descriptorNumber(descriptor)}")
+    override val anchoredSocketPath: Path = directoryAnchor.resolve(socketName)
+    private val originalDirectoryInode = Os.fstat(descriptor).st_ino
 
-internal class SecureSocketPath(
-    private val operations: BridgeSocketPathOperations = AndroidBridgeSocketPathOperations
-) {
-    fun prepare(
-        socketPath: Path,
-        requireAbsentSocket: Boolean = true,
-    ): BridgeResult<SecureSocketDirectory> {
-        val directory = socketPath.parent ?: return BridgeResult.Failure(BridgeError.SocketPolicy)
+    override fun secureDirectory(): BridgeResult<Unit> {
         try {
-            operations.rejectSymlinkAncestors(directory)
-        } catch (_: Exception) {
-            return BridgeResult.Failure(BridgeError.SocketPathChanged)
-        }
-        try {
-            operations.createDirectories(directory)
-        } catch (_: Exception) {
-            return BridgeResult.Failure(BridgeError.SocketCreateDenied)
-        }
-        try {
-            operations.rejectSymlinkAncestors(directory)
-        } catch (_: Exception) {
-            return BridgeResult.Failure(BridgeError.SocketPathChanged)
-        }
-        if (requireAbsentSocket && operations.exists(socketPath)) {
-            return BridgeResult.Failure(BridgeError.SocketPathChanged)
-        }
-        try {
-            operations.chown(directory, 0, 0)
+            Os.fchown(descriptor, 0, 0)
         } catch (_: Exception) {
             return BridgeResult.Failure(BridgeError.SocketChownDenied)
         }
         try {
-            operations.chmod(directory, 0x1c0)
+            Os.fchmod(descriptor, DIRECTORY_MODE)
         } catch (_: Exception) {
             return BridgeResult.Failure(BridgeError.SocketChmodDenied)
         }
-        try {
-            if (!operations.restoreLabel(directory)) {
-                return BridgeResult.Failure(BridgeError.SocketLabelDenied)
-            }
-        } catch (_: Exception) {
+        if (!setAndVerifyContext(directoryAnchor, DIRECTORY_CONTEXT)) {
             return BridgeResult.Failure(BridgeError.SocketLabelDenied)
         }
-        val identity =
-            try {
-                operations.stat(directory)
-            } catch (_: Exception) {
-                return BridgeResult.Failure(BridgeError.SocketPathChanged)
-            }
+        val stat =
+            runCatching { Os.fstat(descriptor) }
+                .getOrElse {
+                    return BridgeResult.Failure(BridgeError.SocketPathChanged)
+                }
         return if (
-            identity.uid == 0 &&
-                identity.gid == 0 &&
-                identity.mode == 0x1c0 &&
-                identity.isDirectory &&
-                !identity.isSymlink
+            stat.st_ino == originalDirectoryInode &&
+                stat.st_uid == 0 &&
+                stat.st_gid == 0 &&
+                stat.st_mode and OsConstants.S_IFMT == OsConstants.S_IFDIR &&
+                stat.st_mode and 0x1ff == DIRECTORY_MODE
         ) {
-            BridgeResult.Success(SecureSocketDirectory(directory, identity.inode))
-        } else {
-            BridgeResult.Failure(BridgeError.SocketPolicy)
-        }
-    }
-
-    fun secureBoundSocket(directory: SecureSocketDirectory, socketPath: Path): BridgeResult<Long> {
-        try {
-            operations.chown(socketPath, 0, 0)
-        } catch (_: Exception) {
-            return BridgeResult.Failure(BridgeError.SocketChownDenied)
-        }
-        try {
-            operations.chmod(socketPath, 0x180)
-        } catch (_: Exception) {
-            return BridgeResult.Failure(BridgeError.SocketChmodDenied)
-        }
-        try {
-            if (!operations.restoreLabel(socketPath)) {
-                return BridgeResult.Failure(BridgeError.SocketLabelDenied)
-            }
-        } catch (_: Exception) {
-            return BridgeResult.Failure(BridgeError.SocketLabelDenied)
-        }
-        val currentDirectory =
-            try {
-                operations.stat(directory.path)
-            } catch (_: Exception) {
-                return BridgeResult.Failure(BridgeError.SocketPathChanged)
-            }
-        val socket =
-            try {
-                operations.stat(socketPath)
-            } catch (_: Exception) {
-                return BridgeResult.Failure(BridgeError.SocketPathChanged)
-            }
-        return if (
-            currentDirectory.inode == directory.inode &&
-                currentDirectory.uid == 0 &&
-                currentDirectory.gid == 0 &&
-                currentDirectory.mode == 0x1c0 &&
-                currentDirectory.isDirectory &&
-                !currentDirectory.isSymlink &&
-                socket.uid == 0 &&
-                socket.gid == 0 &&
-                socket.mode == 0x180 &&
-                socket.isSocket &&
-                !socket.isSymlink
-        ) {
-            BridgeResult.Success(socket.inode)
+            BridgeResult.Success(Unit)
         } else {
             BridgeResult.Failure(BridgeError.SocketPathChanged)
         }
     }
 
-    fun deleteExact(socketPath: Path, inode: Long) {
-        val current = runCatching { operations.stat(socketPath) }.getOrNull() ?: return
-        if (current.inode == inode && current.isSocket && !current.isSymlink) {
-            runCatching { operations.delete(socketPath) }
+    override fun inspectSocket(): BridgeResult<BridgePathIdentity> {
+        if (!directoryUnchanged()) return BridgeResult.Failure(BridgeError.SocketPathChanged)
+        val stat =
+            runCatching { Os.lstat(anchoredSocketPath.toString()) }
+                .getOrElse {
+                    return BridgeResult.Failure(BridgeError.SocketPathChanged)
+                }
+        val context =
+            fileContext(anchoredSocketPath)
+                ?: return BridgeResult.Failure(BridgeError.SocketLabelDenied)
+        if (context != SOCKET_CONTEXT) {
+            return BridgeResult.Failure(BridgeError.SocketLabelDenied)
+        }
+        return if (
+            stat.st_uid == 0 &&
+                stat.st_gid == 0 &&
+                stat.st_mode and OsConstants.S_IFMT == OsConstants.S_IFSOCK &&
+                stat.st_mode and 0x1ff == SOCKET_MODE
+        ) {
+            BridgeResult.Success(
+                BridgePathIdentity(
+                    stat.st_ino,
+                    stat.st_uid,
+                    stat.st_gid,
+                    stat.st_mode and 0x1ff,
+                    isDirectory = false,
+                    isSocket = true,
+                    context = context,
+                )
+            )
+        } else {
+            BridgeResult.Failure(BridgeError.SocketPolicy)
         }
     }
 
-    fun cleanupNewSocket(socketPath: Path) {
-        val current = runCatching { operations.stat(socketPath) }.getOrNull() ?: return
-        if (current.isSocket && !current.isSymlink) deleteExact(socketPath, current.inode)
+    override fun labelExactSocket(inode: Long): BridgeResult<Unit> {
+        if (!socketIsExact(inode)) return BridgeResult.Failure(BridgeError.SocketPathChanged)
+        if (!setAndVerifyContext(anchoredSocketPath, SOCKET_CONTEXT)) {
+            return BridgeResult.Failure(BridgeError.SocketLabelDenied)
+        }
+        return if (socketIsExact(inode)) {
+            BridgeResult.Success(Unit)
+        } else {
+            BridgeResult.Failure(BridgeError.SocketPathChanged)
+        }
+    }
+
+    override fun verifySocketInode(inode: Long): BridgeResult<Unit> =
+        if (socketIsExact(inode)) {
+            BridgeResult.Success(Unit)
+        } else {
+            BridgeResult.Failure(BridgeError.SocketPathChanged)
+        }
+
+    override fun deleteExactSocket(inode: Long) {
+        if (!socketIsExact(inode)) return
+        runCatching { Os.remove(anchoredSocketPath.toString()) }
+    }
+
+    override fun close() {
+        runCatching { Os.close(descriptor) }
+    }
+
+    private fun directoryUnchanged(): Boolean =
+        runCatching {
+                val stat = Os.fstat(descriptor)
+                stat.st_ino == originalDirectoryInode &&
+                    stat.st_uid == 0 &&
+                    stat.st_gid == 0 &&
+                    stat.st_mode and OsConstants.S_IFMT == OsConstants.S_IFDIR &&
+                    stat.st_mode and 0x1ff == DIRECTORY_MODE &&
+                    fileContext(directoryAnchor) == DIRECTORY_CONTEXT
+            }
+            .getOrDefault(false)
+
+    private fun socketIsExact(inode: Long): Boolean =
+        directoryUnchanged() &&
+            runCatching {
+                    val stat = Os.lstat(anchoredSocketPath.toString())
+                    stat.st_ino == inode &&
+                        stat.st_mode and OsConstants.S_IFMT == OsConstants.S_IFSOCK
+                }
+                .getOrDefault(false)
+
+    private fun setAndVerifyContext(path: Path, context: String): Boolean =
+        runCatching {
+                val selinux = Class.forName("android.os.SELinux")
+                val set =
+                    selinux.getMethod("setFileContext", String::class.java, String::class.java)
+                set.invoke(null, path.toString(), context) == true && fileContext(path) == context
+            }
+            .getOrDefault(false)
+
+    private fun fileContext(path: Path): String? =
+        runCatching {
+                Class.forName("android.os.SELinux")
+                    .getMethod("getFileContext", String::class.java)
+                    .invoke(null, path.toString()) as? String
+            }
+            .getOrNull()
+
+    private fun descriptorNumber(value: FileDescriptor): Int =
+        FileDescriptor::class.java.getDeclaredMethod("getInt$").invoke(value) as Int
+
+    private companion object {
+        const val DIRECTORY_MODE = 0x1c0
+        const val SOCKET_MODE = 0x180
+        const val DIRECTORY_CONTEXT = "u:object_r:teesimulator_rka_socket_dir:s0"
+        const val SOCKET_CONTEXT = "u:object_r:teesimulator_rka_socket:s0"
+    }
+}
+
+internal class SecureSocketPath(
+    private val operations: BridgeSocketPathOperations = AndroidBridgeSocketPathOperations
+) {
+    fun open(): BridgeResult<BridgeSocketDirectoryHandle> =
+        when (val opened = operations.openFixedDirectory(FIXED_SOCKET_PATH)) {
+            is BridgeResult.Failure -> opened
+            is BridgeResult.Success ->
+                when (val secured = opened.value.secureDirectory()) {
+                    is BridgeResult.Failure -> {
+                        opened.value.close()
+                        secured
+                    }
+                    is BridgeResult.Success -> opened
+                }
+        }
+
+    internal fun open(socketPath: Path): BridgeResult<BridgeSocketDirectoryHandle> =
+        when (val opened = operations.openFixedDirectory(socketPath)) {
+            is BridgeResult.Failure -> opened
+            is BridgeResult.Success ->
+                when (val secured = opened.value.secureDirectory()) {
+                    is BridgeResult.Failure -> {
+                        opened.value.close()
+                        secured
+                    }
+                    is BridgeResult.Success -> opened
+                }
+        }
+
+    internal companion object {
+        val FIXED_SOCKET_PATH: Path = Path.of("/data/adb/teesimulator-rka/run/sockets/broker.sock")
     }
 }

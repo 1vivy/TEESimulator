@@ -148,6 +148,7 @@ impl Deadline {
         }
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn check_peer<Fd: std::os::fd::AsFd>(&self, pidfd: &Fd) -> Result<(), BridgeError> {
         self.remaining()?;
         let mut descriptors = [
@@ -166,6 +167,31 @@ impl Deadline {
         if descriptors[0]
             .revents()
             .intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP | PollFlags::NVAL)
+        {
+            Err(BridgeError::PeerDied)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn check_socket(&self, stream: &UnixStream) -> Result<(), BridgeError> {
+        self.remaining()?;
+        let mut descriptors = [
+            PollFd::new(stream, PollFlags::IN),
+            PollFd::new(&self.control.event, PollFlags::IN),
+        ];
+        let immediate = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        poll(&mut descriptors, Some(&immediate)).map_err(|_| BridgeError::Io)?;
+        if descriptors[1].revents().contains(PollFlags::IN) {
+            self.control.drain();
+            return Err(self.control.error());
+        }
+        if descriptors[0]
+            .revents()
+            .intersects(PollFlags::ERR | PollFlags::HUP | PollFlags::NVAL)
         {
             Err(BridgeError::PeerDied)
         } else {

@@ -40,12 +40,27 @@ impl DescriptorSnapshot {
         Ok(current.is_some_and(|stat| Self::from_stat(stat) == self))
     }
 
+    pub(super) fn verify_object(
+        self,
+        descriptor: &impl AsFd,
+        deadline: &Deadline,
+    ) -> Result<bool, BridgeError> {
+        deadline.remaining()?;
+        let current = fstat(descriptor).ok().map(Self::from_stat);
+        deadline.remaining()?;
+        Ok(current.is_some_and(|snapshot| self.same_object(snapshot)))
+    }
+
     pub(super) const fn device(self) -> u64 {
         self.device
     }
 
     pub(super) const fn inode(self) -> u64 {
         self.inode
+    }
+
+    pub(super) const fn same_object(self, other: Self) -> bool {
+        self.device == other.device && self.inode == other.inode
     }
 
     fn from_stat(stat: Stat) -> Self {

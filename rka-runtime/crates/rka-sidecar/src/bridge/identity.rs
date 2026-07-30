@@ -6,15 +6,15 @@ use super::{
     BridgeError,
     deadline::Deadline,
     descriptor_io::{ReadBound, read_bounded},
-    identity_source::{IdentitySource, LinuxIdentitySource},
-    peer_authorization::{HeldDescriptor, PeerAuthorization},
+    identity_source::{IdentitySource, LinuxIdentitySource, ProcessDescriptors},
+    peer_authorization::{HeldDescriptor, PeerAuthorization, ProcDirectoryAuthorization},
     process_identity::{parse_cmdline, parse_start_time},
     trusted_record::{MAX_RECORD_BYTES, OpenRecord, parse_record},
 };
 
 pub(super) const BROKER_EXECUTABLE: &str = "/system/bin/app_process64";
-const MAX_STAT_BYTES: usize = 4096;
-const MAX_CMDLINE_BYTES: usize = 1024;
+pub(super) const MAX_STAT_BYTES: usize = 4096;
+pub(super) const MAX_CMDLINE_BYTES: usize = 1024;
 
 /// Closed sidecar role used by the trusted supervisor record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,7 +34,7 @@ impl BrokerRole {
         }
     }
 
-    const fn argument(self) -> &'static str {
+    pub(super) const fn argument(self) -> &'static str {
         match self {
             Self::Donor => "donor",
             Self::Candidate => "candidate",
@@ -112,34 +112,28 @@ pub(super) fn authenticate_with_source(
     } = request;
     let credentials = source.credentials(stream)?;
     let revalidate_socket_credentials = source.revalidates_socket_credentials();
-    let OpenRecord {
-        descriptor,
-        snapshot,
-    } = source.open_record(deadline)?;
-    let mut record_bytes = read_bounded(
-        &descriptor,
-        deadline,
-        ReadBound {
-            bytes: MAX_RECORD_BYTES,
-            error: BridgeError::TrustedState,
-        },
-    )?;
-    if !snapshot.verify(&descriptor, deadline)? {
-        return Err(BridgeError::TrustedState);
-    }
-    let parsed_identity = parse_record(&record_bytes, role);
-    record_bytes.fill(0);
-    let identity = parsed_identity?;
+    let (identity, record) = read_identity_record(source, role, deadline)?;
     if credentials.uid != identity.uid
         || credentials.gid != identity.gid
         || credentials.pid != identity.pid
     {
         return Err(BridgeError::PeerIdentity);
     }
-    let process = source.open_process(identity.pid, deadline)?;
-    deadline.check_peer(&process.pidfd)?;
-    let stat = HeldDescriptor::capture(process.stat)?;
-    let cmdline = HeldDescriptor::capture(process.cmdline)?;
+    let ProcessDescriptors {
+        liveness,
+        proc_root,
+        process_name,
+        directory,
+        stat,
+        cmdline,
+        executable,
+        expected_executable,
+        revalidation_gate,
+    } = source.open_process(identity.pid, deadline)?;
+    liveness.check(deadline)?;
+    deadline.check_socket(stream)?;
+    let stat = HeldDescriptor::capture(stat)?;
+    let cmdline = HeldDescriptor::capture(cmdline)?;
     let mut stat_bytes = read_bounded(
         &stat.descriptor,
         deadline,
@@ -179,27 +173,62 @@ pub(super) fn authenticate_with_source(
     }
     stat.verify(deadline, BridgeError::PeerIdentity)?;
     cmdline.verify(deadline, BridgeError::PeerIdentity)?;
-    let process_directory = HeldDescriptor::capture(process.directory)?;
-    let executable = HeldDescriptor::capture(process.executable)?;
-    let expected_executable = HeldDescriptor::capture(process.expected_executable)?;
+    let proc_root = HeldDescriptor::capture(proc_root)?;
+    let process_directory = HeldDescriptor::capture(directory)?;
+    let executable = HeldDescriptor::capture(executable)?;
+    let expected_executable = HeldDescriptor::capture(expected_executable)?;
     if executable.snapshot.device() != expected_executable.snapshot.device()
         || executable.snapshot.inode() != expected_executable.snapshot.inode()
         || executable.snapshot.inode() != identity.executable_inode
     {
         return Err(BridgeError::PeerIdentity);
     }
-    deadline.check_peer(&process.pidfd)?;
+    liveness.check(deadline)?;
+    deadline.check_socket(stream)?;
     Ok(PeerAuthorization {
-        _identity: identity,
+        identity,
         credentials,
         revalidate_socket_credentials,
-        record: HeldDescriptor::from_snapshot(descriptor, snapshot),
-        process_directory,
-        stat,
-        cmdline,
-        executable,
-        expected_executable,
-        pidfd: process.pidfd,
-        revalidation_gate: process.revalidation_gate,
+        record,
+        process: ProcDirectoryAuthorization {
+            proc_root,
+            process_name,
+            directory: process_directory,
+            stat,
+            cmdline,
+            executable,
+            expected_executable,
+        },
+        liveness,
+        revalidation_gate,
     })
+}
+
+fn read_identity_record(
+    source: &mut impl IdentitySource,
+    role: BrokerRole,
+    deadline: &Deadline,
+) -> Result<(BrokerIdentity, HeldDescriptor), BridgeError> {
+    let OpenRecord {
+        descriptor,
+        snapshot,
+    } = source.open_record(deadline)?;
+    let mut record_bytes = read_bounded(
+        &descriptor,
+        deadline,
+        ReadBound {
+            bytes: MAX_RECORD_BYTES,
+            error: BridgeError::TrustedState,
+        },
+    )?;
+    if !snapshot.verify(&descriptor, deadline)? {
+        return Err(BridgeError::TrustedState);
+    }
+    let parsed_identity = parse_record(&record_bytes, role);
+    record_bytes.fill(0);
+    let identity = parsed_identity?;
+    Ok((
+        identity,
+        HeldDescriptor::from_snapshot(descriptor, snapshot),
+    ))
 }

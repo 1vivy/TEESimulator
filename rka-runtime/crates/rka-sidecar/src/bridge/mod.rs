@@ -20,6 +20,7 @@ mod lifecycle_tests;
 mod model;
 mod peer_authorization;
 mod process_identity;
+mod process_liveness;
 mod runtime;
 mod socket;
 #[cfg(test)]

@@ -1,5 +1,7 @@
 use std::{
-    fs::{self, File},
+    fs::{self, File, FileTimes, OpenOptions},
+    io::{Seek, SeekFrom, Write},
+    os::unix::fs::symlink,
     os::unix::net::UnixStream,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
@@ -19,33 +21,30 @@ use super::{
     identity_source::{ProcessDescriptors, TestIdentitySource},
     peer_authorization::PeerAuthorization,
     process_identity::{parse_cmdline, parse_start_time},
+    process_liveness::ProcessLiveness,
     trusted_record::OpenRecord,
 };
 
 static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
-struct TempFile(PathBuf);
+struct TempTree(PathBuf);
 
-impl TempFile {
-    fn new(label: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+impl TempTree {
+    fn new(label: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let sequence = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "rka-identity-{label}-{}-{sequence}",
             std::process::id()
         ));
-        fs::write(&path, bytes)?;
+        fs::create_dir(&path)?;
         Ok(Self(path))
-    }
-
-    fn open(&self) -> Result<OwnedFd, Box<dyn std::error::Error>> {
-        Ok(OwnedFd::from(File::open(&self.0)?))
     }
 }
 
-impl Drop for TempFile {
+impl Drop for TempTree {
     fn drop(&mut self) {
-        let _removed = fs::remove_file(&self.0);
+        let _removed = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -62,7 +61,13 @@ enum Phase {
 struct Fixture {
     source: TestIdentitySource,
     _writer: Option<UnixStream>,
-    files: Vec<TempFile>,
+    _tree: TempTree,
+    record_path: PathBuf,
+    executable_path: PathBuf,
+    process_path: PathBuf,
+    stat_path: PathBuf,
+    cmdline_path: PathBuf,
+    executable_link: PathBuf,
 }
 
 fn deadline(duration: Duration) -> Result<Deadline, BridgeError> {
@@ -90,16 +95,64 @@ fn stalled() -> Result<(OwnedFd, UnixStream), Box<dyn std::error::Error>> {
     Ok((OwnedFd::from(reader), writer))
 }
 
-fn fixture(phase: Phase) -> Result<Fixture, Box<dyn std::error::Error>> {
-    let executable_file = TempFile::new("executable", b"executable")?;
-    let executable = executable_file.open()?;
-    let executable_inode = DescriptorSnapshot::capture(&executable)?.inode();
-    let expected_file = TempFile::new("expected", b"other")?;
-    let expected_executable = if matches!(phase, Phase::ExecutableMismatch) {
-        expected_file.open()?
+fn test_liveness(proc_liveness: bool) -> Result<ProcessLiveness, Box<dyn std::error::Error>> {
+    if proc_liveness {
+        Ok(ProcessLiveness::ProcDirectory)
     } else {
-        executable_file.open()?
+        let pid = Pid::from_raw(i32::try_from(std::process::id())?)
+            .ok_or("current process id was zero")?;
+        Ok(ProcessLiveness::Pidfd(pidfd_open(
+            pid,
+            PidfdFlags::NONBLOCK,
+        )?))
+    }
+}
+
+fn rewrite_preserving_snapshot(
+    path: &PathBuf,
+    bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file = OpenOptions::new().write(true).open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.len() != u64::try_from(bytes.len())? {
+        return Err("replacement must preserve file size".into());
+    }
+    let times = FileTimes::new()
+        .set_accessed(metadata.accessed()?)
+        .set_modified(metadata.modified()?);
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(bytes)?;
+    file.set_times(times)?;
+    Ok(())
+}
+
+fn fixture(phase: Phase) -> Result<Fixture, Box<dyn std::error::Error>> {
+    fixture_with_proc_liveness(phase, false)
+}
+
+fn fixture_with_proc_liveness(
+    phase: Phase,
+    proc_liveness: bool,
+) -> Result<Fixture, Box<dyn std::error::Error>> {
+    let tree = TempTree::new("proc")?;
+    let proc_path = tree.0.join("proc");
+    let process_name = std::process::id().to_string();
+    let process_path = proc_path.join(&process_name);
+    fs::create_dir(&proc_path)?;
+    fs::create_dir(&process_path)?;
+    let executable_path = tree.0.join("app_process64");
+    fs::write(&executable_path, b"executable")?;
+    let executable = OwnedFd::from(File::open(&executable_path)?);
+    let executable_inode = DescriptorSnapshot::capture(&executable)?.inode();
+    let expected_path = tree.0.join("other");
+    fs::write(&expected_path, b"other")?;
+    let expected_executable = if matches!(phase, Phase::ExecutableMismatch) {
+        OwnedFd::from(File::open(&expected_path)?)
+    } else {
+        OwnedFd::from(File::open(&executable_path)?)
     };
+    let executable_link = process_path.join("exe");
+    symlink(&executable_path, &executable_link)?;
     let record = format!(
         "version=1\ngeneration=7\nlaunch_nonce={}\nuid={}\ngid={}\npid={}\nstart_time_ticks=99\nexecutable_inode={executable_inode}\nexecutable_path={BROKER_EXECUTABLE}\nrole=DONOR\n",
         "01".repeat(32),
@@ -107,37 +160,39 @@ fn fixture(phase: Phase) -> Result<Fixture, Box<dyn std::error::Error>> {
         0,
         std::process::id()
     );
-    let record_file = TempFile::new("record", record.as_bytes())?;
-    let stat_file = TempFile::new(
-        "stat",
+    let record_path = tree.0.join("record");
+    fs::write(&record_path, record.as_bytes())?;
+    let stat_path = process_path.join("stat");
+    fs::write(
+        &stat_path,
         b"42 (broker (worker)) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 99",
     )?;
-    let cmdline_file = TempFile::new(
-        "cmdline",
+    let cmdline_path = process_path.join("cmdline");
+    fs::write(
+        &cmdline_path,
         b"/system/bin/app_process64\0/system/bin\0org.matrix.TEESimulator.App\0--rka-role\0donor\0",
     )?;
-    let directory_file = TempFile::new("directory", b"directory")?;
     let mut writer = None;
     let record_descriptor = if matches!(phase, Phase::Record) {
         let (reader, held_writer) = stalled()?;
         writer = Some(held_writer);
         reader
     } else {
-        record_file.open()?
+        OwnedFd::from(File::open(&record_path)?)
     };
     let stat = if matches!(phase, Phase::Stat) {
         let (reader, held_writer) = stalled()?;
         writer = Some(held_writer);
         reader
     } else {
-        stat_file.open()?
+        OwnedFd::from(File::open(&stat_path)?)
     };
     let cmdline = if matches!(phase, Phase::Cmdline) {
         let (reader, held_writer) = stalled()?;
         writer = Some(held_writer);
         reader
     } else {
-        cmdline_file.open()?
+        OwnedFd::from(File::open(&cmdline_path)?)
     };
     let revalidation_gate = if matches!(phase, Phase::Preexposure) {
         let (reader, held_writer) = stalled()?;
@@ -148,12 +203,10 @@ fn fixture(phase: Phase) -> Result<Fixture, Box<dyn std::error::Error>> {
     };
     let record_snapshot = DescriptorSnapshot::capture(&record_descriptor)?;
     let process = ProcessDescriptors {
-        pidfd: pidfd_open(
-            Pid::from_raw(i32::try_from(std::process::id())?)
-                .ok_or("current process id was zero")?,
-            PidfdFlags::NONBLOCK,
-        )?,
-        directory: directory_file.open()?,
+        liveness: test_liveness(proc_liveness)?,
+        proc_root: OwnedFd::from(File::open(&proc_path)?),
+        process_name,
+        directory: OwnedFd::from(File::open(&process_path)?),
         stat,
         cmdline,
         executable,
@@ -169,14 +222,13 @@ fn fixture(phase: Phase) -> Result<Fixture, Box<dyn std::error::Error>> {
             process,
         ),
         _writer: writer,
-        files: vec![
-            executable_file,
-            expected_file,
-            record_file,
-            stat_file,
-            cmdline_file,
-            directory_file,
-        ],
+        _tree: tree,
+        record_path,
+        executable_path,
+        process_path,
+        stat_path,
+        cmdline_path,
+        executable_link,
     })
 }
 
@@ -265,7 +317,7 @@ fn held_executable_requires_same_device_and_inode() -> Result<(), Box<dyn std::e
 #[test]
 fn held_descriptors_detect_preexposure_content_change() -> Result<(), Box<dyn std::error::Error>> {
     let mut fixture = fixture(Phase::Ready)?;
-    let executable_path = fixture.files.first().ok_or("missing executable")?.0.clone();
+    let executable_path = fixture.executable_path.clone();
     let (stream, _peer) = UnixStream::pair()?;
     let deadline = deadline(Duration::from_millis(100))?;
     let authorization = authenticate(&mut fixture.source, &stream, &deadline)?;
@@ -280,15 +332,102 @@ fn held_descriptors_detect_preexposure_content_change() -> Result<(), Box<dyn st
 #[test]
 fn record_name_swap_cannot_redirect_held_authorization() -> Result<(), Box<dyn std::error::Error>> {
     let mut fixture = fixture(Phase::Ready)?;
-    let record_path = fixture.files.get(2).ok_or("missing record")?.0.clone();
+    let record_path = fixture.record_path.clone();
     let old_path = record_path.with_extension("held");
     let (stream, _peer) = UnixStream::pair()?;
     let deadline = deadline(Duration::from_millis(100))?;
     let authorization = authenticate(&mut fixture.source, &stream, &deadline)?;
     fs::rename(&record_path, &old_path)?;
-    fixture.files.push(TempFile(old_path));
     fs::write(&record_path, b"attacker-controlled replacement")?;
     assert_eq!(authorization.revalidate(&stream, &deadline), Ok(()));
+    Ok(())
+}
+
+#[test]
+fn proc_directory_strategy_authenticates_valid_peer() -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = fixture_with_proc_liveness(Phase::Ready, true)?;
+    let (stream, _peer) = UnixStream::pair()?;
+    let deadline = deadline(Duration::from_millis(250))?;
+    let authorization = authenticate(&mut fixture.source, &stream, &deadline)?;
+    assert_eq!(authorization.revalidate(&stream, &deadline), Ok(()));
+    Ok(())
+}
+
+#[test]
+fn proc_directory_strategy_rejects_exit_and_pid_reuse() -> Result<(), Box<dyn std::error::Error>> {
+    for replace in [false, true] {
+        let mut fixture = fixture_with_proc_liveness(Phase::Ready, true)?;
+        let (stream, _peer) = UnixStream::pair()?;
+        let deadline = deadline(Duration::from_millis(250))?;
+        let authorization = authenticate(&mut fixture.source, &stream, &deadline)?;
+        let retired = fixture.process_path.with_extension("retired");
+        fs::rename(&fixture.process_path, &retired)?;
+        if replace {
+            fs::create_dir(&fixture.process_path)?;
+        }
+        assert!(matches!(
+            authorization.revalidate(&stream, &deadline),
+            Err(BridgeError::PeerDied | BridgeError::PeerIdentity)
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn proc_directory_strategy_rejects_exec_change() -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = fixture_with_proc_liveness(Phase::Ready, true)?;
+    let replacement = fixture.executable_path.with_extension("replacement");
+    fs::write(&replacement, b"replacement")?;
+    let (stream, _peer) = UnixStream::pair()?;
+    let deadline = deadline(Duration::from_millis(250))?;
+    let authorization = authenticate(&mut fixture.source, &stream, &deadline)?;
+    fs::remove_file(&fixture.executable_link)?;
+    symlink(replacement, &fixture.executable_link)?;
+    assert_eq!(
+        authorization.revalidate(&stream, &deadline),
+        Err(BridgeError::PeerIdentity)
+    );
+    Ok(())
+}
+
+#[test]
+fn proc_directory_strategy_rejects_start_and_cmdline_change()
+-> Result<(), Box<dyn std::error::Error>> {
+    for stat_change in [true, false] {
+        let mut fixture = fixture_with_proc_liveness(Phase::Ready, true)?;
+        let (stream, _peer) = UnixStream::pair()?;
+        let deadline = deadline(Duration::from_millis(250))?;
+        let authorization = authenticate(&mut fixture.source, &stream, &deadline)?;
+        if stat_change {
+            rewrite_preserving_snapshot(
+                &fixture.stat_path,
+                b"42 (broker (worker)) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 98",
+            )?;
+        } else {
+            rewrite_preserving_snapshot(
+                &fixture.cmdline_path,
+                b"/system/bin/app_process64\0/system/bin\0org.matrix.TEESimulator.App\0--rka-role\0xxxxx\0",
+            )?;
+        }
+        assert_eq!(
+            authorization.revalidate(&stream, &deadline),
+            Err(BridgeError::PeerIdentity)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn proc_directory_strategy_rejects_socket_hup() -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = fixture_with_proc_liveness(Phase::Ready, true)?;
+    let (stream, peer) = UnixStream::pair()?;
+    let deadline = deadline(Duration::from_millis(250))?;
+    let authorization = authenticate(&mut fixture.source, &stream, &deadline)?;
+    drop(peer);
+    assert_eq!(
+        authorization.revalidate(&stream, &deadline),
+        Err(BridgeError::PeerDied)
+    );
     Ok(())
 }
 

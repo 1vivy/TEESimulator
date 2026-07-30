@@ -35,6 +35,7 @@ fn bridge_material_source_has_no_generic_or_forbidden_serializer() {
         include_str!("../src/bridge/identity_source.rs"),
         include_str!("../src/bridge/peer_authorization.rs"),
         include_str!("../src/bridge/process_identity.rs"),
+        include_str!("../src/bridge/process_liveness.rs"),
         include_str!("../src/bridge/socket.rs"),
     ]
     .concat();
@@ -91,4 +92,13 @@ fn bridge_material_source_has_no_generic_or_forbidden_serializer() {
     ]
     .concat();
     assert!(!lifecycle.contains("saturating_sub"));
+}
+
+#[test]
+fn android_selects_proc_directory_liveness_at_compile_time() {
+    let source = include_str!("../src/bridge/process_liveness.rs");
+    assert!(source.contains(
+        "#[cfg(target_os = \"android\")]\nconst PLATFORM_PROCESS_STRATEGY: ProcessStrategy = ProcessStrategy::ProcDirectory;"
+    ));
+    assert!(!source.contains("Err(BridgeError::PeerIdentity)\n}"));
 }

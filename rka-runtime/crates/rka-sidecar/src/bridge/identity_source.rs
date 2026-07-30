@@ -1,5 +1,3 @@
-#[cfg(target_os = "linux")]
-use rustix::process::{PidfdFlags, pidfd_open};
 use rustix::{
     fd::OwnedFd,
     fs::{CWD, Mode, OFlags, openat},
@@ -10,6 +8,10 @@ use super::{
     BridgeError,
     deadline::Deadline,
     identity::{BROKER_EXECUTABLE, PeerCredentials},
+    process_liveness::{
+        ProcessLiveness, open_directory, open_platform_liveness, open_process_executable,
+        open_readonly,
+    },
     trusted_record::{OpenRecord, open_identity_record},
 };
 
@@ -33,7 +35,9 @@ pub(super) trait IdentitySource: sealed::Sealed {
 
 #[derive(Debug)]
 pub(super) struct ProcessDescriptors {
-    pub(super) pidfd: OwnedFd,
+    pub(super) liveness: ProcessLiveness,
+    pub(super) proc_root: OwnedFd,
+    pub(super) process_name: String,
     pub(super) directory: OwnedFd,
     pub(super) stat: OwnedFd,
     pub(super) cmdline: OwnedFd,
@@ -70,25 +74,21 @@ impl IdentitySource for LinuxIdentitySource {
     ) -> Result<ProcessDescriptors, BridgeError> {
         deadline.remaining()?;
         let pid = Pid::from_raw(pid).ok_or(BridgeError::PeerIdentity)?;
-        let pidfd = open_pidfd(pid)?;
-        deadline.check_peer(&pidfd)?;
+        let liveness = open_platform_liveness(pid)?;
+        liveness.check(deadline)?;
         let root = open_directory(CWD, "/", deadline)?;
-        let proc = open_directory(&root, "proc", deadline)?;
-        let directory = open_directory(&proc, pid.as_raw_nonzero().to_string(), deadline)?;
+        let proc_root = open_directory(&root, "proc", deadline)?;
+        let process_name = pid.as_raw_nonzero().to_string();
+        let directory = open_directory(&proc_root, &process_name, deadline)?;
         let stat = open_readonly(&directory, "stat", deadline)?;
         let cmdline = open_readonly(&directory, "cmdline", deadline)?;
-        deadline.remaining()?;
-        let executable = openat(
-            &directory,
-            "exe",
-            OFlags::PATH | OFlags::CLOEXEC | OFlags::NONBLOCK,
-            Mode::empty(),
-        )
-        .map_err(|_| BridgeError::PeerDied)?;
+        let executable = open_process_executable(&directory, deadline)?;
         let expected_executable = open_absolute_executable(deadline)?;
-        deadline.check_peer(&pidfd)?;
+        liveness.check(deadline)?;
         Ok(ProcessDescriptors {
-            pidfd,
+            liveness,
+            proc_root,
+            process_name,
             directory,
             stat,
             cmdline,
@@ -97,16 +97,6 @@ impl IdentitySource for LinuxIdentitySource {
             revalidation_gate: None,
         })
     }
-}
-
-#[cfg(target_os = "linux")]
-fn open_pidfd(pid: Pid) -> Result<OwnedFd, BridgeError> {
-    pidfd_open(pid, PidfdFlags::NONBLOCK).map_err(|_| BridgeError::PeerIdentity)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn open_pidfd(_pid: Pid) -> Result<OwnedFd, BridgeError> {
-    Err(BridgeError::PeerIdentity)
 }
 
 fn open_absolute_executable(deadline: &Deadline) -> Result<OwnedFd, BridgeError> {
@@ -125,36 +115,6 @@ fn open_absolute_executable(deadline: &Deadline) -> Result<OwnedFd, BridgeError>
         Mode::empty(),
     )
     .map_err(|_| BridgeError::PeerIdentity)
-}
-
-fn open_directory<Fd: std::os::fd::AsFd, Path: rustix::path::Arg>(
-    parent: Fd,
-    component: Path,
-    deadline: &Deadline,
-) -> Result<OwnedFd, BridgeError> {
-    deadline.remaining()?;
-    openat(
-        parent,
-        component,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-        Mode::empty(),
-    )
-    .map_err(|_| BridgeError::PeerDied)
-}
-
-fn open_readonly(
-    parent: &impl std::os::fd::AsFd,
-    name: &str,
-    deadline: &Deadline,
-) -> Result<OwnedFd, BridgeError> {
-    deadline.remaining()?;
-    openat(
-        parent,
-        name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-        Mode::empty(),
-    )
-    .map_err(|_| BridgeError::PeerDied)
 }
 
 #[cfg(test)]

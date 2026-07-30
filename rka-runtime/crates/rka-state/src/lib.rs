@@ -2,6 +2,12 @@
 
 use thiserror::Error;
 
+mod replay;
+mod sensitive;
+
+pub use replay::{PersistedTombstone, ReplayManager, TombstoneTime};
+pub use sensitive::SensitiveStateStore;
+
 /// Maximum serialized state record size.
 pub const MAX_STATE_BYTES: usize = 131_072;
 
@@ -32,6 +38,18 @@ pub enum StateError {
     /// The platform store failed.
     #[error("state store failed")]
     Storage,
+    /// Stored bytes did not match the canonical state schema.
+    #[error("state record is corrupt")]
+    Corrupt,
+    /// Retained records consumed the bounded persistent capacity.
+    #[error("state capacity is exhausted")]
+    Capacity,
+    /// A retained replay key was observed again.
+    #[error("replay was rejected")]
+    Replay,
+    /// The supplied monotonic time regressed.
+    #[error("monotonic time regressed")]
+    TimeRegression,
 }
 
 /// Checks a serialized record before any platform store receives it.

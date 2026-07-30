@@ -3,6 +3,33 @@
 use rka_protocol::Payload;
 use thiserror::Error;
 
+mod audit;
+#[doc(hidden)]
+pub mod audit_codec;
+mod identity;
+mod profile;
+#[doc(hidden)]
+pub mod profile_id;
+mod session;
+mod tls;
+#[doc(hidden)]
+pub mod tls_io;
+mod tls_types;
+
+pub use audit::{AuditChain, AuditEntry, AuditReceipt, ReceiptContext, ReceiptVerifier};
+pub use identity::{IdentityError, TransportIdentity};
+pub use profile::{
+    Endpoint, PairedProfile, ProfileError, ProfileInput, ProfileRotation, Role, TransportKind,
+};
+pub use session::{
+    CsRng, LiveSession, RequestContext, RequestPermit, SessionError, SessionManager, SessionScope,
+    SystemCsRng,
+};
+pub use tls::{PinnedTlsClient, PinnedTlsServer, peer_spki_hash};
+pub use tls_types::{
+    AdmissionBinding, ClientPeer, ServerPeer, TlsAdmission, TlsCredentials, TlsError,
+};
+
 /// Platform-independent transport adapter.
 pub trait Transport {
     /// Exchanges one validated frame into caller-owned output storage.
@@ -24,4 +51,13 @@ pub enum TransportError {
         /// Required storage.
         required: usize,
     },
+    /// The standard TLS or paired-profile checks failed.
+    #[error("paired TLS validation failed")]
+    Rejected,
+    /// The one absolute I/O budget expired.
+    #[error("paired transport deadline expired")]
+    Deadline,
 }
+
+#[cfg(test)]
+mod task10_tests;

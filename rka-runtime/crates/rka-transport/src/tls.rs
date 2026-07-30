@@ -1,9 +1,4 @@
-use std::{
-    io::{Read, Write},
-    net::TcpStream,
-    sync::Arc,
-    time::Duration,
-};
+use std::{net::TcpStream, sync::Arc, time::Duration};
 
 use rka_protocol::{MAX_FRAME_BYTES, sha256};
 use rustls::{
@@ -16,7 +11,8 @@ use rustls::{
 };
 use webpki::anchor_from_trusted_cert;
 
-use crate::tls_io::{Deadline, map_io, read_frame, set_timeout, write_frame};
+use crate::tls_handshake::{complete_client_handshake, complete_server_handshake};
+use crate::tls_io::{Deadline, flush_bytes, read_exact, read_frame, write_bytes, write_frame};
 use crate::{AdmissionBinding, ClientPeer, ServerPeer, TlsAdmission, TlsCredentials, TlsError};
 
 /// TLS 1.3 candidate with standard `WebPKI` validation plus exact SPKI pinning.
@@ -68,10 +64,7 @@ impl PinnedTlsClient {
             self.expected_pin,
         )?;
         let mut token = [0_u8; 32];
-        set_timeout(&stream.sock, &deadline)?;
-        stream
-            .read_exact(&mut token)
-            .map_err(|error| map_io(&error))?;
+        read_exact(&mut stream, &mut token, &deadline)?;
         if token != self.binding.token() {
             return Err(TlsError::Admission);
         }
@@ -128,11 +121,8 @@ impl PinnedTlsServer {
             stream.conn.peer_certificates(),
             self.expected_pin,
         )?;
-        set_timeout(&stream.sock, &deadline)?;
-        stream
-            .write_all(&self.binding.token())
-            .and_then(|()| stream.flush())
-            .map_err(|error| map_io(&error))?;
+        write_bytes(&mut stream, &self.binding.token(), &deadline)?;
+        flush_bytes(&mut stream, &deadline)?;
         let request = read_frame(&mut stream, &deadline)?;
         let response = handler(&request)?;
         write_frame(&mut stream, &response, &deadline)
@@ -200,32 +190,4 @@ fn verify_common(
     } else {
         Err(TlsError::Pin)
     }
-}
-
-fn complete_client_handshake(
-    stream: &mut StreamOwned<ClientConnection, TcpStream>,
-    deadline: &Deadline,
-) -> Result<(), TlsError> {
-    while stream.conn.is_handshaking() {
-        set_timeout(&stream.sock, deadline)?;
-        stream
-            .conn
-            .complete_io(&mut stream.sock)
-            .map_err(|error| map_io(&error))?;
-    }
-    Ok(())
-}
-
-fn complete_server_handshake(
-    stream: &mut StreamOwned<ServerConnection, TcpStream>,
-    deadline: &Deadline,
-) -> Result<(), TlsError> {
-    while stream.conn.is_handshaking() {
-        set_timeout(&stream.sock, deadline)?;
-        stream
-            .conn
-            .complete_io(&mut stream.sock)
-            .map_err(|error| map_io(&error))?;
-    }
-    Ok(())
 }

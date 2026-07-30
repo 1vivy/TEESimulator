@@ -1,9 +1,9 @@
-use std::net::IpAddr;
+use std::{fmt, net::IpAddr};
 
 use rustls::pki_types::CertificateDer;
 use thiserror::Error;
 
-use crate::profile_id::profile_id;
+use crate::{SessionLifecycle, profile_id::profile_id};
 
 const MAX_ALLOWED_IDENTITIES: usize = 16;
 const MAX_TRUST_CERTIFICATES: usize = 8;
@@ -88,7 +88,7 @@ impl Endpoint {
 }
 
 /// Validated public profile consumed by one exact role.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PairedProfile {
     epoch: u64,
     local_role: Role,
@@ -103,8 +103,18 @@ pub struct PairedProfile {
     id: [u8; 32],
 }
 
+impl fmt::Debug for PairedProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PairedProfile")
+            .field("epoch", &self.epoch)
+            .field("role", &self.local_role)
+            .field("transport", &self.transport)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Fully parsed profile input.
-#[derive(Debug)]
 #[non_exhaustive]
 pub struct ProfileInput {
     /// Strictly nonzero profile epoch.
@@ -127,6 +137,12 @@ pub struct ProfileInput {
     pub root_hash: [u8; 32],
     /// Frozen policy binding.
     pub policy_version: u64,
+}
+
+impl fmt::Debug for ProfileInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProfileInput([redacted profile material])")
+    }
 }
 
 impl PairedProfile {
@@ -233,17 +249,17 @@ impl PairedProfile {
 pub struct ProfileRotation {
     active: PairedProfile,
     prepared: Option<PairedProfile>,
-    live_sessions: usize,
+    lifecycle: SessionLifecycle,
 }
 
 impl ProfileRotation {
     /// Creates rotation state around one validated profile.
     #[must_use]
-    pub const fn new(active: PairedProfile) -> Self {
+    pub const fn new(active: PairedProfile, lifecycle: SessionLifecycle) -> Self {
         Self {
             active,
             prepared: None,
-            live_sessions: 0,
+            lifecycle,
         }
     }
 
@@ -256,15 +272,17 @@ impl ProfileRotation {
             return Err(ProfileError::Rotation);
         }
         self.prepared = Some(next);
+        self.lifecycle.start_draining();
         Ok(())
     }
 
     /// Activates only after all old sessions are drained.
     pub fn activate(&mut self) -> Result<(), ProfileError> {
-        if self.live_sessions != 0 {
+        if self.lifecycle.has_live_sessions() {
             return Err(ProfileError::SessionsLive);
         }
         self.active = self.prepared.take().ok_or(ProfileError::Rotation)?;
+        self.lifecycle.finish_rotation();
         Ok(())
     }
 }

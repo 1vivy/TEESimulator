@@ -1,5 +1,5 @@
 use std::{
-    io::{Read, Write},
+    io::{self, Read, Write},
     net::TcpStream,
     time::{Duration, Instant},
 };
@@ -10,19 +10,91 @@ use rustls::{ClientConnection, ServerConnection, StreamOwned};
 use crate::TlsError;
 
 #[doc(hidden)]
-pub trait TlsStream: Read + Write {
+pub trait TlsStream {
     fn socket(&self) -> &TcpStream;
+    fn read_once(&mut self, output: &mut [u8]) -> io::Result<usize>;
+    fn write_once(&mut self, input: &[u8]) -> io::Result<usize>;
+    fn wants_flush(&self) -> bool;
+    fn flush_once(&mut self) -> io::Result<usize>;
 }
 
 impl TlsStream for StreamOwned<ClientConnection, TcpStream> {
     fn socket(&self) -> &TcpStream {
         &self.sock
     }
+
+    fn read_once(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        match self.conn.reader().read(output) {
+            Ok(length) if length > 0 => return Ok(length),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
+        if self.conn.read_tls(&mut self.sock)? == 0 {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        self.conn
+            .process_new_packets()
+            .map_err(|_| io::Error::other("TLS processing failed"))?;
+        match self.conn.reader().read(output) {
+            Ok(0) => Err(io::Error::from(io::ErrorKind::Interrupted)),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            }
+            result => result,
+        }
+    }
+
+    fn write_once(&mut self, input: &[u8]) -> io::Result<usize> {
+        self.conn.writer().write(input)
+    }
+
+    fn wants_flush(&self) -> bool {
+        self.conn.wants_write()
+    }
+
+    fn flush_once(&mut self) -> io::Result<usize> {
+        self.conn.write_tls(&mut self.sock)
+    }
 }
 
 impl TlsStream for StreamOwned<ServerConnection, TcpStream> {
     fn socket(&self) -> &TcpStream {
         &self.sock
+    }
+
+    fn read_once(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        match self.conn.reader().read(output) {
+            Ok(length) if length > 0 => return Ok(length),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
+        if self.conn.read_tls(&mut self.sock)? == 0 {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        self.conn
+            .process_new_packets()
+            .map_err(|_| io::Error::other("TLS processing failed"))?;
+        match self.conn.reader().read(output) {
+            Ok(0) => Err(io::Error::from(io::ErrorKind::Interrupted)),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            }
+            result => result,
+        }
+    }
+
+    fn write_once(&mut self, input: &[u8]) -> io::Result<usize> {
+        self.conn.writer().write(input)
+    }
+
+    fn wants_flush(&self) -> bool {
+        self.conn.wants_write()
+    }
+
+    fn flush_once(&mut self) -> io::Result<usize> {
+        self.conn.write_tls(&mut self.sock)
     }
 }
 
@@ -39,11 +111,15 @@ impl Deadline {
             .ok_or(TlsError::Deadline)
     }
 
-    fn remaining(&self) -> Result<Duration, TlsError> {
+    pub(crate) fn remaining(&self) -> Result<Duration, TlsError> {
         self.0
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
             .ok_or(TlsError::Deadline)
+    }
+
+    pub(crate) fn check(&self) -> Result<(), TlsError> {
+        self.remaining().map(|_| ())
     }
 }
 
@@ -57,31 +133,78 @@ pub fn write_frame<S: TlsStream>(
         return Err(TlsError::Frame);
     }
     let length = u32::try_from(bytes.len()).map_err(|_| TlsError::Frame)?;
-    set_timeout(stream.socket(), deadline)?;
-    stream
-        .write_all(&length.to_be_bytes())
-        .and_then(|()| stream.write_all(bytes))
-        .and_then(|()| stream.flush())
-        .map_err(|error| map_io(&error))
+    write_bytes(stream, &length.to_be_bytes(), deadline)?;
+    write_bytes(stream, bytes, deadline)?;
+    flush_bytes(stream, deadline)
 }
 
 #[doc(hidden)]
 pub fn read_frame<S: TlsStream>(stream: &mut S, deadline: &Deadline) -> Result<Vec<u8>, TlsError> {
     let mut header = [0_u8; 4];
-    set_timeout(stream.socket(), deadline)?;
-    stream
-        .read_exact(&mut header)
-        .map_err(|error| map_io(&error))?;
+    read_exact(stream, &mut header, deadline)?;
     let length = usize::try_from(u32::from_be_bytes(header)).map_err(|_| TlsError::Frame)?;
     if length == 0 || length > MAX_FRAME_BYTES {
         return Err(TlsError::Frame);
     }
     let mut bytes = vec![0_u8; length];
-    set_timeout(stream.socket(), deadline)?;
-    stream
-        .read_exact(&mut bytes)
-        .map_err(|error| map_io(&error))?;
+    read_exact(stream, &mut bytes, deadline)?;
     Ok(bytes)
+}
+
+#[doc(hidden)]
+pub fn read_exact<S: TlsStream>(
+    stream: &mut S,
+    mut output: &mut [u8],
+    deadline: &Deadline,
+) -> Result<(), TlsError> {
+    while !output.is_empty() {
+        flush_bytes(stream, deadline)?;
+        set_timeout(stream.socket(), deadline)?;
+        let length = match stream.read_once(output) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                deadline.check()?;
+                continue;
+            }
+            result => result.map_err(|error| map_io(&error))?,
+        };
+        deadline.check()?;
+        if length == 0 {
+            return Err(TlsError::Io);
+        }
+        output = output.get_mut(length..).ok_or(TlsError::Io)?;
+    }
+    Ok(())
+}
+
+#[doc(hidden)]
+pub fn write_bytes<S: TlsStream>(
+    stream: &mut S,
+    mut input: &[u8],
+    deadline: &Deadline,
+) -> Result<(), TlsError> {
+    while !input.is_empty() {
+        set_timeout(stream.socket(), deadline)?;
+        let length = stream.write_once(input).map_err(|error| map_io(&error))?;
+        deadline.check()?;
+        if length == 0 {
+            return Err(TlsError::Io);
+        }
+        input = input.get(length..).ok_or(TlsError::Io)?;
+    }
+    Ok(())
+}
+
+#[doc(hidden)]
+pub fn flush_bytes<S: TlsStream>(stream: &mut S, deadline: &Deadline) -> Result<(), TlsError> {
+    while stream.wants_flush() {
+        set_timeout(stream.socket(), deadline)?;
+        let length = stream.flush_once().map_err(|error| map_io(&error))?;
+        deadline.check()?;
+        if length == 0 {
+            return Err(TlsError::Io);
+        }
+    }
+    Ok(())
 }
 
 #[doc(hidden)]

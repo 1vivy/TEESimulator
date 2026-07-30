@@ -1,3 +1,4 @@
+use core::fmt;
 use std::time::Duration;
 
 use rka_protocol::sha256;
@@ -33,11 +34,16 @@ impl AdmissionBinding {
 }
 
 /// Bounded certificate chain and secret signing key for rustls.
-#[derive(Debug)]
 #[non_exhaustive]
 pub struct TlsCredentials {
     pub(crate) chain: Vec<CertificateDer<'static>>,
     pub(crate) key: PrivateKeyDer<'static>,
+}
+
+impl fmt::Debug for TlsCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TlsCredentials([redacted identity material])")
+    }
 }
 
 impl TlsCredentials {
@@ -49,12 +55,17 @@ impl TlsCredentials {
 }
 
 /// Exact server trust, name, and pin expected by a candidate.
-#[derive(Debug)]
 #[non_exhaustive]
 pub struct ClientPeer {
     pub(crate) trust: Vec<CertificateDer<'static>>,
     pub(crate) name: ServerName<'static>,
     pub(crate) pin: [u8; 32],
+}
+
+impl fmt::Debug for ClientPeer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ClientPeer([redacted trust and pin])")
+    }
 }
 
 impl ClientPeer {
@@ -70,11 +81,16 @@ impl ClientPeer {
 }
 
 /// Exact candidate trust and pin expected by a donor.
-#[derive(Debug)]
 #[non_exhaustive]
 pub struct ServerPeer {
     pub(crate) trust: Vec<CertificateDer<'static>>,
     pub(crate) pin: [u8; 32],
+}
+
+impl fmt::Debug for ServerPeer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ServerPeer([redacted trust and pin])")
+    }
 }
 
 impl ServerPeer {

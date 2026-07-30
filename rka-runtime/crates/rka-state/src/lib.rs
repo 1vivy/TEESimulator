@@ -3,6 +3,8 @@
 use thiserror::Error;
 
 mod replay;
+#[doc(hidden)]
+pub mod replay_codec;
 mod sensitive;
 
 pub use replay::{PersistedTombstone, ReplayManager, TombstoneTime};

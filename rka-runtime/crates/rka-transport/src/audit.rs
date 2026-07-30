@@ -20,19 +20,19 @@ const MAX_RECEIPTS: usize = 128;
 #[non_exhaustive]
 pub struct AuditEntry {
     /// Frozen stage tag.
-    pub stage: Stage,
+    pub(crate) stage: Stage,
     /// Frozen request kind.
-    pub request_kind: MessageKind,
+    pub(crate) request_kind: MessageKind,
     /// Frozen RKA failure code.
-    pub error: RkaErrorCode,
+    pub(crate) error: RkaErrorCode,
     /// Hashed, redacted correlation.
-    pub correlation_hash: [u8; 32],
+    pub(crate) correlation_hash: [u8; 32],
 }
 
 impl AuditEntry {
     /// Creates one redacted event from frozen tags and a hashed correlation.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         tags: (Stage, MessageKind),
         error: RkaErrorCode,
         correlation_hash: [u8; 32],
@@ -41,7 +41,7 @@ impl AuditEntry {
             stage: tags.0,
             request_kind: tags.1,
             error,
-            correlation_hash,
+            correlation_hash: sha256(&correlation_hash),
         }
     }
 }
@@ -58,11 +58,11 @@ pub struct ReceiptContext {
 impl ReceiptContext {
     /// Creates receipt coordinates without accepting an audit head or sequence.
     #[must_use]
-    pub const fn new(epoch: u64, transport: TransportKind, correlation: [u8; 32]) -> Self {
+    pub fn new(epoch: u64, transport: TransportKind, correlation: [u8; 32]) -> Self {
         Self {
             epoch,
             transport,
-            correlation,
+            correlation: sha256(&correlation),
         }
     }
 
@@ -215,6 +215,12 @@ impl ReceiptVerifier {
         }
         self.seen.push(digest);
         Ok(())
+    }
+
+    /// Parses and verifies exact canonical receipt bytes.
+    pub fn verify_encoded(&mut self, bytes: &[u8]) -> Result<(), AuditError> {
+        let (body, signature) = crate::audit_codec::decode_receipt(bytes)?;
+        self.verify(&AuditReceipt { body, signature })
     }
 }
 

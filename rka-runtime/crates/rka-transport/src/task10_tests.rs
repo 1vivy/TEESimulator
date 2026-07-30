@@ -1,11 +1,12 @@
 use std::{
     collections::{BTreeMap, VecDeque},
+    io::{Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use rcgen::{
@@ -17,17 +18,20 @@ use ring::{
     signature::{Ed25519KeyPair, KeyPair as RingKeyPair},
 };
 use rka_protocol::{
-    MessageKind, PeerSpkiHash, RequestId, RkaErrorCode, SessionId, Stage, request_tombstone,
+    AUDIT_DOMAIN, MessageKind, PeerSpkiHash, RequestId, RkaErrorCode, SessionId, Stage,
+    request_tombstone, sha256,
 };
 use rka_state::{ReplayManager, StateError, StateStore, TombstoneTime};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
 
 use super::{
     AdmissionBinding, AuditChain, AuditEntry, ClientPeer, CsRng, Endpoint, PairedProfile,
-    PinnedTlsClient, PinnedTlsServer, ProfileInput, ProfileRotation, ReceiptContext,
-    ReceiptVerifier, Role, ServerPeer, SessionError, SessionManager, SessionScope, TlsAdmission,
-    TlsCredentials, TlsError, TransportKind, peer_spki_hash,
+    PinnedTlsClient, PinnedTlsServer, ProfileError, ProfileInput, ProfileRotation, ReceiptContext,
+    ReceiptVerifier, RequestContext, Role, ServerPeer, SessionError, SessionLifecycle,
+    SessionManager, SessionScope, TlsAdmission, TlsCredentials, TlsError, TransportKind,
+    peer_spki_hash,
 };
+use crate::tls_io::{Deadline, TlsStream, read_frame};
 use zeroize::Zeroizing;
 
 #[derive(Debug)]
@@ -74,6 +78,46 @@ impl StateStore for MemoryStore {
             .map_err(|_| StateError::Storage)?
             .insert(key.to_vec(), value.to_vec());
         Ok(())
+    }
+}
+
+struct RawTlsStream(TcpStream);
+
+impl Read for RawTlsStream {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(output)
+    }
+}
+
+impl Write for RawTlsStream {
+    fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+        self.0.write(input)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl TlsStream for RawTlsStream {
+    fn socket(&self) -> &TcpStream {
+        &self.0
+    }
+
+    fn read_once(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        self.read(output)
+    }
+
+    fn write_once(&mut self, input: &[u8]) -> std::io::Result<usize> {
+        self.write(input)
+    }
+
+    fn wants_flush(&self) -> bool {
+        false
+    }
+
+    fn flush_once(&mut self) -> std::io::Result<usize> {
+        self.flush().map(|()| 1)
     }
 }
 
@@ -318,6 +362,225 @@ fn replay_tombstone_survives_restart() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[test]
+fn retained_session_id_is_skipped_after_restart() -> Result<(), Box<dyn std::error::Error>> {
+    let store = MemoryStore::new();
+    {
+        let mut manager = SessionManager::load(
+            &store,
+            SequenceRng::new(vec![vec![1; 32], vec![2; 32]]),
+            (
+                SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+                SessionLifecycle::new(),
+            ),
+        )?;
+        let _session = manager.open_candidate(0)?;
+    }
+    let mut restarted = SessionManager::load(
+        &store,
+        SequenceRng::new(vec![vec![1; 32], vec![3; 32], vec![4; 32]]),
+        (
+            SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+            SessionLifecycle::new(),
+        ),
+    )?;
+    assert_eq!(restarted.open_candidate(1)?.id().bytes(), [3; 32]);
+    Ok(())
+}
+
+#[test]
+fn retained_request_id_rejects_cross_kind_after_restart() -> Result<(), Box<dyn std::error::Error>>
+{
+    let store = MemoryStore::new();
+    let retained = RequestId::new([9; 16]);
+    {
+        let mut manager = SessionManager::load(
+            &store,
+            SequenceRng::new(vec![vec![1; 32], vec![2; 32]]),
+            (
+                SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+                SessionLifecycle::new(),
+            ),
+        )?;
+        let session = manager.open_candidate(0)?;
+        let _permit = manager.admit_request_id(
+            RequestContext::new(session.id(), MessageKind::Finish, 1),
+            retained,
+        )?;
+    }
+    let mut restarted = SessionManager::load(
+        &store,
+        SequenceRng::new(vec![vec![3; 32], vec![4; 32]]),
+        (
+            SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+            SessionLifecycle::new(),
+        ),
+    )?;
+    let session = restarted.open_candidate(2)?;
+    assert!(matches!(
+        restarted.admit_request_id(
+            RequestContext::new(session.id(), MessageKind::Abort, 3),
+            retained,
+        ),
+        Err(SessionError::Replay)
+    ));
+    Ok(())
+}
+
+#[test]
+fn generated_request_id_skips_retained_value_after_restart()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = MemoryStore::new();
+    {
+        let mut manager = SessionManager::load(
+            &store,
+            SequenceRng::new(vec![vec![1; 32], vec![2; 32]]),
+            (
+                SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+                SessionLifecycle::new(),
+            ),
+        )?;
+        let session = manager.open_candidate(0)?;
+        let _pending = manager.admit_request_id(
+            RequestContext::new(session.id(), MessageKind::Finish, 1),
+            RequestId::new([9; 16]),
+        )?;
+    }
+    let mut restarted = SessionManager::load(
+        &store,
+        SequenceRng::new(vec![vec![3; 32], vec![4; 32], vec![9; 16], vec![10; 16]]),
+        (
+            SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+            SessionLifecycle::new(),
+        ),
+    )?;
+    let session = restarted.open_candidate(2)?;
+    let pending =
+        restarted.persist_request(RequestContext::new(session.id(), MessageKind::Abort, 3))?;
+    assert_eq!(pending.correlation().0.bytes(), [10; 16]);
+    Ok(())
+}
+
+#[test]
+fn repeated_retained_rng_values_exhaust_finite_budget() -> Result<(), Box<dyn std::error::Error>> {
+    let store = MemoryStore::new();
+    {
+        let mut manager = SessionManager::load(
+            &store,
+            SequenceRng::new(vec![vec![1; 32], vec![2; 32]]),
+            (
+                SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+                SessionLifecycle::new(),
+            ),
+        )?;
+        let _session = manager.open_candidate(0)?;
+    }
+    let repeated = (0..8).map(|_| vec![1; 32]).collect();
+    let mut restarted = SessionManager::load(
+        &store,
+        SequenceRng::new(repeated),
+        (
+            SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+            SessionLifecycle::new(),
+        ),
+    )?;
+    assert!(matches!(
+        restarted.open_candidate(1),
+        Err(SessionError::RandomExhausted)
+    ));
+    Ok(())
+}
+
+#[test]
+fn duplicate_persisted_namespace_record_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let store = MemoryStore::new();
+    {
+        let mut manager = SessionManager::load(
+            &store,
+            SequenceRng::new(vec![vec![1; 32], vec![2; 32]]),
+            (
+                SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+                SessionLifecycle::new(),
+            ),
+        )?;
+        let _session = manager.open_candidate(0)?;
+    }
+    let key = b"rka-replay-v2".to_vec();
+    let mut records = store.records.lock().map_err(|_| StateError::Storage)?;
+    let original = records.get(&key).cloned().ok_or(StateError::Missing)?;
+    let entry = original.get(1..).ok_or(StateError::Corrupt)?;
+    let mut duplicate = Vec::with_capacity(entry.len().saturating_mul(2).saturating_add(1));
+    duplicate.push(0x82);
+    duplicate.extend_from_slice(entry);
+    duplicate.extend_from_slice(entry);
+    records.insert(key, duplicate);
+    drop(records);
+    assert!(matches!(
+        ReplayManager::load(&store),
+        Err(StateError::Corrupt)
+    ));
+    Ok(())
+}
+
+#[test]
+fn pending_response_rejects_id_kind_and_sequence_mutations()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = MemoryStore::new();
+    let mut manager = SessionManager::load(
+        &store,
+        SequenceRng::new(vec![vec![1; 32], vec![2; 32]]),
+        (
+            SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+            SessionLifecycle::new(),
+        ),
+    )?;
+    let session = manager.open_candidate(0)?;
+    let context = RequestContext::new(session.id(), MessageKind::Finish, 1);
+    let wrong_id = manager.admit_request_id(context, RequestId::new([10; 16]))?;
+    assert!(matches!(
+        wrong_id.accept((RequestId::new([99; 16]), MessageKind::Result, 0)),
+        Err(SessionError::Correlation)
+    ));
+    let wrong_kind = manager.admit_request_id(context, RequestId::new([11; 16]))?;
+    assert!(matches!(
+        wrong_kind.accept((RequestId::new([11; 16]), MessageKind::Error, 1)),
+        Err(SessionError::Correlation)
+    ));
+    let wrong_sequence = manager.admit_request_id(context, RequestId::new([12; 16]))?;
+    assert!(matches!(
+        wrong_sequence.accept((RequestId::new([12; 16]), MessageKind::Result, 99)),
+        Err(SessionError::Correlation)
+    ));
+    let exact = manager.admit_request_id(context, RequestId::new([13; 16]))?;
+    let _accepted = exact.accept((RequestId::new([13; 16]), MessageKind::Result, 3))?;
+    Ok(())
+}
+
+#[test]
+fn slow_drip_frame_cannot_reset_absolute_deadline() -> Result<(), Box<dyn std::error::Error>> {
+    let (reader, mut writer) = connected_pair()?;
+    let worker = std::thread::spawn(move || {
+        for byte in [0_u8, 0, 0, 2, b'o', b'k'] {
+            std::thread::sleep(Duration::from_millis(8));
+            if writer.write_all(&[byte]).is_err() {
+                break;
+            }
+        }
+    });
+    let started = Instant::now();
+    let result = read_frame(
+        &mut RawTlsStream(reader),
+        &Deadline::new(Duration::from_millis(20))?,
+    );
+    let elapsed = started.elapsed();
+    assert_eq!(result, Err(TlsError::Deadline));
+    assert!(elapsed < Duration::from_millis(60));
+    if worker.join().is_err() {
+        return Err("slow-drip worker failed".into());
+    }
+    Ok(())
+}
+
+#[test]
 fn diagnostic_transport_never_satisfies_direct() {
     assert!(
         !super::TransportKind::DiagnosticUsbRelay.satisfies_direct(),
@@ -361,6 +624,36 @@ fn persistence_failure_prevents_permit() -> Result<(), StateError> {
     Ok(())
 }
 
+#[test]
+fn session_persistence_failure_releases_unexposed_lease() -> Result<(), Box<dyn std::error::Error>>
+{
+    let lifecycle = SessionLifecycle::new();
+    let failing = MemoryStore {
+        records: Mutex::new(BTreeMap::new()),
+        fail_replace: true,
+    };
+    let mut rejected = SessionManager::load(
+        &failing,
+        SequenceRng::new(vec![vec![1; 32], vec![2; 32]]),
+        (
+            SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+            lifecycle.clone(),
+        ),
+    )?;
+    assert!(matches!(
+        rejected.open_candidate(0),
+        Err(SessionError::State(StateError::Storage))
+    ));
+    let durable = MemoryStore::new();
+    let mut admitted = SessionManager::load(
+        &durable,
+        SequenceRng::new(vec![vec![1; 32], vec![3; 32]]),
+        (SessionScope::new(PeerSpkiHash::new([5; 32]), 9), lifecycle),
+    )?;
+    assert_eq!(admitted.open_candidate(1)?.id().bytes(), [1; 32]);
+    Ok(())
+}
+
 #[derive(Debug)]
 struct SequenceRng {
     values: Mutex<VecDeque<Vec<u8>>>,
@@ -400,14 +693,22 @@ fn session_bounds_and_correlation_are_exact() -> Result<(), Box<dyn std::error::
     let mut manager = SessionManager::load(
         &store,
         SequenceRng::new(random),
-        SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+        (
+            SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+            SessionLifecycle::new(),
+        ),
     )?;
     let first = manager.open_candidate(0)?;
     assert_ne!(first.id().bytes(), first.candidate_nonce());
+    let mut leases = vec![first];
     for _ in 0..3 {
-        let _session = manager.open_candidate(0)?;
+        leases.push(manager.open_candidate(0)?);
     }
-    assert_eq!(manager.open_candidate(0), Err(SessionError::Capacity));
+    assert!(matches!(
+        manager.open_candidate(0),
+        Err(SessionError::Capacity)
+    ));
+    assert_eq!(leases.len(), 4);
     Ok(())
 }
 
@@ -442,8 +743,16 @@ fn profile_roles_hash_the_same_public_map() -> Result<(), Box<dyn std::error::Er
     })?;
     assert_eq!(donor.id(), candidate.id());
     assert!(candidate.transport().satisfies_direct());
-    let mut rotation = ProfileRotation::new(candidate.clone());
+    let lifecycle = SessionLifecycle::new();
+    let mut rotation = ProfileRotation::new(candidate.clone(), lifecycle.clone());
     assert!(rotation.prepare(candidate).is_err());
+    let store = MemoryStore::new();
+    let mut manager = SessionManager::load(
+        &store,
+        SequenceRng::new(vec![vec![7; 32], vec![8; 32]]),
+        (SessionScope::new(PeerSpkiHash::new([5; 32]), 3), lifecycle),
+    )?;
+    let live = manager.open_candidate(0)?;
     let rotated = test_pki()?;
     rotation.prepare(PairedProfile::parse(ProfileInput {
         epoch: 4,
@@ -457,6 +766,12 @@ fn profile_roles_hash_the_same_public_map() -> Result<(), Box<dyn std::error::Er
         root_hash: [2; 32],
         policy_version: 1,
     })?)?;
+    assert_eq!(rotation.activate(), Err(ProfileError::SessionsLive));
+    assert!(matches!(
+        manager.open_candidate(1),
+        Err(SessionError::Draining)
+    ));
+    live.close();
     rotation.activate()?;
     Ok(())
 }
@@ -468,20 +783,33 @@ fn audit_chain_signs_redacted_receipt_and_rejects_replay() -> Result<(), Box<dyn
     let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())?;
     let private = Zeroizing::new(pkcs8.as_ref().to_vec());
     let mut chain = AuditChain::load(&store, &private)?;
-    chain.append(AuditEntry::new(
+    let entry = AuditEntry::new(
         (Stage::Transport, MessageKind::Finish),
         RkaErrorCode::InvalidRequest,
         [7; 32],
-    ))?;
+    );
+    let mut preimage = Vec::new();
+    preimage.extend_from_slice(AUDIT_DOMAIN);
+    preimage.extend_from_slice(&[0; 32]);
+    preimage.extend_from_slice(&super::audit_codec::entry_cbor(entry));
+    assert_eq!(chain.append(entry)?, sha256(&preimage));
+    let raw_correlation = [0xa7; 32];
     let receipt = chain.receipt(ReceiptContext::new(
         8,
         TransportKind::DirectPinnedTls,
-        [9; 32],
+        raw_correlation,
     ));
+    assert!(
+        !receipt
+            .encode()
+            .windows(raw_correlation.len())
+            .any(|window| window == raw_correlation)
+    );
+    let encoded = receipt.encode();
     let mut verifier = ReceiptVerifier::new(chain.public_key());
-    verifier.verify(&receipt)?;
+    verifier.verify_encoded(&encoded)?;
     assert!(matches!(
-        verifier.verify(&receipt),
+        verifier.verify_encoded(&encoded),
         Err(super::audit::AuditError::Replay)
     ));
     assert!(!format!("{receipt:?}").contains("070707"));
@@ -489,6 +817,50 @@ fn audit_chain_signs_redacted_receipt_and_rejects_replay() -> Result<(), Box<dyn
     tampered.flip_signature_bit();
     let mut fresh = ReceiptVerifier::new(chain.public_key());
     assert!(fresh.verify(&tampered).is_err());
+    let mut wrong_key = ReceiptVerifier::new([0x42; 32]);
+    assert!(wrong_key.verify_encoded(&encoded).is_err());
+    let mut truncated = ReceiptVerifier::new(chain.public_key());
+    assert!(
+        truncated
+            .verify_encoded(
+                encoded
+                    .get(..encoded.len().saturating_sub(1))
+                    .ok_or("receipt")?
+            )
+            .is_err()
+    );
+    let mut extended_bytes = encoded.clone();
+    extended_bytes.push(0);
+    let mut extended = ReceiptVerifier::new(chain.public_key());
+    assert!(extended.verify_encoded(&extended_bytes).is_err());
+    let mut captured = encoded;
+    for value in store
+        .records
+        .lock()
+        .map_err(|_| StateError::Storage)?
+        .values()
+    {
+        captured.extend_from_slice(value);
+    }
+    captured.extend_from_slice(format!("{chain:?}{receipt:?}").as_bytes());
+    captured.extend_from_slice(super::audit::AuditError::Receipt.to_string().as_bytes());
+    let forbidden = [
+        raw_correlation.as_slice(),
+        private.as_slice(),
+        b"session-id-canary-unique-01".as_slice(),
+        b"request-id-canary-unique-02".as_slice(),
+        b"alias-package-canary-unique-03".as_slice(),
+        b"certificate-key-canary-unique-04".as_slice(),
+        b"blob-token-bearer-canary-unique-05".as_slice(),
+        b"/data/adb/modules/canary/private/key".as_slice(),
+    ];
+    for canary in forbidden {
+        assert!(
+            !captured
+                .windows(canary.len())
+                .any(|window| window == canary)
+        );
+    }
     let restarted = AuditChain::load(&store, &private)?;
     let second = restarted.receipt(ReceiptContext::new(
         8,

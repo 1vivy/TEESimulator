@@ -11,7 +11,12 @@ mod profile;
 #[doc(hidden)]
 pub mod profile_id;
 mod session;
+#[doc(hidden)]
+pub mod session_lifecycle;
+mod session_types;
 mod tls;
+#[doc(hidden)]
+pub mod tls_handshake;
 #[doc(hidden)]
 pub mod tls_io;
 mod tls_types;
@@ -21,8 +26,10 @@ pub use identity::{IdentityError, TransportIdentity};
 pub use profile::{
     Endpoint, PairedProfile, ProfileError, ProfileInput, ProfileRotation, Role, TransportKind,
 };
-pub use session::{
-    CsRng, LiveSession, RequestContext, RequestPermit, SessionError, SessionManager, SessionScope,
+pub use session::SessionManager;
+pub use session_lifecycle::{LiveSessionLease, SessionLifecycle};
+pub use session_types::{
+    AcceptedResponse, CsRng, PendingRequest, RequestContext, SessionError, SessionScope,
     SystemCsRng,
 };
 pub use tls::{PinnedTlsClient, PinnedTlsServer, peer_spki_hash};

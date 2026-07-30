@@ -1,130 +1,40 @@
-use ring::rand::{SecureRandom, SystemRandom};
 use rka_protocol::{
     MessageKind, PeerSpkiHash, RequestId, SessionId, request_tombstone, session_tombstone,
 };
-use rka_state::{PersistedTombstone, ReplayManager, StateError, StateStore, TombstoneTime};
-use thiserror::Error;
+use rka_state::{ReplayManager, StateError, StateStore, TombstoneTime};
 
-const MAX_SESSIONS: usize = 4;
-const IDLE_SECONDS: u64 = 30;
-const TTL_SECONDS: u64 = 120;
 const MAX_ADMISSION_FAILURES: u8 = 8;
-
-/// Fixed paired-peer coordinates for a session manager.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub struct SessionScope {
-    peer: PeerSpkiHash,
-    epoch: u64,
-}
-
-impl SessionScope {
-    /// Creates nonzero-epoch peer coordinates.
-    #[must_use]
-    pub const fn new(peer: PeerSpkiHash, epoch: u64) -> Self {
-        Self { peer, epoch }
-    }
-}
-
-/// Correlation and time for one candidate-generated request.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub struct RequestContext {
-    session: SessionId,
-    kind: MessageKind,
-    now: u64,
-}
-
-impl RequestContext {
-    /// Creates request coordinates under one live session.
-    #[must_use]
-    pub const fn new(session: SessionId, kind: MessageKind, now: u64) -> Self {
-        Self { session, kind, now }
-    }
-}
-
-/// Injectable cryptographically secure random source.
-pub trait CsRng {
-    /// Fills the complete output or fails closed.
-    fn fill(&self, output: &mut [u8]) -> Result<(), SessionError>;
-}
-
-/// Production randomness backed by ring `SystemRandom`.
-#[derive(Debug)]
-pub struct SystemCsRng(SystemRandom);
-
-impl Default for SystemCsRng {
-    fn default() -> Self {
-        Self(SystemRandom::new())
-    }
-}
-
-impl CsRng for SystemCsRng {
-    fn fill(&self, output: &mut [u8]) -> Result<(), SessionError> {
-        self.0.fill(output).map_err(|_| SessionError::Random)
-    }
-}
-
-/// Authenticated session with candidate-owned identifiers.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LiveSession {
-    id: SessionId,
-    candidate_nonce: [u8; 32],
-    created: u64,
-    last_activity: u64,
-}
-
-impl LiveSession {
-    /// Returns the candidate-owned session identifier.
-    #[must_use]
-    pub const fn id(self) -> SessionId {
-        self.id
-    }
-
-    /// Returns the candidate nonce, which is distinct from the session ID.
-    #[must_use]
-    pub const fn candidate_nonce(self) -> [u8; 32] {
-        self.candidate_nonce
-    }
-}
-
-/// Opaque proof that dispatch may occur after persistence.
-#[derive(Debug)]
-pub struct RequestPermit {
-    request_id: RequestId,
-    kind: MessageKind,
-    persisted: PersistedTombstone,
-}
-
-impl RequestPermit {
-    /// Returns correlation values that every response must copy.
-    #[must_use]
-    pub const fn correlation(&self) -> (RequestId, MessageKind) {
-        (self.request_id, self.kind)
-    }
-
-    /// Returns the persisted canonical request tuple.
-    #[must_use]
-    pub fn replay_key(&self) -> &[u8] {
-        self.persisted.key()
-    }
-}
+use crate::{
+    LiveSessionLease, SessionLifecycle,
+    session_lifecycle::LifecycleError,
+    session_types::{CsRng, PendingRequest, RequestContext, SessionError, SessionScope},
+};
 
 /// Bounded session and replay coordinator.
-#[derive(Debug)]
 pub struct SessionManager<'a, S: StateStore, R: CsRng> {
     peer: PeerSpkiHash,
     epoch: u64,
     replay: ReplayManager<'a, S>,
     rng: R,
-    sessions: Vec<LiveSession>,
-    requests: Vec<(RequestId, MessageKind)>,
+    lifecycle: SessionLifecycle,
+    next_sequence: u32,
     failures: u8,
+}
+
+impl<S: StateStore, R: CsRng> fmt::Debug for SessionManager<'_, S, R> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SessionManager([redacted session state])")
+    }
 }
 
 impl<'a, S: StateStore, R: CsRng> SessionManager<'a, S, R> {
     /// Loads persistent replay state for one paired peer and epoch.
-    pub fn load(store: &'a S, rng: R, scope: SessionScope) -> Result<Self, SessionError> {
+    pub fn load(
+        store: &'a S,
+        rng: R,
+        authority: (SessionScope, SessionLifecycle),
+    ) -> Result<Self, SessionError> {
+        let (scope, lifecycle) = authority;
         if scope.epoch == 0 {
             return Err(SessionError::Profile);
         }
@@ -133,56 +43,52 @@ impl<'a, S: StateStore, R: CsRng> SessionManager<'a, S, R> {
             epoch: scope.epoch,
             replay: ReplayManager::load(store)?,
             rng,
-            sessions: Vec::with_capacity(MAX_SESSIONS),
-            requests: Vec::with_capacity(64),
+            lifecycle,
+            next_sequence: 0,
             failures: 0,
         })
     }
 
     /// Opens one candidate-owned session and persists its replay tombstone.
-    pub fn open_candidate(&mut self, now: u64) -> Result<LiveSession, SessionError> {
-        if self.sessions.len() >= MAX_SESSIONS {
-            return Err(SessionError::Capacity);
+    pub fn open_candidate(&mut self, now: u64) -> Result<LiveSessionLease, SessionError> {
+        self.lifecycle.check_admission().map_err(map_lifecycle)?;
+        for _ in 0..8 {
+            let session_id = SessionId::new(self.random_array()?);
+            if self.replay.session_id_retained(session_id.bytes())
+                || self.lifecycle.contains(session_id)
+            {
+                continue;
+            }
+            let nonce = self.random_array()?;
+            if nonce == session_id.bytes() {
+                continue;
+            }
+            let lease = match self.lifecycle.acquire((session_id, nonce, now)) {
+                Ok(lease) => lease,
+                Err(LifecycleError::Duplicate) => continue,
+                Err(error) => return Err(map_lifecycle(error)),
+            };
+            let key = session_tombstone(self.peer, self.epoch, session_id);
+            match self.replay.persist_session(
+                (&key, session_id.bytes()),
+                TombstoneTime::new(now, self.epoch),
+            ) {
+                Ok(_) => return Ok(lease),
+                Err(StateError::Replay) => {}
+                Err(error) => return Err(SessionError::State(error)),
+            }
         }
-        let session_id = self.unique_session_id()?;
-        let mut nonce = [0_u8; 32];
-        self.rng.fill(&mut nonce)?;
-        if nonce == session_id.bytes() {
-            return Err(SessionError::Collision);
-        }
-        let key = session_tombstone(self.peer, self.epoch, session_id);
-        self.replay
-            .persist(&key, TombstoneTime::new(now, self.epoch))?;
-        let session = LiveSession {
-            id: session_id,
-            candidate_nonce: nonce,
-            created: now,
-            last_activity: now,
-        };
-        self.sessions.push(session);
-        Ok(session)
+        Err(SessionError::RandomExhausted)
     }
 
     /// Persists correlation before releasing a non-idempotent dispatch permit.
     pub fn persist_request(
         &mut self,
         request: RequestContext,
-    ) -> Result<RequestPermit, SessionError> {
+    ) -> Result<PendingRequest, SessionError> {
         self.require_live(request.session, request.now)?;
         let request_id = self.unique_request_id()?;
-        let key = request_tombstone(
-            (self.peer, self.epoch, request.session),
-            (request_id, request.kind),
-        );
-        let persisted = self
-            .replay
-            .persist(&key, TombstoneTime::new(request.now, self.epoch))?;
-        self.requests.push((request_id, request.kind));
-        Ok(RequestPermit {
-            request_id,
-            kind: request.kind,
-            persisted,
-        })
+        self.persist_pending(request, request_id)
     }
 
     /// Rejects reuse, including the same ID under another request kind.
@@ -190,24 +96,34 @@ impl<'a, S: StateStore, R: CsRng> SessionManager<'a, S, R> {
         &mut self,
         request: RequestContext,
         request_id: RequestId,
-    ) -> Result<RequestPermit, SessionError> {
+    ) -> Result<PendingRequest, SessionError> {
         self.require_live(request.session, request.now)?;
-        if self.requests.iter().any(|(seen, _)| *seen == request_id) {
+        if self.replay.request_id_retained(request_id.bytes()) {
             return Err(SessionError::Replay);
         }
+        self.persist_pending(request, request_id)
+    }
+
+    fn persist_pending(
+        &mut self,
+        request: RequestContext,
+        request_id: RequestId,
+    ) -> Result<PendingRequest, SessionError> {
+        let expected = expected_response(request.kind)?;
+        let sequence = self.next_sequence;
         let key = request_tombstone(
             (self.peer, self.epoch, request.session),
             (request_id, request.kind),
         );
-        let persisted = self
-            .replay
-            .persist(&key, TombstoneTime::new(request.now, self.epoch))?;
-        self.requests.push((request_id, request.kind));
-        Ok(RequestPermit {
-            request_id,
-            kind: request.kind,
+        let persisted = self.replay.persist_request(
+            (&key, request_id.bytes()),
+            TombstoneTime::new(request.now, self.epoch),
+        )?;
+        self.next_sequence = sequence.checked_add(1).ok_or(SessionError::Capacity)?;
+        Ok(PendingRequest::new(
+            (request_id, expected, sequence),
             persisted,
-        })
+        ))
     }
 
     /// Consumes one local admission-error budget unit.
@@ -219,34 +135,8 @@ impl<'a, S: StateStore, R: CsRng> SessionManager<'a, S, R> {
         Ok(())
     }
 
-    fn require_live(&mut self, id: SessionId, now: u64) -> Result<(), SessionError> {
-        let session = self
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == id)
-            .ok_or(SessionError::Missing)?;
-        if now < session.last_activity {
-            return Err(SessionError::TimeRegression);
-        }
-        if now.saturating_sub(session.last_activity) >= IDLE_SECONDS
-            || now.saturating_sub(session.created) >= TTL_SECONDS
-        {
-            return Err(SessionError::Expired);
-        }
-        session.last_activity = now;
-        Ok(())
-    }
-
-    fn unique_session_id(&self) -> Result<SessionId, SessionError> {
-        for _ in 0..8 {
-            let mut bytes = [0_u8; 32];
-            self.rng.fill(&mut bytes)?;
-            let id = SessionId::new(bytes);
-            if !self.sessions.iter().any(|session| session.id == id) {
-                return Ok(id);
-            }
-        }
-        Err(SessionError::Collision)
+    fn require_live(&self, id: SessionId, now: u64) -> Result<(), SessionError> {
+        self.lifecycle.touch(id, now).map_err(map_lifecycle)
     }
 
     fn unique_request_id(&self) -> Result<RequestId, SessionError> {
@@ -254,46 +144,46 @@ impl<'a, S: StateStore, R: CsRng> SessionManager<'a, S, R> {
             let mut bytes = [0_u8; 16];
             self.rng.fill(&mut bytes)?;
             let id = RequestId::new(bytes);
-            if !self.requests.iter().any(|(request, _)| *request == id) {
+            if !self.replay.request_id_retained(id.bytes()) {
                 return Ok(id);
             }
         }
-        Err(SessionError::Collision)
+        Err(SessionError::RandomExhausted)
+    }
+
+    fn random_array<const N: usize>(&self) -> Result<[u8; N], SessionError> {
+        let mut bytes = [0_u8; N];
+        self.rng.fill(&mut bytes)?;
+        Ok(bytes)
     }
 }
 
-/// Session admission and replay failures.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-#[non_exhaustive]
-pub enum SessionError {
-    /// Randomness could not be obtained.
-    #[error("secure randomness failed")]
-    Random,
-    /// A bounded random collision budget was consumed.
-    #[error("identifier collision budget exhausted")]
-    Collision,
-    /// Live session capacity was reached.
-    #[error("session capacity reached")]
-    Capacity,
-    /// Profile epoch is invalid.
-    #[error("profile epoch is invalid")]
-    Profile,
-    /// The session is unknown.
-    #[error("session is not live")]
-    Missing,
-    /// Idle or total lifetime boundary was reached.
-    #[error("session expired")]
-    Expired,
-    /// A replay was observed.
-    #[error("request replay rejected")]
-    Replay,
-    /// Monotonic time moved backwards.
-    #[error("monotonic time regressed")]
-    TimeRegression,
-    /// Local error budget was exhausted.
-    #[error("local admission budget exhausted")]
-    RateLimited,
-    /// Persistent replay state rejected the transition.
-    #[error(transparent)]
-    State(#[from] StateError),
+const fn expected_response(request: MessageKind) -> Result<MessageKind, SessionError> {
+    match request {
+        MessageKind::Hello => Ok(MessageKind::HelloAck),
+        MessageKind::Generate
+        | MessageKind::Get
+        | MessageKind::List
+        | MessageKind::Delete
+        | MessageKind::Begin
+        | MessageKind::UpdateAad
+        | MessageKind::Update
+        | MessageKind::Finish
+        | MessageKind::Abort => Ok(MessageKind::Result),
+        MessageKind::HelloAck | MessageKind::Result | MessageKind::Error | _ => {
+            Err(SessionError::Correlation)
+        }
+    }
 }
+
+const fn map_lifecycle(error: LifecycleError) -> SessionError {
+    match error {
+        LifecycleError::Draining => SessionError::Draining,
+        LifecycleError::Capacity => SessionError::Capacity,
+        LifecycleError::Duplicate => SessionError::RandomExhausted,
+        LifecycleError::Missing => SessionError::Missing,
+        LifecycleError::Expired => SessionError::Expired,
+        LifecycleError::TimeRegression => SessionError::TimeRegression,
+    }
+}
+use core::fmt;

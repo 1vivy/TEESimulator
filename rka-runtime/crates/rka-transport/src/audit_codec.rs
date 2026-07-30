@@ -1,4 +1,4 @@
-use rka_protocol::{CborWriter, HashDomain, hash_cbor};
+use rka_protocol::{CborWriter, HashDomain, hash_cbor, validate_deterministic_cbor};
 
 use crate::{
     AuditEntry,
@@ -78,6 +78,20 @@ pub fn decode_state(bytes: &[u8]) -> Result<(u64, [u8; 32]), AuditError> {
     Ok((sequence, head))
 }
 
+#[doc(hidden)]
+pub fn decode_receipt(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>), AuditError> {
+    validate_deterministic_cbor(bytes).map_err(|_| AuditError::Receipt)?;
+    if bytes.first() != Some(&0x82) {
+        return Err(AuditError::Receipt);
+    }
+    let (body, offset) = decode_bytes(bytes, 1)?;
+    let (signature, end) = decode_bytes(bytes, offset)?;
+    if end != bytes.len() || signature.len() != 64 {
+        return Err(AuditError::Receipt);
+    }
+    Ok((body.to_vec(), signature.to_vec()))
+}
+
 fn decode_unsigned(bytes: &[u8], offset: usize) -> Result<(u64, usize), AuditError> {
     let initial = *bytes.get(offset).ok_or(AuditError::Corrupt)?;
     match initial {
@@ -102,4 +116,36 @@ fn decode_unsigned(bytes: &[u8], offset: usize) -> Result<(u64, usize), AuditErr
         }
         _ => Err(AuditError::Corrupt),
     }
+}
+
+fn decode_bytes(bytes: &[u8], offset: usize) -> Result<(&[u8], usize), AuditError> {
+    let initial = *bytes.get(offset).ok_or(AuditError::Receipt)?;
+    let (length, start) = match initial {
+        value @ 0x40..=0x57 => (
+            usize::from(value.saturating_sub(0x40)),
+            offset.saturating_add(1),
+        ),
+        0x58 => (
+            usize::from(
+                *bytes
+                    .get(offset.saturating_add(1))
+                    .ok_or(AuditError::Receipt)?,
+            ),
+            offset.saturating_add(2),
+        ),
+        0x59 => {
+            let encoded = bytes
+                .get(offset.saturating_add(1)..offset.saturating_add(3))
+                .and_then(|slice| <[u8; 2]>::try_from(slice).ok())
+                .ok_or(AuditError::Receipt)?;
+            (
+                usize::from(u16::from_be_bytes(encoded)),
+                offset.saturating_add(3),
+            )
+        }
+        _ => return Err(AuditError::Receipt),
+    };
+    let end = start.checked_add(length).ok_or(AuditError::Receipt)?;
+    let value = bytes.get(start..end).ok_or(AuditError::Receipt)?;
+    Ok((value, end))
 }

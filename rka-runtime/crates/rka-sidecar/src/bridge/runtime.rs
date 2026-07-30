@@ -87,15 +87,14 @@ impl RoleExecutor {
                 let stream = connect_path(socket_path, &deadline)?;
                 permit.attach(&stream)?;
                 deadline.remaining()?;
-                let authenticated = authenticate_broker_peer(&stream, BrokerRole::Donor)?;
-                deadline.remaining()?;
+                let authenticated =
+                    authenticate_broker_peer(&stream, BrokerRole::Donor, &deadline)?;
                 let correlation = Correlation::new(request, permit.generation)?;
                 let frame = encode_frame(request, ExchangeRole::DonorRequest)?;
                 write_message(&stream, &frame, &deadline)?;
                 let response = read_message(&stream, ExchangeRole::DonorResponse, &deadline)?;
                 permit.stage()?;
-                authenticated.revalidate(&stream)?;
-                deadline.remaining()?;
+                authenticated.revalidate(&stream, &deadline)?;
                 if !correlation.accepts(&response, permit.generation) {
                     return Err(BridgeError::Correlation);
                 }
@@ -105,8 +104,8 @@ impl RoleExecutor {
                 let stream = accept_peer(listener, &deadline)?;
                 permit.attach(&stream)?;
                 deadline.remaining()?;
-                let authenticated = authenticate_broker_peer(&stream, BrokerRole::Candidate)?;
-                deadline.remaining()?;
+                let authenticated =
+                    authenticate_broker_peer(&stream, BrokerRole::Candidate, &deadline)?;
                 let request = read_message(&stream, ExchangeRole::CandidateRequest, &deadline)?;
                 permit.stage()?;
                 if request.request_id() != response.request_id() {
@@ -114,8 +113,7 @@ impl RoleExecutor {
                 }
                 let frame = encode_frame(response, ExchangeRole::CandidateResponse)?;
                 write_message(&stream, &frame, &deadline)?;
-                authenticated.revalidate(&stream)?;
-                deadline.remaining()?;
+                authenticated.revalidate(&stream, &deadline)?;
                 Ok(permit.expose(request))
             }
             _ => Err(BridgeError::WrongRole),

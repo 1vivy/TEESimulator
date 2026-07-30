@@ -1,52 +1,51 @@
-use std::sync::Arc;
-
 use rustix::{
-    fs::{AtFlags, CWD, Mode, OFlags, fstat, openat, statat},
-    io::read,
+    fd::OwnedFd,
+    fs::{CWD, Mode, OFlags, fstat, openat},
 };
 
 use super::{
     BridgeError,
+    deadline::Deadline,
+    descriptor_io::DescriptorSnapshot,
     identity::{BROKER_EXECUTABLE, BrokerIdentity, BrokerRole},
 };
 
 const RECORD_COMPONENTS: [&str; 5] = ["data", "adb", "teesimulator-rka", "run", "pids"];
 const RECORD_NAME: &str = "broker.identity";
-const MAX_RECORD_BYTES: usize = 4096;
+pub(super) const MAX_RECORD_BYTES: usize = 4096;
 const DIRECTORY_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 
-pub(super) fn read_identity_record(role: BrokerRole) -> Result<BrokerIdentity, BridgeError> {
-    let root = openat(
-        CWD,
-        "/",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| BridgeError::TrustedState)?;
-    let mut parent = Arc::new(root);
-    for component in RECORD_COMPONENTS {
-        let descriptor = openat(
-            parent.as_ref(),
-            component,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
+#[derive(Debug)]
+pub(super) struct OpenRecord {
+    pub(super) descriptor: OwnedFd,
+    pub(super) snapshot: DescriptorSnapshot,
+}
+
+pub(super) fn open_identity_record(deadline: &Deadline) -> Result<OpenRecord, BridgeError> {
+    deadline.remaining()?;
+    let root = openat(CWD, "/", directory_flags(), Mode::empty())
         .map_err(|_| BridgeError::TrustedState)?;
+    let mut parent = root;
+    for component in RECORD_COMPONENTS {
+        deadline.remaining()?;
+        let descriptor = openat(&parent, component, directory_flags(), Mode::empty())
+            .map_err(|_| BridgeError::TrustedState)?;
         let stat = fstat(&descriptor).map_err(|_| BridgeError::TrustedState)?;
         if stat.st_uid != 0 || stat.st_gid != 0 || stat.st_mode & 0o777 != DIRECTORY_MODE {
             return Err(BridgeError::TrustedState);
         }
-        parent = Arc::new(descriptor);
+        parent = descriptor;
     }
+    deadline.remaining()?;
     let descriptor = openat(
-        parent.as_ref(),
+        &parent,
         RECORD_NAME,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(|_| BridgeError::TrustedState)?;
-    let before = fstat(&descriptor).map_err(|_| BridgeError::TrustedState)?;
+    let (snapshot, before) = DescriptorSnapshot::trusted(&descriptor)?;
     if before.st_uid != 0
         || before.st_gid != 0
         || before.st_mode & 0o777 != FILE_MODE
@@ -56,35 +55,25 @@ pub(super) fn read_identity_record(role: BrokerRole) -> Result<BrokerIdentity, B
     {
         return Err(BridgeError::TrustedState);
     }
-    let size = usize::try_from(before.st_size).map_err(|_| BridgeError::TrustedState)?;
-    let mut bytes = vec![0_u8; size];
-    let mut offset = 0;
-    while offset < size {
-        let target = bytes.get_mut(offset..).ok_or(BridgeError::TrustedState)?;
-        let count = read(&descriptor, target).map_err(|_| BridgeError::TrustedState)?;
-        if count == 0 {
-            return Err(BridgeError::TrustedState);
-        }
-        offset = offset.checked_add(count).ok_or(BridgeError::TrustedState)?;
-    }
-    let after = fstat(&descriptor).map_err(|_| BridgeError::TrustedState)?;
-    let named = statat(parent.as_ref(), RECORD_NAME, AtFlags::SYMLINK_NOFOLLOW)
-        .map_err(|_| BridgeError::TrustedState)?;
-    if before.st_ino != after.st_ino
-        || before.st_ino != named.st_ino
-        || before.st_size != after.st_size
-        || before.st_mtime != after.st_mtime
-        || before.st_mtime_nsec != after.st_mtime_nsec
-    {
-        bytes.fill(0);
-        return Err(BridgeError::TrustedState);
-    }
-    let parsed = parse_record(&bytes, role);
-    bytes.fill(0);
-    parsed
+    deadline.remaining()?;
+    Ok(OpenRecord {
+        descriptor,
+        snapshot,
+    })
 }
 
-fn parse_record(bytes: &[u8], role: BrokerRole) -> Result<BrokerIdentity, BridgeError> {
+const fn directory_flags() -> OFlags {
+    OFlags::RDONLY
+        .union(OFlags::DIRECTORY)
+        .union(OFlags::NOFOLLOW)
+        .union(OFlags::CLOEXEC)
+        .union(OFlags::NONBLOCK)
+}
+
+pub(super) fn parse_record(bytes: &[u8], role: BrokerRole) -> Result<BrokerIdentity, BridgeError> {
+    if bytes.is_empty() || bytes.len() > MAX_RECORD_BYTES {
+        return Err(BridgeError::TrustedState);
+    }
     let text = std::str::from_utf8(bytes).map_err(|_| BridgeError::TrustedState)?;
     if !text.ends_with('\n') {
         return Err(BridgeError::TrustedState);
@@ -206,6 +195,26 @@ mod tests {
         trailing.extend_from_slice(b"extra=1\n");
         assert_eq!(
             parse_record(&trailing, BrokerRole::Donor),
+            Err(BridgeError::TrustedState)
+        );
+    }
+
+    #[test]
+    fn bridge_identity_record_rejects_partial_oversize_and_invalid_utf8() {
+        let mut partial = record("DONOR");
+        partial.truncate(32);
+        assert_eq!(
+            parse_record(&partial, BrokerRole::Donor),
+            Err(BridgeError::TrustedState)
+        );
+        let mut oversized = record("DONOR");
+        oversized.resize(MAX_RECORD_BYTES + 1, b'x');
+        assert_eq!(
+            parse_record(&oversized, BrokerRole::Donor),
+            Err(BridgeError::TrustedState)
+        );
+        assert_eq!(
+            parse_record(&[0xff, b'\n'], BrokerRole::Donor),
             Err(BridgeError::TrustedState)
         );
     }

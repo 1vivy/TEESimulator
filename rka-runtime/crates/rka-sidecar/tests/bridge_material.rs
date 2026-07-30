@@ -31,6 +31,10 @@ fn bridge_material_source_has_no_generic_or_forbidden_serializer() {
         include_str!("../src/bridge/executor_state.rs"),
         include_str!("../src/bridge/lifecycle.rs"),
         include_str!("../src/bridge/deadline.rs"),
+        include_str!("../src/bridge/descriptor_io.rs"),
+        include_str!("../src/bridge/identity_source.rs"),
+        include_str!("../src/bridge/peer_authorization.rs"),
+        include_str!("../src/bridge/process_identity.rs"),
         include_str!("../src/bridge/socket.rs"),
     ]
     .concat();
@@ -69,6 +73,12 @@ fn bridge_material_source_has_no_generic_or_forbidden_serializer() {
         "ActiveGuard::new",
         "ResourceGuard::acquire",
         "lock_for_cleanup",
+        "deadline.wait(descriptor",
+        "pidfd_open",
+        "deadline.check_peer",
+        "HeldDescriptor::from_snapshot",
+        "OFlags::NONBLOCK",
+        "OFlags::PATH",
     ] {
         assert!(
             source.contains(required),

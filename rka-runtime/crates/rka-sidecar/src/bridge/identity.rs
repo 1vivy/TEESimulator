@@ -1,13 +1,20 @@
-use std::{
-    fs,
-    os::unix::{fs::MetadataExt, net::UnixStream},
-};
+use std::os::unix::net::UnixStream;
 
 use rustix::net::sockopt::socket_peercred;
 
-use super::{BridgeError, trusted_record::read_identity_record};
+use super::{
+    BridgeError,
+    deadline::Deadline,
+    descriptor_io::{ReadBound, read_bounded},
+    identity_source::{IdentitySource, LinuxIdentitySource},
+    peer_authorization::{HeldDescriptor, PeerAuthorization},
+    process_identity::{parse_cmdline, parse_start_time},
+    trusted_record::{MAX_RECORD_BYTES, OpenRecord, parse_record},
+};
 
 pub(super) const BROKER_EXECUTABLE: &str = "/system/bin/app_process64";
+const MAX_STAT_BYTES: usize = 4096;
+const MAX_CMDLINE_BYTES: usize = 1024;
 
 /// Closed sidecar role used by the trusted supervisor record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,153 +78,128 @@ pub(super) struct BrokerIdentity {
     pub(super) role: BrokerRole,
 }
 
-/// Authenticated broker identity that can be revalidated before exposure.
-#[derive(Debug)]
-pub struct AuthenticatedBroker {
-    identity: BrokerIdentity,
-    role: BrokerRole,
-}
-
-impl AuthenticatedBroker {
-    #[doc = "Returns the supervisor reconnect generation."]
-    pub const fn generation(&self) -> u64 {
-        self.identity.generation
-    }
-
-    #[doc = "Revalidates record, credentials, and procfs identity."]
-    pub fn revalidate(&self, stream: &UnixStream) -> Result<(), BridgeError> {
-        let current = read_identity_record(self.role)?;
-        if current != self.identity {
-            return Err(BridgeError::TrustedState);
-        }
-        validate_peer(stream, &current)
-    }
-}
-
 /// Authenticates the fixed protected broker identity and kernel peer.
-pub fn authenticate_broker_peer(
+pub(super) fn authenticate_broker_peer(
     stream: &UnixStream,
     role: BrokerRole,
-) -> Result<AuthenticatedBroker, BridgeError> {
-    let identity = read_identity_record(role)?;
-    validate_peer(stream, &identity)?;
-    Ok(AuthenticatedBroker { identity, role })
+    deadline: &Deadline,
+) -> Result<PeerAuthorization, BridgeError> {
+    authenticate_with_source(
+        &mut LinuxIdentitySource,
+        AuthenticationRequest {
+            stream,
+            role,
+            deadline,
+        },
+    )
 }
 
-fn validate_peer(stream: &UnixStream, identity: &BrokerIdentity) -> Result<(), BridgeError> {
-    let credentials = PeerCredentials::from_stream(stream)?;
+#[derive(Clone, Copy)]
+pub(super) struct AuthenticationRequest<'a> {
+    pub(super) stream: &'a UnixStream,
+    pub(super) role: BrokerRole,
+    pub(super) deadline: &'a Deadline,
+}
+
+pub(super) fn authenticate_with_source(
+    source: &mut impl IdentitySource,
+    request: AuthenticationRequest<'_>,
+) -> Result<PeerAuthorization, BridgeError> {
+    let AuthenticationRequest {
+        stream,
+        role,
+        deadline,
+    } = request;
+    let credentials = source.credentials(stream)?;
+    let revalidate_socket_credentials = source.revalidates_socket_credentials();
+    let OpenRecord {
+        descriptor,
+        snapshot,
+    } = source.open_record(deadline)?;
+    let mut record_bytes = read_bounded(
+        &descriptor,
+        deadline,
+        ReadBound {
+            bytes: MAX_RECORD_BYTES,
+            error: BridgeError::TrustedState,
+        },
+    )?;
+    if !snapshot.verify(&descriptor, deadline)? {
+        return Err(BridgeError::TrustedState);
+    }
+    let parsed_identity = parse_record(&record_bytes, role);
+    record_bytes.fill(0);
+    let identity = parsed_identity?;
     if credentials.uid != identity.uid
         || credentials.gid != identity.gid
         || credentials.pid != identity.pid
     {
         return Err(BridgeError::PeerIdentity);
     }
-    let observed = process_identity(identity.pid)?;
+    let process = source.open_process(identity.pid, deadline)?;
+    deadline.check_peer(&process.pidfd)?;
+    let stat = HeldDescriptor::capture(process.stat)?;
+    let cmdline = HeldDescriptor::capture(process.cmdline)?;
+    let mut stat_bytes = read_bounded(
+        &stat.descriptor,
+        deadline,
+        ReadBound {
+            bytes: MAX_STAT_BYTES,
+            error: BridgeError::PeerIdentity,
+        },
+    )?;
+    let parsed_start_time = parse_start_time(&stat_bytes);
+    stat_bytes.fill(0);
+    let start_time_ticks = parsed_start_time?;
+    let mut cmdline_bytes = read_bounded(
+        &cmdline.descriptor,
+        deadline,
+        ReadBound {
+            bytes: MAX_CMDLINE_BYTES,
+            error: BridgeError::PeerIdentity,
+        },
+    )?;
+    let parsed_cmdline = parse_cmdline(&cmdline_bytes);
+    cmdline_bytes.fill(0);
+    let cmdline_values = parsed_cmdline?;
     let expected_cmdline = [
         BROKER_EXECUTABLE,
         "/system/bin",
         "org.matrix.TEESimulator.App",
         "--rka-role",
-        identity.role.argument(),
+        role.argument(),
     ];
-    if observed.start_time_ticks != identity.start_time_ticks
-        || observed
-            .cmdline
+    if start_time_ticks != identity.start_time_ticks
+        || cmdline_values
             .iter()
             .map(String::as_str)
             .ne(expected_cmdline)
-        || observed.executable_path != BROKER_EXECUTABLE
-        || observed.executable_inode != identity.executable_inode
     {
         return Err(BridgeError::PeerIdentity);
     }
-    Ok(())
-}
-
-struct ProcessIdentity {
-    start_time_ticks: u64,
-    cmdline: Vec<String>,
-    executable_path: String,
-    executable_inode: u64,
-}
-
-fn process_identity(pid: i32) -> Result<ProcessIdentity, BridgeError> {
-    let root = format!("/proc/{pid}");
-    let stat = fs::read_to_string(format!("{root}/stat")).map_err(|_| BridgeError::PeerDied)?;
-    let close = stat.rfind(')').ok_or(BridgeError::PeerIdentity)?;
-    let fields = stat
-        .get(close.checked_add(2).ok_or(BridgeError::PeerIdentity)?..)
-        .ok_or(BridgeError::PeerIdentity)?
-        .split_ascii_whitespace()
-        .collect::<Vec<_>>();
-    let start_time_ticks = fields
-        .get(19)
-        .ok_or(BridgeError::PeerIdentity)?
-        .parse::<u64>()
-        .map_err(|_| BridgeError::PeerIdentity)?;
-    let raw_cmdline = fs::read(format!("{root}/cmdline")).map_err(|_| BridgeError::PeerDied)?;
-    let cmdline = parse_cmdline(&raw_cmdline)?;
-    let executable = fs::read_link(format!("{root}/exe")).map_err(|_| BridgeError::PeerDied)?;
-    let metadata = fs::metadata(&executable).map_err(|_| BridgeError::PeerDied)?;
-    let executable_path = executable
-        .to_str()
-        .ok_or(BridgeError::PeerIdentity)?
-        .to_owned();
-    Ok(ProcessIdentity {
-        start_time_ticks,
+    stat.verify(deadline, BridgeError::PeerIdentity)?;
+    cmdline.verify(deadline, BridgeError::PeerIdentity)?;
+    let process_directory = HeldDescriptor::capture(process.directory)?;
+    let executable = HeldDescriptor::capture(process.executable)?;
+    let expected_executable = HeldDescriptor::capture(process.expected_executable)?;
+    if executable.snapshot.device() != expected_executable.snapshot.device()
+        || executable.snapshot.inode() != expected_executable.snapshot.inode()
+        || executable.snapshot.inode() != identity.executable_inode
+    {
+        return Err(BridgeError::PeerIdentity);
+    }
+    deadline.check_peer(&process.pidfd)?;
+    Ok(PeerAuthorization {
+        _identity: identity,
+        credentials,
+        revalidate_socket_credentials,
+        record: HeldDescriptor::from_snapshot(descriptor, snapshot),
+        process_directory,
+        stat,
         cmdline,
-        executable_path,
-        executable_inode: metadata.ino(),
+        executable,
+        expected_executable,
+        pidfd: process.pidfd,
+        revalidation_gate: process.revalidation_gate,
     })
-}
-
-fn parse_cmdline(bytes: &[u8]) -> Result<Vec<String>, BridgeError> {
-    if bytes.is_empty() || bytes.last().copied() != Some(0) {
-        return Err(BridgeError::PeerIdentity);
-    }
-    let mut values = Vec::new();
-    let content = bytes
-        .get(..bytes.len().saturating_sub(1))
-        .ok_or(BridgeError::PeerIdentity)?;
-    for value in content.split(|byte| *byte == 0) {
-        if value.is_empty() {
-            return Err(BridgeError::PeerIdentity);
-        }
-        values.push(
-            std::str::from_utf8(value)
-                .map_err(|_| BridgeError::PeerIdentity)?
-                .to_owned(),
-        );
-    }
-    if values.is_empty() {
-        return Err(BridgeError::PeerIdentity);
-    }
-    Ok(values)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bridge_procfs_parser_handles_parentheses_and_exact_start_time() {
-        let stat = "42 (broker (worker)) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 99";
-        let close = stat.rfind(')').unwrap_or_default();
-        let fields = stat
-            .get(close.saturating_add(2)..)
-            .unwrap_or_default()
-            .split_ascii_whitespace()
-            .collect::<Vec<_>>();
-        assert_eq!(fields.get(19).copied(), Some("99"));
-    }
-
-    #[test]
-    fn bridge_procfs_cmdline_rejects_empty_unterminated_and_empty_argument() {
-        assert_eq!(parse_cmdline(b""), Err(BridgeError::PeerIdentity));
-        assert_eq!(parse_cmdline(b"broker"), Err(BridgeError::PeerIdentity));
-        assert_eq!(
-            parse_cmdline(b"broker\0\0role\0"),
-            Err(BridgeError::PeerIdentity)
-        );
-    }
 }

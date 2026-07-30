@@ -1,18 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission android:name="android.permission.INTERNET" />
-
-    <permission
-        android:name="org.matrix.teesimulator.rkafixture.permission.CANDIDATE_IDENTITY"
-        android:protectionLevel="signature" />
-
     <application
         android:allowBackup="false"
         android:label="RKA Fixture"
-        android:supportsRtl="true">
-        <service
-            android:name=".CandidateCompanionService"
-            android:exported="false"
-            android:permission="org.matrix.teesimulator.rkafixture.permission.CANDIDATE_IDENTITY"
-            android:process=":rka_candidate" />
-    </application>
+        android:supportsRtl="true" />
 </manifest>

@@ -1,11 +1,16 @@
 //! Process surface for the separate RKA sidecar executable.
 
+#![forbid(unsafe_code)]
+
 use std::{
     ffi::OsStr,
     io::{self, Write},
 };
 
 use thiserror::Error;
+
+/// Authenticated, bounded broker bridge.
+pub mod bridge;
 
 /// Stable process version emitted by the manual health surface.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

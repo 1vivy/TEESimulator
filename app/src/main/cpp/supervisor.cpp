@@ -1,76 +1,86 @@
-// Fork-based supervisor for instant daemon restart
-#include <unistd.h>
-#include <sys/wait.h>
+#include <errno.h>
+#include <signal.h>
+#include <stdio.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
-#include <signal.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <errno.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 
-static volatile sig_atomic_t should_exit = 0;
+static volatile sig_atomic_t terminating = 0;
 
-static void signal_handler(int sig) {
-    should_exit = 1;
+static void handle_signal(int) { terminating = 1; }
+
+static long elapsed_ms(const timespec& before, const timespec& after) {
+    return (after.tv_sec - before.tv_sec) * 1000L +
+           (after.tv_nsec - before.tv_nsec) / 1000000L;
 }
 
-int main(int argc, char *argv[]) {
+static void pause_ms(long milliseconds) {
+    const timespec delay = {milliseconds / 1000, (milliseconds % 1000) * 1000000L};
+    nanosleep(&delay, nullptr);
+}
+
+static void stop_owned_group(pid_t child) {
+    kill(-child, SIGTERM);
+    for (int attempts = 0; attempts < 30; ++attempts) {
+        const pid_t waited = waitpid(child, nullptr, WNOHANG);
+        if (waited == child || (waited < 0 && errno == ECHILD)) return;
+        pause_ms(100);
+    }
+    kill(child, SIGKILL);
+    waitpid(child, nullptr, 0);
+}
+
+int main(int argc, char* argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <daemon> [args...]\n", argv[0]);
         return 1;
     }
 
-    // Forward termination signals to exit cleanly
-    signal(SIGTERM, signal_handler);
-    signal(SIGINT, signal_handler);
+    signal(SIGTERM, handle_signal);
+    signal(SIGINT, handle_signal);
+    long backoff_ms = 500;
+    int crashes = 0;
 
-    const char *daemon_path = argv[1];
-    char **daemon_argv = &argv[1];
-
-    int backoff_ms = 500;
-
-    while (!should_exit) {
-        struct timespec child_start;
-        clock_gettime(CLOCK_MONOTONIC, &child_start);
-
-        pid_t pid = fork();
-
-        if (pid < 0) {
-            perror("fork failed");
-            usleep(100000); // 100ms backoff on fork failure
+    while (!terminating) {
+        timespec started;
+        clock_gettime(CLOCK_MONOTONIC, &started);
+        const pid_t child = fork();
+        if (child < 0) {
+            pause_ms(backoff_ms);
+            backoff_ms = backoff_ms < 30000 ? backoff_ms * 2 : 30000;
             continue;
         }
-
-        if (pid == 0) {
-            // Child: become the daemon
-            prctl(PR_SET_PDEATHSIG, SIGKILL); // Die if parent dies
-            setpriority(PRIO_PROCESS, 0, 10);  // lower CPU priority than foreground
-            execv(daemon_path, daemon_argv);
-            perror("execv failed");
+        if (child == 0) {
+            setpgid(0, 0);
+            prctl(PR_SET_PDEATHSIG, SIGKILL);
+            setpriority(PRIO_PROCESS, 0, 10);
+            execv(argv[1], &argv[1]);
             _exit(127);
         }
 
-        // Parent: wait for child to exit
-        int status;
-        waitpid(pid, &status, 0);
-
-        if (should_exit) break;
-
-        // Exponential backoff on rapid crashes, reset if child was stable
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        long lived_ms = (now.tv_sec - child_start.tv_sec) * 1000 +
-                        (now.tv_nsec - child_start.tv_nsec) / 1000000;
-
-        if (lived_ms > 30000) {
-            backoff_ms = 500;
-        } else {
-            usleep(backoff_ms * 1000);
-            if (backoff_ms < 30000) backoff_ms *= 2;
+        setpgid(child, child);
+        int status = 0;
+        while (waitpid(child, &status, WNOHANG) == 0) {
+            if (terminating) {
+                stop_owned_group(child);
+                return 0;
+            }
+            pause_ms(100);
         }
-    }
+        if (terminating) return 0;
 
+        timespec finished;
+        clock_gettime(CLOCK_MONOTONIC, &finished);
+        if (elapsed_ms(started, finished) >= 30000) {
+            crashes = 0;
+            backoff_ms = 500;
+            continue;
+        }
+        if (++crashes > 3) return 2;
+        pause_ms(backoff_ms);
+        backoff_ms = backoff_ms < 30000 ? backoff_ms * 2 : 30000;
+    }
     return 0;
 }

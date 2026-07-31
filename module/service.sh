@@ -1,8 +1,7 @@
 MODDIR=${0%/*}
 cd $MODDIR
 
-# Fork-based supervisor for instant restart
-./supervisor ./daemon "$MODDIR" &
+./rka-supervisor.sh start &
 
 # Debug builds ship diag.sh; its presence enables the external-storage diagnostic plane.
 if [ -f "$MODDIR/diag.sh" ]; then

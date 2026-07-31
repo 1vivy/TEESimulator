@@ -17,6 +17,34 @@ fail() {
     exit 64
 }
 
+known_bouncycastle_parameterutil_prompt_only() {
+    python3 - "$1" <<'PY'
+from hashlib import sha256
+from pathlib import Path
+import re
+import sys
+
+data = Path(sys.argv[1]).read_bytes()
+needle = b"password: "
+offset = data.find(needle)
+window = data[offset - 96:offset + 128] if offset >= 96 else b""
+matches = list(re.finditer(
+    rb"BEGIN [A-Z ]*PRIVATE KEY|(?:password|passwd|api[_-]?key|bearer|client[_-]?secret)[ \t]*[:=]",
+    data,
+    re.IGNORECASE,
+))
+known = "6192bdaac3bc33d3a66162e3ff67588cd625b830539ca0f9183a1b55d37933a5"
+accepted = (
+    data.startswith(b"dex\n")
+    and data.count(needle) == 1
+    and sha256(window).hexdigest() == known
+    and len(matches) == 1
+    and matches[0].group() == b"password:"
+)
+raise SystemExit(0 if accepted else 1)
+PY
+}
+
 [[ "${1-}" == "secrets" ]] || fail "expected secrets"
 shift
 base=""
@@ -147,7 +175,8 @@ if [[ -n "$archive" ]]; then
             fail "archive member failed integrity validation"
         [[ "$(stat -c '%s' -- "$archive_scan_file")" == "${member_sizes[$member]}" ]] ||
             fail "archive member size changed while reading"
-        if LC_ALL=C grep -aE -- "$patterns" "$archive_scan_file" >/dev/null; then
+        if LC_ALL=C grep -aE -- "$patterns" "$archive_scan_file" >/dev/null &&
+            ! { [[ "$member" == "classes.dex" ]] && known_bouncycastle_parameterutil_prompt_only "$archive_scan_file"; }; then
             violations+=("archive:$member")
         fi
     done

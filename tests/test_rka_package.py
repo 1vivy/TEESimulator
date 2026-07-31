@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import os
 from pathlib import Path
 from shutil import copy2
@@ -12,10 +13,34 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_MANIFEST = REPOSITORY_ROOT / "module" / "rka-runtime.manifest"
+SEPOLICY_RULE = REPOSITORY_ROOT / "module" / "sepolicy.rule"
+SEPOLICY_PROBES = REPOSITORY_ROOT / "module" / "sepolicy.probes"
+SEPOLICY_LIVE_PROBE = REPOSITORY_ROOT / "module" / "rka-sepolicy-probe.sh"
 FIXED_EPOCH = "1785486225"
 
 
 class RkaPackageTest(unittest.TestCase):
+    def test_sepolicy_probe_manifest_is_complete_bounded_and_live(self) -> None:
+        rules = [
+            line
+            for line in SEPOLICY_RULE.read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith("#")
+        ]
+        probes = [line.split("|", 1) for line in SEPOLICY_PROBES.read_text(encoding="ascii").splitlines()]
+        self.assertEqual(len(probes), len(rules))
+        self.assertEqual({probe[0] for probe in probes}, {hashlib.sha256(rule.encode()).hexdigest() for rule in rules})
+        self.assertTrue(SEPOLICY_LIVE_PROBE.is_file())
+        self.assertEqual(SEPOLICY_LIVE_PROBE.stat().st_mode & 0o777, 0o755)
+        for digest, encoded in probes:
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+            command = base64.b64decode(encoded, validate=True).decode("ascii")
+            self.assertEqual(base64.b64encode(command.encode()).decode(), encoded)
+            self.assertEqual(command, f"exec /data/adb/modules/tricky_store/rka-sepolicy-probe.sh {digest}")
+            self.assertLessEqual(len(command), 256)
+        deploy = (REPOSITORY_ROOT / "scripts" / "rka-deploy.sh").read_text(encoding="utf-8")
+        self.assertGreater(deploy.index('"$active/rka-supervisor.sh" start'), deploy.index("ksud sepolicy apply"))
+        self.assertGreater(deploy.index("timeout 5 nsenter -t 1 -m -- sh -eu -c"), deploy.index('"$active/rka-supervisor.sh" start'))
+
     def test_production_validator_rejects_every_tampered_archive_class(self) -> None:
         release = self.current_archives()["Release"]
         mutations = {

@@ -294,7 +294,9 @@ androidComponents {
                         "rka-profile.schema",
                         "rka-role.conf",
                         "rka-runtime.manifest",
+                        "rka-sepolicy-probe.sh",
                         "rka-supervisor.sh",
+                        "sepolicy.probes",
                         "sepolicy.rule",
                         "service.sh",
                         "uninstall.sh",
@@ -322,6 +324,7 @@ androidComponents {
                 filesMatching("daemon") { filePermissions { unix("0755") } }
                 filesMatching("rka-control.sh") { filePermissions { unix("0755") } }
                 filesMatching("rka-paths.sh") { filePermissions { unix("0755") } }
+                filesMatching("rka-sepolicy-probe.sh") { filePermissions { unix("0755") } }
                 filesMatching("rka-supervisor.sh") { filePermissions { unix("0755") } }
                 filesMatching("service.sh") { filePermissions { unix("0755") } }
                 filesMatching("uninstall.sh") { filePermissions { unix("0755") } }
@@ -335,6 +338,7 @@ androidComponents {
                             "rka-agent-pgp-verify",
                             "rka-control.sh",
                             "rka-paths.sh",
+                            "rka-sepolicy-probe.sh",
                             "rka-sidecar",
                             "rka-supervisor.sh",
                             "service.sh",
@@ -389,7 +393,9 @@ androidComponents {
                             "module/rka-profile.schema",
                             "module/rka-role.conf",
                             "module/rka-runtime.manifest",
+                            "module/rka-sepolicy-probe.sh",
                             "module/rka-supervisor.sh",
+                            "module/sepolicy.probes",
                             "module/sepolicy.rule",
                             "module/service.sh",
                             "module/uninstall.sh",
@@ -428,6 +434,7 @@ androidComponents {
                         "rka-agent-pgp-verify",
                         "rka-control.sh",
                         "rka-paths.sh",
+                        "rka-sepolicy-probe.sh",
                         "rka-sidecar",
                         "rka-supervisor.sh",
                         "service.sh",
@@ -441,6 +448,7 @@ androidComponents {
                         "rka-agent-pgp-verify",
                         "rka-control.sh",
                         "rka-paths.sh",
+                        "rka-sepolicy-probe.sh",
                         "rka-sidecar",
                         "rka-supervisor.sh",
                         "service.sh",
@@ -555,7 +563,9 @@ val verifyRkaModuleArchive by
                     "rka-profile.schema",
                     "rka-role.conf",
                     "rka-runtime.manifest",
+                    "rka-sepolicy-probe.sh",
                     "rka-supervisor.sh",
+                    "sepolicy.probes",
                     "sepolicy.rule",
                     "service.sh",
                     "uninstall.sh",
@@ -577,6 +587,7 @@ val verifyRkaModuleArchive by
                     "rka-agent-pgp-verify",
                     "rka-control.sh",
                     "rka-paths.sh",
+                    "rka-sepolicy-probe.sh",
                     "rka-sidecar",
                     "rka-supervisor.sh",
                     "service.sh",
@@ -597,7 +608,10 @@ val verifyRkaModuleArchive by
                     val entries = zip.entries.asSequence().filterNot { it.isDirectory }.toList()
                     val names = entries.map { it.name }.toSet()
                     fun reject(code: String): Nothing = error("RKA_VALIDATE:$code")
-                    val forbiddenEntry = names.firstOrNull { entry -> forbiddenEntryFragments.any(entry.lowercase()::contains) }
+                    val allowedProbeEntries = setOf("rka-sepolicy-probe.sh", "sepolicy.probes")
+                    val forbiddenEntry = names.firstOrNull { entry ->
+                        entry !in allowedProbeEntries && forbiddenEntryFragments.any(entry.lowercase()::contains)
+                    }
                     if (forbiddenEntry != null) reject("FORBIDDEN_ENTRY")
                     val sourceWebUi = commonEntries.filter { it.startsWith("webroot/") }.toSet()
                     val archiveWebUi = names.filter { it.startsWith("webroot/") }.toSet()

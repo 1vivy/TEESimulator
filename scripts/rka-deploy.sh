@@ -147,7 +147,7 @@ preflight)
     case "$ksud_pid" in *" "*) printf "RESULT=INCOMPATIBLE reason=KSUD_PROCESS\n"; exit ;; esac
     ksud_ns=$(readlink "/proc/$ksud_pid/ns/mnt") || { printf "RESULT=INCOMPATIBLE reason=KSUD_NAMESPACE\n"; exit; }
     [ -n "$init_ns" ] && [ -n "$ksud_ns" ] || { printf "RESULT=INCOMPATIBLE reason=MOUNT_SEMANTICS\n"; exit; }
-    for command in find lsattr logcat nsenter openssl sha256sum stat strings; do
+    for command in base64 find lsattr logcat nsenter openssl sha256sum stat strings timeout toybox; do
         command -v "$command" >/dev/null 2>&1 || { printf "RESULT=INCOMPATIBLE reason=DEPLOY_TOOLING\n"; exit; }
     done
     if [ -x "$active/rka-control.sh" ]; then
@@ -216,6 +216,10 @@ deploy)
             probe=$(awk -F "|" -v hash="$rule_hash" "\$1 == hash {print \$2}" "$probe_manifest")
             [ -n "$probe" ] && [ "$(printf "%s\n" "$probe" | wc -l)" -eq 1 ] || exit 1
             case "$probe" in *[!A-Za-z0-9_=-]*) exit 1 ;; esac
+            command=$(printf %s "$probe" | base64 -d) || exit 1
+            [ -n "$command" ] && [ "$(printf %s "$command" | wc -c)" -le 256 ] || exit 1
+            [ "$(printf %s "$command" | base64 | tr -d '\n')" = "$probe" ] || exit 1
+            [ "$command" = "exec /data/adb/modules/tricky_store/rka-sepolicy-probe.sh $rule_hash" ] || exit 1
             printf "%s|%s\n" "$rule_hash" "$probe" >> "$txn/sepolicy.probes.validated"
         done < "$policy"
         wall_marker=$(date +%s.%N)
@@ -264,8 +268,8 @@ deploy)
     while IFS="|" read -r rule_hash probe; do
         [ -n "$rule_hash" ] && [ -n "$probe" ] || exit 1
         command=$(printf %s "$probe" | base64 -d) || exit 1
-        [ -n "$command" ] && [ "$(printf %s "$command" | wc -c)" -le 1024 ] || exit 1
-        nsenter -t 1 -m -- sh -eu -c "$command" >> "$txn/sepolicy-probes.stdout" 2>> "$txn/sepolicy-probes.stderr"
+        [ -n "$command" ] && [ "$(printf %s "$command" | wc -c)" -le 256 ] || exit 1
+        timeout 5 nsenter -t 1 -m -- sh -eu -c "$command" >> "$txn/sepolicy-probes.stdout" 2>> "$txn/sepolicy-probes.stderr"
     done < "$txn/sepolicy.probes.validated"
     logcat -b all -T "$probe_marker" -d 2>/dev/null | grep -Ei "avc:.*denied.*(teesimulator|rka|ksu)" > "$txn/sepolicy-probes.reject" || :
     [ ! -s "$txn/sepolicy-probes.reject" ]

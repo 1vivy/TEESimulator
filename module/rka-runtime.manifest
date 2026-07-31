@@ -3,3 +3,5 @@ roles=LOCAL|DONOR|CANDIDATE
 sidecar_abi=arm64-v8a
 activation=staged-by-installer
 runtime_state=external-root-only
+archive_entries=classes.dex,daemon,licenses/LICENSE,licenses/NOTICE,module.prop,rka-control.sh,rka-paths.sh,rka-profile.schema,rka-role.conf,rka-runtime.manifest,rka-sidecar,rka-supervisor.sh,sepolicy.rule,service.sh,uninstall.sh
+archive_executables=daemon,rka-control.sh,rka-paths.sh,rka-sidecar,rka-supervisor.sh,service.sh,uninstall.sh

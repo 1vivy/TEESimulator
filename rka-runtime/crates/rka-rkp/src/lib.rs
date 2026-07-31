@@ -207,6 +207,8 @@ pub mod challenge;
 pub mod config;
 mod csr;
 mod https;
+/// Durable classification and local replay for provisioning POSTs.
+pub mod outcome;
 mod response;
 mod status;
 mod status_client;

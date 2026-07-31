@@ -27,15 +27,12 @@ class HostOrchestrationTest {
         host.lifecycle("status")
         host.lifecycle("start")
         host.lifecycle("stop")
-        host.recoverExact("keystore2")
-        host.recoverExact("rkpd")
         host.cleanup()
 
         assertTrue(runner.calls.all { it.take(2) == listOf("adb", "-s") })
         assertTrue(runner.calls.all { it[2] in setOf("DONOR_A", "CANDIDATE_B") })
         assertFalse(runner.calls.flatten().any { it == "reboot" || it == "killall" })
         assertTrue(runner.calls.any { "deploy-no-reboot" in it })
-        assertTrue(runner.calls.any { "ctl.restart" in it && "keystore2" in it })
     }
 
     @Test

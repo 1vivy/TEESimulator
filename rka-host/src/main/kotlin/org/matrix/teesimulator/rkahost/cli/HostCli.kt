@@ -125,8 +125,8 @@ object HostCli {
                 }
                 "recover-exact" -> {
                     val values = options(arguments.drop(1))
-                    requireKeys(values, setOf("--service"))
-                    host.recoverExact(values.getValue("--service"))
+                    requireKeys(values, setOf("--role", "--service"))
+                    host.recoverExact(values.getValue("--role"), values.getValue("--service"))
                     "RECOVERED_EXACT"
                 }
                 "cleanup" -> {
@@ -235,7 +235,7 @@ object HostCli {
               deploy-no-reboot --zip FILE
               snapshot capability|config
               lifecycle status|start|stop
-              recover-exact --service keystore2|rkpd
+              recover-exact --role donor|candidate --service keystore2|rkpd
               cleanup
               evidence manifest --baseline FILE --artifact FILE --source-sha SHA --nonce NONCE --output FILE
               verify-physical --manifest FILE --baseline FILE --artifact FILE --source-sha SHA --nonce NONCE

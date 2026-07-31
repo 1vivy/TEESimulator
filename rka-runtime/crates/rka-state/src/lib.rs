@@ -3,6 +3,7 @@
 use thiserror::Error;
 
 mod failure_budget;
+mod quarantine;
 mod replay;
 #[doc(hidden)]
 pub mod replay_codec;
@@ -21,6 +22,10 @@ mod sensitive;
 
 pub use failure_budget::{
     FAILURE_THRESHOLD, FAILURE_WINDOW_SECONDS, FailureAdmission, FailureBudget, FailureBudgetError,
+};
+pub use quarantine::{
+    AmbiguousMaterial, CrashRecovery, MutationCrashState, QuarantineAction, QuarantineActions,
+    QuarantineError, QuarantineLedger, QuarantineReason,
 };
 pub use replay::{PersistedTombstone, ReplayManager, TombstoneTime};
 pub use rkp_lease::{

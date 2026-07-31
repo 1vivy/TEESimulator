@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+printf '%s\n' "$*" >> "$FAKE_ADB_LOG"
+case " $* " in
+    *" recover-exact snapshot rkpd "*)
+        printf '%s\n' \
+            boot_id=boot-A \
+            uptime_ms=1000 \
+            'service=rkpd|100|500|/system/bin/rkpd' \
+            property=remote_provisioning.hostname\|YQ \
+            property=remote_provisioning.hostname_2\|Yg \
+            quarantine=RETAINED
+        ;;
+    *" recover-exact verify rkpd "*)
+        printf '%s\n' \
+            boot_id=boot-A \
+            uptime_ms=1100 \
+            'service=rkpd|101|600|/system/bin/rkpd' \
+            property=remote_provisioning.hostname\|YQ \
+            property=remote_provisioning.hostname_2\|Yg \
+            quarantine=RETAINED
+        ;;
+    *" recover-exact ready rkpd "*) printf '%s\n' READY ;;
+    *" recover-exact restart rkpd "*) printf '%s\n' RESTARTED ;;
+    *) exit 64 ;;
+esac

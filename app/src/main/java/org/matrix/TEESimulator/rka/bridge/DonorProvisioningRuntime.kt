@@ -4,10 +4,13 @@ import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicBoolean
 import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.rka.broker.AttestationChallenge
+import org.matrix.TEESimulator.rka.broker.AuthenticatedQuarantineRequest
 import org.matrix.TEESimulator.rka.broker.BrokerCancellation
 import org.matrix.TEESimulator.rka.broker.BrokerDeadline
 import org.matrix.TEESimulator.rka.broker.BrokerOutcome
 import org.matrix.TEESimulator.rka.broker.IrpcClient
+import org.matrix.TEESimulator.rka.broker.QuarantineController
+import org.matrix.TEESimulator.rka.broker.QuarantineResult
 import org.matrix.TEESimulator.rka.broker.RkpKeyCount
 import org.matrix.TEESimulator.rka.donor.AndroidDonorKeyMintDevice
 import org.matrix.TEESimulator.rka.donor.DonorBridgeDispatcher
@@ -35,6 +38,12 @@ object DonorProvisioningRuntime {
         }
     }
     private var activeRequestId: RequestId? = null
+    private val quarantineController by lazy {
+        QuarantineController(
+            exactQuarantine = journal::quarantineHandles,
+            cancel = { activeRequestId = null },
+        )
+    }
 
     fun initializeLifecycle() {
         if (!started.compareAndSet(false, true)) return
@@ -66,20 +75,23 @@ object DonorProvisioningRuntime {
             is BridgeMessage.CandidateCommand ->
                 DonorBridgeDispatcher.dispatch(message, donorBackend.value)
             is BridgeMessage.Cancel -> {
-                activeRequestId = null
                 val handles = message.brokerHandles()
-                val exact =
+                val result =
                     try {
-                        if (handles.isEmpty()) {
-                            journal.quarantineCurrent()
-                            true
-                        } else {
-                            journal.quarantineHandles(handles.map(Hash32::copyBytes))
-                        }
+                        quarantineController.quarantine(
+                            AuthenticatedQuarantineRequest.fromTrustedBridge(
+                                message.requestId,
+                                handles.map(Hash32::copyBytes),
+                            )
+                        )
                     } finally {
                         handles.forEach(Hash32::close)
                     }
-                if (exact) BridgeMessage.Cancel(message.requestId) else failure(message.requestId)
+                if (result == QuarantineResult.QUARANTINED) {
+                    BridgeMessage.Cancel(message.requestId)
+                } else {
+                    failure(message.requestId)
+                }
             }
             else -> failure(message.requestId)
         }

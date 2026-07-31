@@ -39,11 +39,9 @@ class HostOrchestrator(
         serials().forEach { control(it, "lifecycle", action) }
     }
 
-    fun recoverExact(service: String) {
-        if (service !in setOf("keystore2", "rkpd")) {
-            throw HostCliException("RECOVERY_SERVICE_INVALID")
-        }
-        invoke(adb(pair.donor, listOf("shell", "setprop", "ctl.restart", service)))
+    fun recoverExact(role: String, service: String) {
+        ExactRecoveryCli(ControlScriptRecoveryTransport(pair, ::invoke))
+            .recover(ExactRecoveryCli.parseRole(role), ExactRecoveryCli.parseTarget(service))
     }
 
     fun cleanup() {

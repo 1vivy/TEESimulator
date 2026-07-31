@@ -62,7 +62,7 @@ impl Endpoint {
         }
         let canonical = match host.parse::<IpAddr>() {
             Ok(address) => address.to_string(),
-            Err(_) if valid_dns(host) => host.to_owned(),
+            Err(_) if valid_dns(host) && !looks_like_ipv4(host) => host.to_owned(),
             Err(_) => return Err(ProfileError::Endpoint),
         };
         if canonical != host {
@@ -311,6 +311,13 @@ fn valid_dns(host: &str) -> bool {
     }) && host
         .split('.')
         .all(|label| !label.is_empty() && !label.starts_with('-') && !label.ends_with('-'))
+}
+
+fn looks_like_ipv4(host: &str) -> bool {
+    host.split('.').count() == 4
+        && host
+            .split('.')
+            .all(|label| label.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn strictly_sorted(values: &[[u8; 32]]) -> bool {

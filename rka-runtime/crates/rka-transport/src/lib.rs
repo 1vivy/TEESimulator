@@ -67,6 +67,8 @@ pub enum TransportError {
 }
 
 #[cfg(test)]
+mod endpoint_profile_tests;
+#[cfg(test)]
 mod second_gate_audit_harness;
 #[cfg(test)]
 mod second_gate_tls_harness;

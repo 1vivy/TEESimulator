@@ -118,6 +118,7 @@ pub fn run(
             let role = LifecycleRole::parse(command)?;
             role.validate()?;
             writeln!(output, "role={} status=READY", role.status_name())?;
+            output.flush()?;
             Ok(Some(role))
         }
     }

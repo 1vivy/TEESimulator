@@ -14,8 +14,10 @@ use thiserror::Error;
 mod provision_activation;
 mod provisioning;
 mod provisioning_io;
+mod trust_runtime;
 
 pub use provisioning::{ProvisioningRunError, provision_once};
+pub use trust_runtime::dispatch_rotation;
 
 /// Authenticated, bounded broker bridge.
 pub mod bridge;

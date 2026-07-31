@@ -1,7 +1,6 @@
 package org.matrix.TEESimulator.rka.bridge
 
 import java.nio.file.Path
-import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.rka.broker.AttestationChallenge
@@ -45,8 +44,19 @@ object DonorProvisioningRuntime {
         when (message) {
             is BridgeMessage.PublicKeyRequest -> provision(message)
             is BridgeMessage.Cancel -> {
-                journal.quarantineCurrent()
-                BridgeMessage.Cancel(message.requestId)
+                val handles = message.brokerHandles()
+                val exact =
+                    try {
+                        if (handles.isEmpty()) {
+                            journal.quarantineCurrent()
+                            true
+                        } else {
+                            journal.quarantineHandles(handles.map(Hash32::copyBytes))
+                        }
+                    } finally {
+                        handles.forEach(Hash32::close)
+                    }
+                if (exact) BridgeMessage.Cancel(message.requestId) else failure(message.requestId)
             }
             else -> failure(message.requestId)
         }
@@ -81,8 +91,13 @@ object DonorProvisioningRuntime {
         return BridgeMessage.PublicKeyResponse(
             request.requestId,
             PublicBytes.of(csr.value.copyBytes(), BridgeLimits.MAX_FRAME_BYTES),
-            batch.spkiPublicKeys().map {
-                Hash32.of(MessageDigest.getInstance("SHA-256").digest(it))
+            record.entries.map { entry ->
+                BrokerKeyMetadata(
+                    entry.order,
+                    Hash32.of(entry.handle.copyBytes()),
+                    Hash32.of(entry.copyPublicHash()),
+                    Hash32.of(entry.copySpkiHash()),
+                )
             },
         )
     }

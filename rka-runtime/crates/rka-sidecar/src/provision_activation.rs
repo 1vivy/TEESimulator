@@ -41,7 +41,7 @@ pub(crate) fn activate(
     let mut leases = Vec::with_capacity(validated.chains().len());
     let mut claims = Vec::with_capacity(validated.chains().len());
     for chain in validated.chains() {
-        let public = PublicKeyHash::new(chain.leaf_spki_hash);
+        let public = PublicKeyHash::new(chain.public_key_hash);
         let spki = SpkiHash::new(chain.leaf_spki_hash);
         let lease_id = LeaseId::new(first::<16>(&binding(
             b"lease",

@@ -5,7 +5,7 @@ use std::{
 
 use ring::digest::{SHA256, digest};
 use rka_rkp::{
-    AttestationStatusClient, BoundedHttpsTransport, ExpectedKey, RootBundle, RootTrustManager,
+    AttestationStatusClient, BoundedHttpsTransport, ExpectedKey, RootBundle,
     assemble_android_v3_body,
     challenge::{OsEntropy, ProvisioningHttpClient},
     returned_serials, validate_response,
@@ -44,6 +44,7 @@ pub enum ProvisioningRunError {
 /// Runs one authenticated V2 CSR-to-activated-lease production transaction.
 pub fn provision_once() -> Result<(), ProvisioningRunError> {
     let config = ProductionConfig::load()?;
+    let session = crate::trust_runtime::begin(config.epoch, &config.state_root)?;
     let mut client = ProvisioningHttpClient::new(
         config.base.clone(),
         (
@@ -70,20 +71,29 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
             request: &request,
         })
         .map_err(|_| ProvisioningRunError::Broker)?;
+    let mut broker_handles = Vec::new();
     let result = (|| {
-        let BridgeMessage::PublicKeyResponse(_, hal_csr, hashes) = response else {
+        let BridgeMessage::PublicKeyResponse(_, hal_csr, keys) = response else {
             return Err(ProvisioningRunError::Broker);
         };
-        if hashes.len() != usize::from(config.key_count) {
+        if keys.len() != usize::from(config.key_count) {
             return Err(ProvisioningRunError::Broker);
         }
-        let expected = hashes
+        broker_handles.extend(keys.iter().map(|key| *key.handle()));
+        let expected = keys
             .iter()
-            .map(|spki| {
-                let value = *spki.as_array();
-                ExpectedKey::new(handle(request_id, &value), value)
+            .enumerate()
+            .map(|(order, key)| {
+                if usize::from(key.order()) != order {
+                    return Err(ProvisioningRunError::Broker);
+                }
+                Ok(ExpectedKey::with_public_hash(
+                    *key.handle(),
+                    *key.public_key_hash(),
+                    *key.spki_hash(),
+                ))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, ProvisioningRunError>>()?;
         let prepared = assemble_android_v3_body(hal_csr.as_slice(), &config.fingerprint)
             .map_err(|_| ProvisioningRunError::Validation)?;
         let signed = client
@@ -91,17 +101,23 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
             .map_err(|_| ProvisioningRunError::Http)?;
         complete(
             &config,
-            &executor,
             request_id,
             &prepared,
             signed.response().body(),
             &expected,
             &fetched.challenge,
             signed.request_id(),
+            session.roots(),
         )
     })();
     if result.is_err() {
-        let cancel = BridgeMessage::Cancel(RequestId::new(request_id));
+        let cancel = BridgeMessage::Cancel(
+            RequestId::new(request_id),
+            broker_handles
+                .into_iter()
+                .map(crate::bridge::Hash32::new)
+                .collect(),
+        );
         let _ = executor.dispatch(BrokerOperation::Donor {
             socket_path: &config.socket,
             request: &cancel,
@@ -116,13 +132,13 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
 )]
 fn complete(
     config: &ProductionConfig,
-    executor: &RoleExecutor,
     request_id: u64,
     prepared: &rka_rkp::PreparedCertificateRequest,
     response: &[u8],
     expected: &[ExpectedKey],
     challenge: &[u8],
     sign_request_id: &str,
+    roots: &RootBundle,
 ) -> Result<(), ProvisioningRunError> {
     let now = unix_seconds()?;
     let serials =
@@ -133,10 +149,6 @@ fn complete(
     let snapshot = status
         .snapshot_for(now, serials.iter().map(String::as_str))
         .map_err(|_| ProvisioningRunError::Validation)?;
-    let trust = RootTrustManager::new(RootBundle::production(config.epoch));
-    let session = trust
-        .begin()
-        .map_err(|_| ProvisioningRunError::Validation)?;
     let challenge_hash = sha256(challenge);
     let context = rka_rkp::ResponseContext::new(
         prepared.hal_csr_hash(),
@@ -144,27 +156,17 @@ fn complete(
         sign_request_id,
         challenge_hash,
         challenge_hash,
-        session.roots().epoch(),
+        roots.epoch(),
         now,
     );
-    let mut cancelled = false;
-    let mut quarantine = |_: [u8; 32]| {
-        if !cancelled {
-            cancelled = true;
-            let cancel = BridgeMessage::Cancel(RequestId::new(request_id));
-            let _ = executor.dispatch(BrokerOperation::Donor {
-                socket_path: &config.socket,
-                request: &cancel,
-            });
-        }
-    };
+    let mut quarantine = |_: [u8; 32]| {};
     let validated = validate_response(
         prepared,
         prepared.body(),
         response,
         expected,
         &context,
-        session.roots(),
+        roots,
         &snapshot,
         &mut quarantine,
     )
@@ -172,19 +174,12 @@ fn complete(
     activate(
         &validated,
         request_id,
-        session.roots().epoch(),
+        roots.epoch(),
         &config.validator_key,
         &FileStateStore::new(&config.state_root),
         &mut quarantine,
     )?;
     Ok(())
-}
-
-fn handle(request_id: u64, spki: &[u8; 32]) -> [u8; 32] {
-    let mut bytes = Vec::with_capacity(40);
-    bytes.extend_from_slice(&request_id.to_be_bytes());
-    bytes.extend_from_slice(spki);
-    sha256(&bytes)
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {

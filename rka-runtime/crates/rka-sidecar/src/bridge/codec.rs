@@ -141,12 +141,11 @@ fn body_length(message: &BridgeMessage) -> Result<usize, BridgeError> {
         |sum: usize, value: usize| sum.checked_add(value).ok_or(BridgeError::ValueTooLarge);
     match message {
         BridgeMessage::PublicKeyRequest(_, challenge, _) => checked(5, challenge.as_slice().len()),
-        BridgeMessage::PublicKeyResponse(_, public_csr, hashes) => {
+        BridgeMessage::PublicKeyResponse(_, public_csr, keys) => {
             checked(5, public_csr.as_slice().len())?
                 .checked_add(
-                    hashes
-                        .len()
-                        .checked_mul(32)
+                    keys.len()
+                        .checked_mul(97)
                         .ok_or(BridgeError::ValueTooLarge)?,
                 )
                 .ok_or(BridgeError::ValueTooLarge)
@@ -158,7 +157,11 @@ fn body_length(message: &BridgeMessage) -> Result<usize, BridgeError> {
                 |sum, certificate| checked(checked(sum, 4)?, certificate.as_slice().len()),
             )
         }
-        BridgeMessage::Cancel(..) => Ok(1),
+        BridgeMessage::Cancel(_, handles) => handles
+            .len()
+            .checked_mul(32)
+            .and_then(|length| length.checked_add(1))
+            .ok_or(BridgeError::ValueTooLarge),
         BridgeMessage::Error(..) => Ok(33),
     }
 }
@@ -169,11 +172,17 @@ fn encode_body(message: &BridgeMessage, output: &mut Vec<u8>) -> Result<(), Brid
             output.push(*key_count);
             put_bytes(output, challenge.as_slice())?;
         }
-        BridgeMessage::PublicKeyResponse(_, public_csr, hashes) => {
+        BridgeMessage::PublicKeyResponse(_, public_csr, keys) => {
             put_bytes(output, public_csr.as_slice())?;
-            output.push(u8::try_from(hashes.len()).map_err(|_| BridgeError::ValueTooLarge)?);
-            for hash in hashes {
-                output.extend_from_slice(hash.as_array());
+            output.push(u8::try_from(keys.len()).map_err(|_| BridgeError::ValueTooLarge)?);
+            for (order, key) in keys.iter().enumerate() {
+                if usize::from(key.order()) != order {
+                    return Err(BridgeError::NonCanonical);
+                }
+                output.push(key.order());
+                output.extend_from_slice(key.handle());
+                output.extend_from_slice(key.public_key_hash());
+                output.extend_from_slice(key.spki_hash());
             }
         }
         BridgeMessage::UpdateRequest(_, operation_handle, chunk, total_input_bytes) => {
@@ -191,7 +200,12 @@ fn encode_body(message: &BridgeMessage, output: &mut Vec<u8>) -> Result<(), Brid
                 put_bytes(output, certificate.as_slice())?;
             }
         }
-        BridgeMessage::Cancel(..) => output.push(0),
+        BridgeMessage::Cancel(_, handles) => {
+            output.push(u8::try_from(handles.len()).map_err(|_| BridgeError::ValueTooLarge)?);
+            for handle in handles {
+                output.extend_from_slice(handle.as_array());
+            }
+        }
         BridgeMessage::Error(_, code, detail_hash) => {
             output.push(*code);
             output.extend_from_slice(detail_hash.as_array());

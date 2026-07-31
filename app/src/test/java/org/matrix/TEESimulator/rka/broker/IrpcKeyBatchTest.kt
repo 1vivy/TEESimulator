@@ -60,6 +60,39 @@ class IrpcKeyBatchTest {
         assertTrue(wiped.single().all { it == 0.toByte() })
         assertFalse(batch.toString().toByteArray().containsSubsequence(byteArrayOf(81, 82, 83, 84)))
     }
+
+    @Test
+    fun exactOrderedHandlesResolveRetainedBlobsBeforeQuarantine() {
+        val (journal, handles) = recordedTwoKeyBatch()
+
+        assertTrue(journal.quarantineHandles(handles))
+    }
+
+    @Test
+    fun mutatedHandleRejectsAndQuarantinesRetainedBlobs() {
+        val (journal, handles) = recordedTwoKeyBatch()
+        handles[1][0] = (handles[1][0].toInt() xor 1).toByte()
+
+        assertFalse(journal.quarantineHandles(handles))
+        assertFalse(journal.quarantineHandles(handles))
+    }
+
+    private fun recordedTwoKeyBatch(): Pair<RkpJournal, MutableList<ByteArray>> {
+        val batch =
+            IrpcKeyBatch(
+                testIrpcIdentity(),
+                listOf(
+                    IrpcGeneratedKey(byteArrayOf(1), testSpki(), byteArrayOf(81)),
+                    IrpcGeneratedKey(byteArrayOf(2), testSpki(), byteArrayOf(82)),
+                ),
+            )
+        val journal = RkpJournal(TestJournalStore())
+        val count = (RkpKeyCount.parse(2) as BrokerOutcome.Success).value
+        val intent = journal.begin(count, RkpIrpcIdentity.from(testIrpcIdentity()))
+        val entries = journal.deriveEntries(intent, batch.publicKeys().zip(batch.spkiPublicKeys()))
+        batch.recordInJournal(journal, intent, entries)
+        return journal to entries.map { it.handle.copyBytes() }.toMutableList()
+    }
 }
 
 private class TestJournalStore : RkpJournalStore {

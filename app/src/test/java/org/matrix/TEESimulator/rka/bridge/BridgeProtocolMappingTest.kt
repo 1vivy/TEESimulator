@@ -101,7 +101,7 @@ class BridgeProtocolMappingTest {
         BridgeMessage.PublicKeyResponse(
             RequestId(id),
             PublicBytes.of(byteArrayOf(1), BridgeLimits.MAX_FRAME_BYTES),
-            listOf(Hash32.of(ByteArray(32))),
+            testKeyMetadata(Hash32.of(ByteArray(32))),
         )
 
     private fun updateRequest(id: Long) =

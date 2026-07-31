@@ -2,9 +2,9 @@ use super::BridgeError;
 use std::io::ErrorKind;
 
 use super::model::{
-    BridgeMessage, Hash32, MAX_CERTIFICATE_BYTES, MAX_CHAIN_BYTES, MAX_CHAIN_CERTIFICATES,
-    MAX_FRAME_BYTES, MAX_PUBLIC_KEYS, MAX_TOTAL_INPUT_BYTES, MAX_UPDATE_BYTES, NetworkHandle,
-    PublicBytes, RequestId,
+    BridgeMessage, BrokerKeyMetadata, Hash32, MAX_CERTIFICATE_BYTES, MAX_CHAIN_BYTES,
+    MAX_CHAIN_CERTIFICATES, MAX_FRAME_BYTES, MAX_PUBLIC_KEYS, MAX_TOTAL_INPUT_BYTES,
+    MAX_UPDATE_BYTES, NetworkHandle, PublicBytes, RequestId,
 };
 
 pub(super) fn decode_body(
@@ -19,10 +19,15 @@ pub(super) fn decode_body(
         3 => decode_update(request_id, &mut cursor)?,
         4 => decode_public_result(request_id, &mut cursor)?,
         5 => {
-            if cursor.take_u8()? != 0 {
+            let count = usize::from(cursor.take_u8()?);
+            if count > MAX_PUBLIC_KEYS {
                 return Err(BridgeError::NonCanonical);
             }
-            BridgeMessage::Cancel(request_id)
+            let mut handles = Vec::with_capacity(count);
+            for _ in 0..count {
+                handles.push(Hash32::new(cursor.take_array()?));
+            }
+            BridgeMessage::Cancel(request_id, handles)
         }
         6 => {
             let code = cursor.take_u8()?;
@@ -62,15 +67,23 @@ fn decode_public_key_response(
     if !(1..=MAX_PUBLIC_KEYS).contains(&count) {
         return Err(BridgeError::NonCanonical);
     }
-    let mut hashes = Vec::new();
-    hashes
-        .try_reserve_exact(count)
+    let mut keys = Vec::new();
+    keys.try_reserve_exact(count)
         .map_err(|_| BridgeError::Allocation)?;
-    for _ in 0..count {
-        hashes.push(Hash32::new(cursor.take_array()?));
+    for expected_order in 0..count {
+        let order = cursor.take_u8()?;
+        if usize::from(order) != expected_order {
+            return Err(BridgeError::NonCanonical);
+        }
+        keys.push(BrokerKeyMetadata::new(
+            order,
+            cursor.take_array()?,
+            cursor.take_array()?,
+            cursor.take_array()?,
+        )?);
     }
     Ok(BridgeMessage::PublicKeyResponse(
-        request_id, public_csr, hashes,
+        request_id, public_csr, keys,
     ))
 }
 

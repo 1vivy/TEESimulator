@@ -117,12 +117,17 @@ object BridgeCodec {
                     }
                     is BridgeMessage.PublicKeyResponse -> {
                         writeBytes(out, message.publicCsr)
-                        val hashes = message.publicKeyHashes()
+                        val keys = message.keyMetadata()
                         try {
-                            out.writeByte(hashes.size)
-                            hashes.forEach { writeFixed(out, it) }
+                            out.writeByte(keys.size)
+                            keys.forEach {
+                                out.writeByte(it.order)
+                                writeFixed(out, it.handle)
+                                writeFixed(out, it.publicKeyHash)
+                                writeFixed(out, it.spkiHash)
+                            }
                         } finally {
-                            hashes.forEach(Hash32::close)
+                            keys.forEach(BrokerKeyMetadata::close)
                         }
                     }
                     is BridgeMessage.UpdateRequest -> {
@@ -141,7 +146,15 @@ object BridgeCodec {
                             chain.forEach(PublicBytes::close)
                         }
                     }
-                    is BridgeMessage.Cancel -> out.writeByte(0)
+                    is BridgeMessage.Cancel -> {
+                        val handles = message.brokerHandles()
+                        try {
+                            out.writeByte(handles.size)
+                            handles.forEach { writeFixed(out, it) }
+                        } finally {
+                            handles.forEach(Hash32::close)
+                        }
+                    }
                     is BridgeMessage.Error -> {
                         out.writeByte(message.code.wire)
                         writeFixed(out, message.detailHash)
@@ -181,14 +194,23 @@ object BridgeCodec {
                     BridgeTag.PUBLIC_KEY_RESPONSE -> {
                         val csr = readPublicBytes(input, BridgeLimits.MAX_FRAME_BYTES, minimum = 1)
                         val count = input.readUnsignedByte()
-                        val hashes = mutableListOf<Hash32>()
+                        val keys = mutableListOf<BrokerKeyMetadata>()
                         try {
                             require(count in 1..BridgeLimits.MAX_PUBLIC_KEYS)
-                            repeat(count) { hashes += readHash(input) }
-                            BridgeMessage.PublicKeyResponse(requestId, csr, hashes)
+                            repeat(count) { order ->
+                                require(input.readUnsignedByte() == order)
+                                keys +=
+                                    BrokerKeyMetadata(
+                                        order,
+                                        readHash(input),
+                                        readHash(input),
+                                        readHash(input),
+                                    )
+                            }
+                            BridgeMessage.PublicKeyResponse(requestId, csr, keys)
                         } catch (error: Throwable) {
                             csr.close()
-                            hashes.forEach(Hash32::close)
+                            keys.forEach(BrokerKeyMetadata::close)
                             throw error
                         }
                     }
@@ -238,8 +260,15 @@ object BridgeCodec {
                         }
                     }
                     BridgeTag.CANCEL -> {
-                        require(input.readUnsignedByte() == 0)
-                        BridgeMessage.Cancel(requestId)
+                        val count = input.readUnsignedByte()
+                        require(count <= BridgeLimits.MAX_PUBLIC_KEYS)
+                        val handles = mutableListOf<Hash32>()
+                        try {
+                            repeat(count) { handles += readHash(input) }
+                            BridgeMessage.Cancel(requestId, handles)
+                        } finally {
+                            handles.forEach(Hash32::close)
+                        }
                     }
                     BridgeTag.ERROR -> {
                         val codeValue = input.readUnsignedByte()

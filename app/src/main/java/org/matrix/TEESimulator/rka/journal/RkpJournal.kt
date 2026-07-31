@@ -116,6 +116,7 @@ interface RkpJournalStore {
 
 class RkpJournal(private val store: RkpJournalStore) {
     private var clearBrokerBlobs: (() -> Unit)? = null
+    private var resolveBrokerBlob: ((ByteArray) -> Boolean)? = null
 
     fun begin(
         count: RkpKeyCount,
@@ -158,6 +159,7 @@ class RkpJournal(private val store: RkpJournalStore) {
     internal fun record(
         generating: RkpJournalRecord,
         entries: List<RkpJournalEntry>,
+        resolveBlob: (ByteArray) -> Boolean = { false },
         clearBlobs: () -> Unit,
     ): RkpJournalRecord {
         requireCurrent(generating)
@@ -167,6 +169,7 @@ class RkpJournal(private val store: RkpJournalStore) {
                 generating.copy(state = RkpJournalState.RKP_KEY_RECORDED, entries = entries)
             persist(recorded)
             clearBrokerBlobs = clearBlobs
+            resolveBrokerBlob = resolveBlob
             return recorded
         } catch (failure: RuntimeException) {
             clearBlobs()
@@ -204,6 +207,19 @@ class RkpJournal(private val store: RkpJournalStore) {
         return persist(current.copy(state = RkpJournalState.QUARANTINED))
     }
 
+    fun quarantineHandles(handles: List<ByteArray>): Boolean {
+        val current = store.read()?.let(RkpJournalCodec::decode) ?: return false
+        val expected = current.entries.map { it.handle.copyBytes() }
+        val exact =
+            handles.size == expected.size &&
+                handles.zip(expected).all { (actual, retained) ->
+                    actual.contentEquals(retained) && resolveBrokerBlob?.invoke(actual) == true
+                }
+        clearRetainedBlobs()
+        persist(current.copy(state = RkpJournalState.QUARANTINED))
+        return exact
+    }
+
     fun recover(): RkpJournalRecord? {
         val record = store.read()?.let(RkpJournalCodec::decode) ?: return null
         val recovery =
@@ -238,6 +254,7 @@ class RkpJournal(private val store: RkpJournalStore) {
     private fun clearRetainedBlobs() {
         clearBrokerBlobs?.invoke()
         clearBrokerBlobs = null
+        resolveBrokerBlob = null
     }
 
     private fun successor(state: RkpJournalState): RkpJournalState =

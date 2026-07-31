@@ -10,6 +10,7 @@ use thiserror::Error;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExpectedKey {
     handle: [u8; 32],
+    public_key_hash: [u8; 32],
     spki_hash: [u8; 32],
 }
 
@@ -17,7 +18,25 @@ impl ExpectedKey {
     /// Creates an expected key from its opaque handle and leaf SPKI SHA-256 digest.
     #[must_use]
     pub const fn new(handle: [u8; 32], spki_hash: [u8; 32]) -> Self {
-        Self { handle, spki_hash }
+        Self {
+            handle,
+            public_key_hash: spki_hash,
+            spki_hash,
+        }
+    }
+
+    /// Creates an expected key with distinct MACed-public and SPKI hashes.
+    #[must_use]
+    pub const fn with_public_hash(
+        handle: [u8; 32],
+        public_key_hash: [u8; 32],
+        spki_hash: [u8; 32],
+    ) -> Self {
+        Self {
+            handle,
+            public_key_hash,
+            spki_hash,
+        }
     }
 
     #[doc(hidden)]
@@ -89,6 +108,8 @@ pub struct ValidatedChain {
     pub order: u8,
     /// Opaque generated-key handle.
     pub handle: [u8; 32],
+    /// SHA-256 digest of the `MACed` public key.
+    pub public_key_hash: [u8; 32],
     /// SHA-256 digest of the leaf `SubjectPublicKeyInfo`.
     pub leaf_spki_hash: [u8; 32],
     /// SHA-256 digest of the exact concatenated DER chain.
@@ -284,6 +305,7 @@ fn validate(
         ordered.push(ValidatedChain {
             order: u8::try_from(order).map_err(|_| ValidationError::Count)?,
             handle: key.handle,
+            public_key_hash: key.public_key_hash,
             leaf_spki_hash: found_chain.0,
             chain_hash: found_chain.1,
             certificate_count: found_chain.2,

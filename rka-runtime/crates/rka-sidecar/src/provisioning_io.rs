@@ -178,7 +178,11 @@ impl FileStateStore {
     }
 }
 
-fn atomic_replace(path: &Path, value: &[u8]) -> std::io::Result<()> {
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "sibling trust runtime shares this private durable primitive"
+)]
+pub(crate) fn atomic_replace(path: &Path, value: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
     fs::create_dir_all(parent)?;
     let temporary = path.with_extension("tmp");

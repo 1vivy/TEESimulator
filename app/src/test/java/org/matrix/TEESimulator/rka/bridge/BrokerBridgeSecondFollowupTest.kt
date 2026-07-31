@@ -122,7 +122,7 @@ class BrokerBridgeSecondFollowupTest {
                 BridgeMessage.PublicKeyResponse(
                     it.requestId,
                     PublicBytes.of(byteArrayOf(7, 8, 9), BridgeLimits.MAX_FRAME_BYTES),
-                    listOf(Hash32.of(ByteArray(32))),
+                    testKeyMetadata(Hash32.of(ByteArray(32))),
                 )
             }
         val response = (result as BridgeResult.Success).value as BridgeMessage.PublicKeyResponse

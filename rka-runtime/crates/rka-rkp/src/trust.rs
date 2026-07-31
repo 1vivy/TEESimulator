@@ -61,6 +61,23 @@ impl RootBundle {
         Self::new(epoch, pins, roots, None)
     }
 
+    /// Creates the exact production roots with a no-overlap rotation verifier.
+    #[must_use]
+    pub fn production_with_rotation_key(epoch: u64, rotation_public_key: [u8; 32]) -> Self {
+        let roots = GOOGLE_ROOTS_DER
+            .iter()
+            .map(|root| root.to_vec())
+            .collect::<Vec<_>>();
+        let pins = roots.iter().map(|root| hash(root)).collect::<Vec<_>>();
+        Self::new(epoch, pins, roots, Some(rotation_public_key))
+    }
+
+    /// Creates a bundle from an already authenticated durable pin set.
+    #[must_use]
+    pub fn pinned(epoch: u64, pins: Vec<[u8; 32]>) -> Self {
+        Self::new(epoch, pins, Vec::new(), None)
+    }
+
     /// Creates a root bundle with a preconfigured Ed25519 rotation trust key.
     #[must_use]
     pub fn with_rotation_key(
@@ -124,6 +141,12 @@ impl RootBundle {
     #[must_use]
     pub const fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// Returns the complete sorted root pin set.
+    #[must_use]
+    pub fn pins(&self) -> &[[u8; 32]] {
+        &self.pins
     }
 
     /// Returns the domain-separated bytes that authorize a proposed rotation.

@@ -11,8 +11,8 @@ use std::{
 };
 
 use rka_sidecar::bridge::{
-    BridgeError, BridgeMessage, Correlation, ExchangeRole, Hash32, NetworkHandle, PublicBytes,
-    RequestId, decode_frame, encode_frame, read_frame,
+    BridgeError, BridgeMessage, BrokerKeyMetadata, Correlation, ExchangeRole, NetworkHandle,
+    PublicBytes, RequestId, decode_frame, encode_frame, read_frame,
 };
 
 struct SocketPath(PathBuf);
@@ -35,7 +35,7 @@ fn response() -> Result<BridgeMessage, BridgeError> {
     Ok(BridgeMessage::PublicKeyResponse(
         RequestId::new(9),
         PublicBytes::bounded(&[1], 1, 1)?,
-        vec![Hash32::new([2; 32])],
+        vec![BrokerKeyMetadata::new(0, [2; 32], [3; 32], [4; 32])?],
     ))
 }
 
@@ -112,7 +112,7 @@ fn bridge_correlation_rejects_kind_id_generation_replay_and_out_of_order()
     let wrong_id = BridgeMessage::PublicKeyResponse(
         RequestId::new(10),
         PublicBytes::bounded(&[1], 1, 1)?,
-        vec![Hash32::new([2; 32])],
+        vec![BrokerKeyMetadata::new(0, [2; 32], [3; 32], [4; 32])?],
     );
     assert!(!correlation.accepts(&wrong_id, 3));
     let wrong_kind = BridgeMessage::PublicResult(
@@ -124,5 +124,36 @@ fn bridge_correlation_rejects_kind_id_generation_replay_and_out_of_order()
     let encoded = encode_frame(&wrong_kind, ExchangeRole::DonorResponse)?;
     let decoded_wrong_kind = decode_frame(encoded.as_slice(), ExchangeRole::DonorResponse)?;
     assert!(!correlation.accepts(&decoded_wrong_kind, 3));
+    Ok(())
+}
+
+#[test]
+fn bridge_preserves_two_exact_key_identities_and_rejects_order_mutation()
+-> Result<(), Box<dyn Error>> {
+    let message = BridgeMessage::PublicKeyResponse(
+        RequestId::new(12),
+        PublicBytes::bounded(&[9], 1, 1)?,
+        vec![
+            BrokerKeyMetadata::new(0, [1; 32], [2; 32], [3; 32])?,
+            BrokerKeyMetadata::new(1, [4; 32], [5; 32], [6; 32])?,
+        ],
+    );
+    let encoded = encode_frame(&message, ExchangeRole::DonorResponse)?;
+    let decoded = decode_frame(encoded.as_slice(), ExchangeRole::DonorResponse)?;
+    let BridgeMessage::PublicKeyResponse(_, _, keys) = decoded else {
+        return Err("wrong response".into());
+    };
+    let first = keys.first().ok_or("first key")?;
+    let second = keys.get(1).ok_or("second key")?;
+    assert_eq!(first.handle(), &[1; 32]);
+    assert_eq!(second.public_key_hash(), &[5; 32]);
+    assert_eq!(second.spki_hash(), &[6; 32]);
+
+    let mut mutated = encoded.as_slice().to_vec();
+    *mutated.get_mut(127).ok_or("second order")? = 0;
+    assert_eq!(
+        decode_frame(&mutated, ExchangeRole::DonorResponse),
+        Err(BridgeError::NonCanonical)
+    );
     Ok(())
 }

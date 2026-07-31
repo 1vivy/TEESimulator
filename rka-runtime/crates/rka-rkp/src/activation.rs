@@ -40,6 +40,7 @@ pub fn activate_validated_response(
                 usize::from(chain.order) < validated.chains().len()
                     && metadata.order == chain.order
                     && metadata.remote_handle.as_bytes() == &chain.handle
+                    && metadata.public_key_hash.as_bytes() == &chain.public_key_hash
                     && metadata.spki_hash.as_bytes() == &chain.leaf_spki_hash
                     && metadata.chain.chain_hash.as_bytes() == &chain.chain_hash
                     && metadata.chain.certificate_count == chain.certificate_count

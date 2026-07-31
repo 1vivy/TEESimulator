@@ -161,6 +161,33 @@ class Hash32 private constructor(bytes: ByteArray) : AutoCloseable {
     }
 }
 
+class BrokerKeyMetadata(
+    val order: Int,
+    val handle: Hash32,
+    val publicKeyHash: Hash32,
+    val spkiHash: Hash32,
+) : AutoCloseable {
+    init {
+        require(order in 0 until BridgeLimits.MAX_PUBLIC_KEYS)
+    }
+
+    internal fun copy(): BrokerKeyMetadata =
+        BrokerKeyMetadata(
+            order,
+            Hash32.of(handle.copyBytes()),
+            Hash32.of(publicKeyHash.copyBytes()),
+            Hash32.of(spkiHash.copyBytes()),
+        )
+
+    override fun close() {
+        handle.close()
+        publicKeyHash.close()
+        spkiHash.close()
+    }
+
+    override fun toString(): String = "BrokerKeyMetadata(order=$order,redacted)"
+}
+
 class NetworkHandle private constructor(bytes: ByteArray) : AutoCloseable {
     private val value = bytes.copyOf()
     private val destroyed = AtomicBoolean()
@@ -222,27 +249,36 @@ sealed class BridgeMessage : AutoCloseable {
     class PublicKeyResponse(
         override val requestId: RequestId,
         val publicCsr: PublicBytes,
-        hashes: List<Hash32>,
+        keys: List<BrokerKeyMetadata>,
     ) : BridgeMessage() {
-        private val values = hashes.toList()
+        private val values = keys.map(BrokerKeyMetadata::copy)
 
         init {
             require(publicCsr.size in 1..BridgeLimits.MAX_FRAME_BYTES)
             require(values.size in 1..BridgeLimits.MAX_PUBLIC_KEYS)
+            require(values.map { it.order } == values.indices.toList())
+            require(distinct(values.map { it.handle.copyBytes() }))
+            require(distinct(values.map { it.publicKeyHash.copyBytes() }))
+            require(distinct(values.map { it.spkiHash.copyBytes() }))
             val encodedSize =
-                4L + publicCsr.size + 1L + Math.multiplyExact(values.size.toLong(), 32L)
+                4L + publicCsr.size + 1L + Math.multiplyExact(values.size.toLong(), 97L)
             require(encodedSize <= BridgeLimits.MAX_FRAME_BYTES)
         }
 
-        fun publicKeyHashes(): List<Hash32> = values.map { Hash32.of(it.copyBytes()) }
+        fun keyMetadata(): List<BrokerKeyMetadata> = values.map(BrokerKeyMetadata::copy)
 
         override fun toString(): String =
-            "PublicKeyResponse(requestId=$requestId,csrLength=${publicCsr.size},hashCount=${values.size})"
+            "PublicKeyResponse(requestId=$requestId,csrLength=${publicCsr.size},keyCount=${values.size})"
 
         override fun close() {
             publicCsr.close()
-            values.forEach(Hash32::close)
+            values.forEach(BrokerKeyMetadata::close)
         }
+
+        private fun distinct(items: List<ByteArray>): Boolean =
+            items.indices.all { index ->
+                items.drop(index + 1).none { candidate -> items[index].contentEquals(candidate) }
+            }
     }
 
     class UpdateRequest(
@@ -313,14 +349,25 @@ sealed class BridgeMessage : AutoCloseable {
         }
     }
 
-    class Cancel(override val requestId: RequestId) : BridgeMessage() {
+    class Cancel(
+        override val requestId: RequestId,
+        handles: List<Hash32> = emptyList(),
+    ) : BridgeMessage() {
+        private val values = handles.map { Hash32.of(it.copyBytes()) }
+
+        init {
+            require(values.size <= BridgeLimits.MAX_PUBLIC_KEYS)
+        }
+
+        fun brokerHandles(): List<Hash32> = values.map { Hash32.of(it.copyBytes()) }
+
         override fun equals(other: Any?): Boolean = other is Cancel && requestId == other.requestId
 
         override fun hashCode(): Int = requestId.hashCode()
 
         override fun toString(): String = "Cancel(requestId=$requestId)"
 
-        override fun close() = Unit
+        override fun close() = values.forEach(Hash32::close)
     }
 
     class Error(

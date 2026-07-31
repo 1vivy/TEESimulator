@@ -59,15 +59,38 @@ impl RootTrustManager {
         pins: Vec<[u8; 32]>,
         authorization: Option<&RootRotationAuthorization>,
     ) -> Result<(), TrustSessionError> {
+        self.pause_rotate_and_persist(next_epoch, pins, authorization, |_| Ok(()))
+    }
+
+    /// Pauses admission, durably persists a validated bundle, then swaps it.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "rotation binds epoch, pins, authorization, and durable commit"
+    )]
+    pub fn pause_rotate_and_persist(
+        &self,
+        next_epoch: u64,
+        pins: Vec<[u8; 32]>,
+        authorization: Option<&RootRotationAuthorization>,
+        persist: impl FnOnce(&RootBundle) -> Result<(), ()>,
+    ) -> Result<(), TrustSessionError> {
         let mut state = self.state.lock().map_err(|_| TrustSessionError::Poisoned)?;
         state.accepting = false;
         if state.active != 0 {
             return Err(TrustSessionError::ActiveSessions);
         }
-        state.bundle = state
-            .bundle
-            .rotate(next_epoch, pins, authorization)
-            .map_err(TrustSessionError::Rotation)?;
+        let next = match state.bundle.rotate(next_epoch, pins, authorization) {
+            Ok(next) => next,
+            Err(error) => {
+                state.accepting = true;
+                return Err(TrustSessionError::Rotation(error));
+            }
+        };
+        if persist(&next).is_err() {
+            state.accepting = true;
+            return Err(TrustSessionError::Persistence);
+        }
+        state.bundle = next;
         state.accepting = true;
         drop(state);
         Ok(())
@@ -113,4 +136,7 @@ pub enum TrustSessionError {
     /// The process cannot safely recover shared trust state.
     #[error("root trust state is unavailable")]
     Poisoned,
+    /// The validated bundle could not be made durable.
+    #[error("root trust persistence failed")]
+    Persistence,
 }

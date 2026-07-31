@@ -68,6 +68,8 @@ private class BrokerKeyBlobOwner(private val onWipe: (ByteArray) -> Unit) : Auto
 
     fun isEmpty(): Boolean = blobs.isEmpty()
 
+    fun contains(handle: ByteArray): Boolean = blobs.containsKey(handle.hex())
+
     override fun close() = clear()
 }
 
@@ -104,7 +106,7 @@ internal constructor(
         require(entries.size == keys.size)
         try {
             entries.zip(keys).forEach { (entry, key) -> owner.retain(entry.handle.copyBytes(), key) }
-            journal.record(intent, entries, owner::clear)
+            journal.record(intent, entries, owner::contains, owner::clear)
         } catch (failure: RuntimeException) {
             wipe()
             throw failure

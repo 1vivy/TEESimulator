@@ -99,20 +99,73 @@ macro_rules! fixed_bytes {
 fixed_bytes!(Hash32, 32, "Redacted fixed-width public hash.");
 fixed_bytes!(NetworkHandle, 16, "Opaque network-only operation handle.");
 
+/// Exact broker-journal identity for one ordered generated key.
+#[derive(Debug, Eq, PartialEq)]
+pub struct BrokerKeyMetadata {
+    order: u8,
+    handle: Hash32,
+    public_key_hash: Hash32,
+    spki_hash: Hash32,
+}
+
+impl BrokerKeyMetadata {
+    /// Creates one bounded ordered broker identity.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one ordered key binds three independent broker identities"
+    )]
+    pub fn new(
+        order: u8,
+        handle: [u8; 32],
+        public_key_hash: [u8; 32],
+        spki_hash: [u8; 32],
+    ) -> Result<Self, BridgeError> {
+        if usize::from(order) >= MAX_PUBLIC_KEYS {
+            return Err(BridgeError::NonCanonical);
+        }
+        Ok(Self {
+            order,
+            handle: Hash32::new(handle),
+            public_key_hash: Hash32::new(public_key_hash),
+            spki_hash: Hash32::new(spki_hash),
+        })
+    }
+
+    /// Returns the broker-journal order.
+    pub const fn order(&self) -> u8 {
+        self.order
+    }
+
+    /// Returns the exact opaque broker handle.
+    pub const fn handle(&self) -> &[u8; 32] {
+        self.handle.as_array()
+    }
+
+    /// Returns the MACed-public-key hash.
+    pub const fn public_key_hash(&self) -> &[u8; 32] {
+        self.public_key_hash.as_array()
+    }
+
+    /// Returns the SPKI hash.
+    pub const fn spki_hash(&self) -> &[u8; 32] {
+        self.spki_hash.as_array()
+    }
+}
+
 #[doc = "One closed, public-only bridge DTO."]
 #[derive(Eq, PartialEq)]
 #[non_exhaustive]
 pub enum BridgeMessage {
     #[doc = "Requests public CSR material."]
     PublicKeyRequest(RequestId, PublicBytes, u8),
-    #[doc = "Returns public CSR and public-key hashes."]
-    PublicKeyResponse(RequestId, PublicBytes, Vec<Hash32>),
+    #[doc = "Returns public CSR and exact ordered broker identities."]
+    PublicKeyResponse(RequestId, PublicBytes, Vec<BrokerKeyMetadata>),
     #[doc = "Supplies a bounded operation chunk."]
     UpdateRequest(RequestId, NetworkHandle, PublicBytes, u32),
     #[doc = "Returns a public SPKI and DER chain."]
     PublicResult(RequestId, NetworkHandle, PublicBytes, Vec<PublicBytes>),
     #[doc = "Cancels one correlated request."]
-    Cancel(RequestId),
+    Cancel(RequestId, Vec<Hash32>),
     #[doc = "Returns one redacted typed failure."]
     Error(RequestId, u8, Hash32),
 }
@@ -125,7 +178,7 @@ impl BridgeMessage {
             | Self::PublicKeyResponse(id, ..)
             | Self::UpdateRequest(id, ..)
             | Self::PublicResult(id, ..)
-            | Self::Cancel(id)
+            | Self::Cancel(id, ..)
             | Self::Error(id, ..) => *id,
         }
     }

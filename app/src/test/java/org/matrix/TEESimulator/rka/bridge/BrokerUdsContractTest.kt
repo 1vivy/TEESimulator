@@ -30,7 +30,7 @@ class BrokerUdsContractTest {
                 BridgeMessage.PublicKeyResponse(
                     message.requestId,
                     PublicBytes.of(byteArrayOf(0x01, 0x02), BridgeLimits.MAX_FRAME_BYTES),
-                    listOf(Hash32.of(ByteArray(32) { 0x55 })),
+                    testKeyMetadata(Hash32.of(ByteArray(32) { 0x55 })),
                 )
             }
 

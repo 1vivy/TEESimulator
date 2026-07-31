@@ -21,16 +21,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from tdd_receipt_verifier import ReceiptError, verify_evidence
+from tdd_receipt_verifier import (
+    ReceiptError,
+    Receipt,
+    TaskEvidence,
+    parse_receipt,
+    verify_task,
+)
 
-TASK_PATTERN: Final = re.compile(r"^- \[ \] (\d+)\.", re.MULTILINE)
+TASK_PATTERN: Final = re.compile(r"^- \[[ x]\] ((?:\d+)|(?:F[1-5]))\.", re.MULTILINE)
+EXPECTED_TASKS: Final = tuple(str(value) for value in range(1, 29)) + tuple(
+    f"F{value}" for value in range(1, 6)
+)
 
 
 @dataclass(frozen=True, slots=True)
 class CliArgs:
     plan: Path
     evidence: Path
-    tasks: tuple[int, ...] | None
+    tasks: tuple[str, ...] | None
 
 
 def parse_args(arguments: list[str]) -> CliArgs:
@@ -40,17 +49,17 @@ def parse_args(arguments: list[str]) -> CliArgs:
     if set(values) not in ({"--plan", "--evidence"}, {"--plan", "--evidence", "--tasks"}):
         raise ReceiptError("USAGE", "expected --plan PLAN --evidence DIR [--tasks LIST]")
     raw_tasks = values.get("--tasks")
-    tasks = tuple(int(value) for value in raw_tasks.split(",")) if raw_tasks else None
+    tasks = tuple(raw_tasks.split(",")) if raw_tasks else None
     return CliArgs(Path(values["--plan"]), Path(values["--evidence"]), tasks)
 
 
-def plan_tasks(plan: Path) -> tuple[int, ...]:
+def plan_tasks(plan: Path) -> tuple[str, ...]:
     try:
         text = plan.read_text(encoding="utf-8")
     except OSError as error:
         raise ReceiptError("PLAN_UNREADABLE", str(plan)) from error
-    tasks = tuple(int(match) for match in TASK_PATTERN.findall(text))
-    if tasks != tuple(range(1, 28)):
+    tasks = tuple(TASK_PATTERN.findall(text))
+    if tasks != EXPECTED_TASKS:
         raise ReceiptError("PLAN_TASK_SET_INVALID", f"found tasks {tasks}")
     return tasks
 
@@ -62,7 +71,36 @@ def main() -> int:
         tasks = args.tasks or available
         if not tasks or not set(tasks).issubset(available):
             raise ReceiptError("TASK_SELECTION_INVALID", str(tasks))
-        verify_evidence(Path.cwd(), args.evidence, tasks)
+        for task in tasks:
+            red_path = args.evidence / f"task-{task}-red.txt"
+            green_path = args.evidence / f"task-{task}-green.txt"
+            try:
+                red = red_path.read_bytes()
+                green = green_path.read_bytes()
+            except OSError as error:
+                raise ReceiptError("MISSING_RECEIPT", str(error.filename)) from error
+            task_number = int(task) if task.isdigit() else 28 + int(task[1:])
+            parsed_red = parse_receipt(red, red_path.name)
+            parsed_green = parse_receipt(green, green_path.name)
+            normalized_red = Receipt(
+                parsed_red.label,
+                parsed_red.fields | {"TASK": str(task_number)},
+                parsed_red.raw,
+            )
+            normalized_green = Receipt(
+                parsed_green.label,
+                parsed_green.fields | {"TASK": str(task_number)},
+                parsed_green.raw,
+            )
+            verify_task(
+                TaskEvidence(
+                    Path.cwd(),
+                    args.evidence,
+                    task_number,
+                    normalized_red,
+                    normalized_green,
+                )
+            )
     except (ReceiptError, ValueError) as error:
         print(error, file=sys.stderr)
         return 1

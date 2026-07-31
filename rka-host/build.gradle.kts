@@ -19,6 +19,9 @@ dependencies {
 }
 
 application {
-    mainClass.set("org.matrix.teesimulator.rkahost.CandidateIdentityGateCli")
+    mainClass.set("org.matrix.teesimulator.rkahost.cli.HostCli")
     applicationName = "rka-host"
+    applicationDefaultJvmArgs = listOf("--add-opens=java.base/java.io=ALL-UNNAMED")
 }
+
+tasks.test { jvmArgs("--add-opens=java.base/java.io=ALL-UNNAMED") }

@@ -234,10 +234,19 @@ exit 0
             script
                 .substringAfter("remote_helper=\"\$(cat <<'REMOTE_HELPER'\n")
                 .substringBefore("\nREMOTE_HELPER\n")
+        val transport = projectRoot.resolve("scripts/rka-adb-root.sh")
         val process =
             ProcessBuilder(
-                    listOf(adb.toString(), "-s", serial, "shell", "su", "0", "sh", "-s", "--") +
-                        arguments
+                    listOf(
+                        "bash",
+                        "-c",
+                        "source \"\$1\"; shift; rka_adb_root_run \"\$@\"",
+                        "bash",
+                        transport.toString(),
+                        adb.toString(),
+                        serial,
+                        "$helper\n",
+                    ) + arguments
                 )
                 .directory(projectRoot.toFile())
                 .apply {
@@ -246,7 +255,6 @@ exit 0
                     environment()["RKA_FAKE_TLS_ROOT"] = root.resolve("tls").toString()
                 }
                 .start()
-        process.outputStream.use { it.write(helper.toByteArray()) }
         val stdout = process.inputStream.bufferedReader().readText()
         val stderr = process.errorStream.bufferedReader().readText()
         return DeployResult(process.waitFor(), stdout, stderr)
@@ -365,6 +373,8 @@ os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zi
                     " push " in " $line " -> "push"
                     " mkdir -p " in line -> "prepare"
                     " -- " in line -> line.substringAfter(" -- ").substringBefore(' ')
+                    " shell su 0 sh " in line ->
+                        line.substringAfter(" shell su 0 sh ").substringBefore(' ')
                     else -> "unknown"
                 }
             "$serial:$command"

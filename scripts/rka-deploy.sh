@@ -35,6 +35,8 @@ done
 [[ "$evidence" = /* && ! -L "$evidence" ]] || fail ARGUMENT_INVALID
 
 project_root="$(cd -- "${BASH_SOURCE[0]%/*}/.." && pwd -P)"
+# shellcheck source=scripts/rka-adb-root.sh
+source "$project_root/scripts/rka-adb-root.sh"
 pair_fd="${!pair_fd_env-}"
 [[ "$pair_fd" =~ ^[0-9]+$ && -r "/proc/self/fd/$pair_fd" ]] || fail PAIR_DESCRIPTOR_INVALID
 mapfile -t pair_values < <(
@@ -242,7 +244,7 @@ preflight)
         fi
         init_ns=$(readlink /proc/1/ns/mnt) || { printf "RESULT=INCOMPATIBLE reason=INIT_NAMESPACE\n"; exit; }
         [ -n "$init_ns" ] || { printf "RESULT=INCOMPATIBLE reason=MOUNT_SEMANTICS\n"; exit; }
-        for command in base64 find head lsattr logcat nsenter sha256sum stat timeout toybox xxd; do
+        for command in base64 find head lsattr logcat mktemp nsenter sha256sum stat timeout toybox xxd; do
             command -v "$command" >/dev/null 2>&1 || { printf "RESULT=INCOMPATIBLE reason=DEPLOY_TOOLING\n"; exit; }
         done
         boot_hash=$(sha256sum /proc/sys/kernel/random/boot_id | awk "{print \$1}")
@@ -275,7 +277,7 @@ sepolicy_cli=true" ] || { printf "RESULT=INCOMPATIBLE reason=KSUD_PROVENANCE\n";
     case "$ksud_pid" in *" "*) printf "RESULT=INCOMPATIBLE reason=KSUD_PROCESS\n"; exit ;; esac
     ksud_ns=$(readlink "/proc/$ksud_pid/ns/mnt") || { printf "RESULT=INCOMPATIBLE reason=KSUD_NAMESPACE\n"; exit; }
     [ -n "$init_ns" ] && [ -n "$ksud_ns" ] || { printf "RESULT=INCOMPATIBLE reason=MOUNT_SEMANTICS\n"; exit; }
-    for command in base64 find head lsattr logcat nsenter sha256sum stat timeout toybox xxd; do
+    for command in base64 find head lsattr logcat mktemp nsenter sha256sum stat timeout toybox xxd; do
         command -v "$command" >/dev/null 2>&1 || { printf "RESULT=INCOMPATIBLE reason=DEPLOY_TOOLING\n"; exit; }
     done
     if [ -x "$active/rka-control.sh" ]; then
@@ -350,6 +352,23 @@ manager-probe)
     trap - EXIT HUP INT TERM
     [ ! -e "$probe" ] && [ ! -L "$probe" ] || exit 1
     printf 'RESULT=AUTHORIZED surface=%s appid=%s package=%s probe_cleanup=REMOVED\n' "$surface" "$appid" "$package"
+    ;;
+prepare-probe)
+    mkdir -p "$state/probes"
+    chmod 700 "$state" "$state/probes"
+    ;;
+cleanup-probe)
+    tx=$1 role=$2
+    case "$tx" in ""|*[!A-Za-z0-9._-]*) exit 2 ;; esac
+    case "$role" in DONOR|CANDIDATE) ;; *) exit 2 ;; esac
+    probe="$state/probes/$tx.$role.manager-appid"
+    : PROBE_CLEANUP_ROLLBACK
+    rm -f "$probe"
+    [ ! -e "$probe" ] && [ ! -L "$probe" ]
+    ;;
+prepare-upload)
+    mkdir -p "$state/upload"
+    chmod 700 "$state" "$state/upload"
     ;;
 network)
     endpoint=$(ip -o -4 addr show up scope global 2>/dev/null | awk "\$2 ~ /^(tailscale|wlan)/ {split(\$4, value, \"/\"); print value[1]}" | head -n 1)
@@ -751,12 +770,12 @@ rollback)
 esac
 REMOTE_HELPER
 )"
+remote_helper+=$'\n'
 
 remote() {
     local serial="$1"
     shift
-    printf '%s\n' "$remote_helper" |
-        "$adb_command" -s "$serial" shell su 0 sh -s -- "$@"
+    rka_adb_root_run "$adb_command" "$serial" "$remote_helper" "$@"
 }
 
 preflight_one() {
@@ -785,9 +804,9 @@ authorize_next_manager() {
     [[ "$profile" == "$KSU_NEXT_PROFILE" ]] || return 0
     local remote_probe="$STATE_ROOT/probes/$transaction_id.$role.manager-appid"
     cleanup_remote_probe() {
-        "$adb_command" -s "$serial" shell su 0 sh -c ": PROBE_CLEANUP_ROLLBACK; rm -f '$remote_probe'; [ ! -e '$remote_probe' ] && [ ! -L '$remote_probe' ]"
+        remote "$serial" cleanup-probe "$transaction_id" "$role"
     }
-    "$adb_command" -s "$serial" shell su 0 sh -c "mkdir -p '$STATE_ROOT/probes' && chmod 700 '$STATE_ROOT' '$STATE_ROOT/probes'" >/dev/null
+    remote "$serial" prepare-probe >/dev/null
     "$adb_command" -s "$serial" push "$local_probe" "$remote_probe" >/dev/null
     remote "$serial" READ_ONLY_PROBE_TRANSFER "$transaction_id" "$remote_probe" "$probe_sha" "$role" >/dev/null || {
         cleanup_remote_probe >/dev/null 2>&1 || fail KSU_PROBE_CLEANUP_FAILED 3
@@ -824,9 +843,8 @@ candidate_endpoint="${candidate_network##* endpoint=}"
 [[ "$donor_endpoint" =~ ^[0-9.]+$ && "$candidate_endpoint" =~ ^[0-9.]+$ ]] ||
     fail DIRECT_PATH_UNAVAILABLE 3
 
-mkdir_remote=(shell su 0 sh -c "mkdir -p '$STATE_ROOT/upload' && chmod 700 '$STATE_ROOT' '$STATE_ROOT/upload'")
-"$adb_command" -s "$donor_serial" "${mkdir_remote[@]}" >/dev/null
-"$adb_command" -s "$candidate_serial" "${mkdir_remote[@]}" >/dev/null
+remote "$donor_serial" prepare-upload >/dev/null
+remote "$candidate_serial" prepare-upload >/dev/null
 "$adb_command" -s "$donor_serial" push "$zip_path" "$REMOTE_ZIP" >/dev/null
 "$adb_command" -s "$candidate_serial" push "$zip_path" "$REMOTE_ZIP" >/dev/null
 "$adb_command" -s "$donor_serial" push "$zip_path.source-sha" "$REMOTE_ZIP.source-sha" >/dev/null

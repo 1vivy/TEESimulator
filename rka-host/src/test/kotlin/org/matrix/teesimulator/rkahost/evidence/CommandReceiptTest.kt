@@ -108,7 +108,10 @@ class CommandReceiptTest {
                     ),
                 )
         }
-        val tamperedSignature = encoded.replace(Regex("(?m)^signature=."), "signature=A")
+        val tamperedSignature =
+            encoded.replace(Regex("(?m)^signature=(.)")) {
+                "signature=${if (it.groupValues[1] == "A") "B" else "A"}"
+            }
         val signatureFailure =
             assertThrows(ReceiptException::class.java) {
                 ReceiptVerifier(ReceiptTestKeys.trustedKeys)

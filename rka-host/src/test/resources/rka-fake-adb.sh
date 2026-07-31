@@ -3,11 +3,11 @@ set -euo pipefail
 
 serial=$2
 shift 2
-printf '%s %s\n' "$serial" "$*" >> "$RKA_FAKE_LOG"
 device="$RKA_FAKE_DEVICE_ROOT/$serial"
 root="$device/root"
 
 if [ "${1-}" = push ]; then
+    printf '%s %s\n' "$serial" "$*" >> "$RKA_FAKE_LOG"
     mkdir -p "$root${3%/*}"
     cp "$2" "$root$3"
     if [ "${RKA_FAKE_CORRUPT_ARCHIVE_SERIAL:-}" = "$serial" ] && [ "$3" = /data/adb/teesimulator-rka/upload/role-neutral-release.zip ]; then
@@ -22,25 +22,19 @@ if [ "${1-}" = push ]; then
     exit 0
 fi
 
-if [[ " $* " == *" PROBE_CLEANUP_ROLLBACK; "* ]]; then
-    cleanup_command=${*: -1}
-    probe=${cleanup_command#*rm -f \'}
-    probe=${probe%%\'*}
-    if [ "${RKA_FAKE_NEXT_MUTATION:-}" = probe-cleanup-failure ]; then
-        [[ "$cleanup_command" == *"[ ! -e "* ]] && exit 1
-        exit 0
-    fi
-    rm -f "$root$probe"
-    [ ! -e "$root$probe" ]
-    exit
+[[ "$#" -eq 4 && "$1" = shell && "$2" = su && "$3" = 0 && "$4" = sh ]] || exit 92
+wire_payload=$(cat)
+payload=${wire_payload#*"<<'RKA_ADB_ROOT_PAYLOAD_7D4C2A91'"$'\n'}
+[[ "$payload" != "$wire_payload" ]] || exit 93
+payload=${payload%%$'\n'RKA_ADB_ROOT_PAYLOAD_7D4C2A91$'\n'*}
+payload+=$'\n'
+first_line=${payload%%$'\n'*}
+read -r set_marker dash_marker mode _remote_arguments <<< "$first_line"
+[[ "$set_marker" = set && "$dash_marker" = -- && -n "$mode" ]] || exit 93
+printf '%s shell su 0 sh %s\n' "$serial" "${first_line#set -- }" >> "$RKA_FAKE_LOG"
+if [ "$mode" = cleanup-probe ]; then
+    printf '%s PROBE_CLEANUP_ROLLBACK\n' "$serial" >> "$RKA_FAKE_LOG"
 fi
-
-if [[ " $* " == *" mkdir -p "* ]]; then
-    mkdir -p "$root/data/adb/teesimulator-rka/upload"
-    exit 0
-fi
-
-mode=${7-}
 if [ "$mode" = preflight ] && [ "${RKA_FAKE_INCOMPATIBLE:-}" = "$serial" ]; then
     printf '%s\n' 'RESULT=INCOMPATIBLE reason=KSUD_VERSION'
     exit 0
@@ -52,7 +46,7 @@ if [ "$mode" = deploy ] && [ "${RKA_FAKE_FAIL_DEPLOY:-}" = "$serial" ]; then
     exit 1
 fi
 
-mkdir -p "$root"/{data/adb/modules,data/adb/modules_update,data/adb/teesimulator-rka,data/adb/ksu/bin,data/system,dev,etc,proc,shim,tmp,usr,bin,lib,lib64,run}
+mkdir -p "$root"/{data/adb/modules,data/adb/modules_update,data/adb/teesimulator-rka,data/adb/ksu/bin,data/local/tmp,data/system,dev,etc,proc,shim,tmp,usr,bin,lib,lib64,run}
 chmod 700 "$root/data/adb/teesimulator-rka"
 if [ "${RKA_FAKE_FIRST_INSTALL:-false}" = true ] && [ ! -e "$root/data/adb/modules/tricky_store" ] && [ ! -e "$root/data/adb/modules_update/tricky_store" ]; then
     rm -rf "$root/data/adb/modules" "$root/data/adb/modules_update"
@@ -338,8 +332,7 @@ if [ "${RKA_FAKE_KSU_PROFILE:-legacy}" = ksu-next-dual ]; then
     esac
 fi
 
-shift 7
-exec bwrap \
+printf '%s\n' "$wire_payload" | bwrap \
     --bind "$root" / \
     --ro-bind /usr /usr \
     --ro-bind /bin /bin \
@@ -364,4 +357,4 @@ exec bwrap \
     --setenv RKA_FAKE_FAULT "${RKA_FAKE_FAULT:-}" \
     --setenv RKA_FAKE_WEBUI_OWNER "${RKA_FAKE_WEBUI_OWNER:-}" \
     --setenv RKA_FAKE_ZYGOTE "${RKA_FAKE_ZYGOTE:-}" \
-    /bin/sh -s -- "$mode" "$@"
+    /bin/sh

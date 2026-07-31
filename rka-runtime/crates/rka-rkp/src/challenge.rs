@@ -6,6 +6,7 @@ use std::io::Read;
 use thiserror::Error;
 
 use crate::config::{BaseUrl, ConfigError, ProvisioningInfo, parse_fetch_response};
+use crate::outcome::{FailureDisposition, PostFailure, UploadProgress};
 use crate::{MAX_PROVISIONING_BYTES, ResponseHeaders, base64_url, uuid};
 
 const MAX_CHALLENGE_BYTES: usize = 64;
@@ -180,6 +181,12 @@ pub enum ClientError {
     /// The closed transport failed.
     #[error("provisioning transport failed")]
     Transport,
+    /// Connection establishment failed before any request byte was written.
+    #[error("provisioning connection failed before upload")]
+    ConnectBeforeUpload,
+    /// The request may have reached the server without a durable response.
+    #[error("provisioning POST outcome is ambiguous")]
+    PostAmbiguous,
     /// Kernel or injected entropy failed.
     #[error("request identifier entropy failed")]
     Entropy,
@@ -291,14 +298,27 @@ impl<T: HttpTransport, S: EffectiveBaseStore, E: EntropySource, J: AttemptJourna
             self.effective_base,
             base64_url(challenge)
         );
-        let response = self.transport.post(HttpRequest {
-            url: &url,
-            headers: &[
-                ("Accept", "application/cbor"),
-                ("Content-Type", "application/cbor"),
-            ],
-            body,
-        })?;
+        let send = |transport: &mut T| {
+            transport.post(HttpRequest {
+                url: &url,
+                headers: &[
+                    ("Accept", "application/cbor"),
+                    ("Content-Type", "application/cbor"),
+                ],
+                body,
+            })
+        };
+        let response = match send(&mut self.transport) {
+            Err(ClientError::ConnectBeforeUpload)
+                if FailureDisposition::classify(
+                    UploadProgress::NoRequestByteWritten,
+                    PostFailure::Connect,
+                ) == FailureDisposition::Retryable =>
+            {
+                send(&mut self.transport)?
+            }
+            result => result?,
+        };
         validate_response(&response)?;
         Ok(SignedCertificateResponse {
             request_id,
@@ -420,6 +440,29 @@ mod tests {
             panic!("expected exactly two uploads");
         };
         assert_ne!(first.url, second.url);
+    }
+
+    #[test]
+    fn proven_zero_byte_connect_retry_reuses_the_exact_request() {
+        let mut transport = FakeTransport::new(vec![HttpResponse::ok(Vec::new())]);
+        transport.connect_failures = 1;
+        let mut client = ProvisioningHttpClient::new(
+            BaseUrl::parse("https://rkp.example").unwrap(),
+            (
+                transport,
+                MemoryStore::default(),
+                FixedEntropy::new([9; 16]),
+                MemoryJournal::default(),
+            ),
+        );
+
+        client.sign(&[1, 2], &[3; 16]).unwrap();
+
+        let [first, second] = client.transport().calls() else {
+            panic!("expected exact one retry");
+        };
+        assert_eq!(first.url, second.url);
+        assert_eq!(first.body, second.body);
     }
 
     #[test]
@@ -629,6 +672,7 @@ mod tests {
         responses: Vec<HttpResponse>,
         calls: Vec<OwnedRequest>,
         order: Option<Rc<RefCell<Vec<&'static str>>>>,
+        connect_failures: usize,
     }
     impl FakeTransport {
         fn new(mut responses: Vec<HttpResponse>) -> Self {
@@ -637,6 +681,7 @@ mod tests {
                 responses,
                 calls: Vec::new(),
                 order: None,
+                connect_failures: 0,
             }
         }
         fn with_order(
@@ -648,6 +693,7 @@ mod tests {
                 responses,
                 calls: Vec::new(),
                 order: Some(order),
+                connect_failures: 0,
             }
         }
         fn calls(&self) -> &[OwnedRequest] {
@@ -668,6 +714,10 @@ mod tests {
                     .collect(),
                 body: request.body.to_vec(),
             });
+            if self.connect_failures > 0 {
+                self.connect_failures = self.connect_failures.saturating_sub(1);
+                return Err(ClientError::ConnectBeforeUpload);
+            }
             self.responses.pop().ok_or(ClientError::Transport)
         }
     }

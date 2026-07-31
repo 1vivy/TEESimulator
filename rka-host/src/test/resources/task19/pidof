@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+[ "$1" = rkpd ] || exit 1
+cat "$FAKE_RECOVERY_FIXTURE/pid"

@@ -4,3 +4,4 @@ version=1
 role=LOCAL|DONOR|CANDIDATE|DISABLED
 profile_epoch=u64
 mutation_states=RKP_KEY_GENERATING,RKP_KEY_RECORDED,CSR_PREPARED,CSR_POSTING,POST_AMBIGUOUS,RKP_CERTIFIED,APP_KEY_GENERATING,APP_KEY_RECORDED,EXPOSED,TERMINAL,DELETE
+recovery_profile=version,keystore2_name,keystore2_executable,keystore2_restart,rkpd_name,rkpd_executable,rkpd_restart,rkpd_property_one,rkpd_property_two

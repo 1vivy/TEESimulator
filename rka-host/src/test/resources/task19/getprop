@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+case $1 in
+    remote_provisioning.hostname) cat "$FAKE_RECOVERY_FIXTURE/property-one" ;;
+    remote_provisioning.hostname_2) cat "$FAKE_RECOVERY_FIXTURE/property-two" ;;
+    *) exit 1 ;;
+esac

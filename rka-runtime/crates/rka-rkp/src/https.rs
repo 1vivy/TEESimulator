@@ -55,7 +55,17 @@ impl BoundedHttpsTransport {
         if let Some(value) = body {
             request = request.body(value.to_vec());
         }
-        bounded_response(request.send().map_err(|_| ClientError::Transport)?)
+        let posting = body.is_some();
+        let response = request.send().map_err(|error| {
+            if posting && error.is_connect() {
+                ClientError::ConnectBeforeUpload
+            } else if posting {
+                ClientError::PostAmbiguous
+            } else {
+                ClientError::Transport
+            }
+        })?;
+        bounded_response(response, posting)
     }
 }
 
@@ -79,7 +89,7 @@ impl StatusHttpTransport for BoundedHttpsTransport {
     }
 }
 
-fn bounded_response(response: Response) -> Result<HttpResponse, ClientError> {
+fn bounded_response(response: Response, posting: bool) -> Result<HttpResponse, ClientError> {
     let maximum =
         u64::try_from(crate::MAX_PROVISIONING_BYTES).map_err(|_| ClientError::ResponseTooLarge)?;
     if response
@@ -105,6 +115,12 @@ fn bounded_response(response: Response) -> Result<HttpResponse, ClientError> {
     response
         .take(maximum.saturating_add(1))
         .read_to_end(&mut body)
-        .map_err(|_| ClientError::Transport)?;
+        .map_err(|_| {
+            if posting {
+                ClientError::PostAmbiguous
+            } else {
+                ClientError::Transport
+            }
+        })?;
     HttpResponse::new(status, headers, body)
 }

@@ -5,10 +5,18 @@ use std::{
 
 use ring::digest::{SHA256, digest};
 use rka_rkp::{
-    AttestationStatusClient, BoundedHttpsTransport, ExpectedKey, RootBundle,
+    AttestationStatusClient, BoundedHttpsTransport, ClientError, ExpectedKey, RootBundle,
     assemble_android_v3_body,
     challenge::{OsEntropy, ProvisioningHttpClient},
+    outcome::{
+        AttemptDigests, AttemptIdentity, AttemptIds, DurablePostingJournal, DurableResponseJournal,
+        OutcomeError, validate_fresh_attempt,
+    },
     returned_serials, validate_response,
+};
+use rka_state::{
+    AmbiguousMaterial, CrashRecovery, MutationCrashState, QuarantineAction, QuarantineActions,
+    QuarantineLedger,
 };
 use thiserror::Error;
 
@@ -99,23 +107,29 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
             .collect::<Result<Vec<_>, ProvisioningRunError>>()?;
         let prepared = assemble_android_v3_body(hal_csr.as_slice(), &config.fingerprint)
             .map_err(|_| ProvisioningRunError::Validation)?;
-        let signed = client
-            .sign_with_request_id(prepared.body(), &fetched.challenge)
-            .map_err(|_| ProvisioningRunError::Http)?;
+        let identity = attempt_identity(
+            (request_id, *batch_id.as_array()),
+            (&fetched.challenge, &prepared.hal_csr_hash()),
+            &broker_handles,
+        )?;
+        let (sign_request_id, signed_body) =
+            post_with_recovery((&config, &executor), &identity, || {
+                client.sign_with_request_id(prepared.body(), &fetched.challenge)
+            })?;
         complete(
             &config,
             &executor,
             request_id,
             *batch_id.as_array(),
             &prepared,
-            signed.response().body(),
+            &signed_body,
             &expected,
             &fetched.challenge,
-            signed.request_id(),
+            &sign_request_id,
             session.roots(),
         )
     })();
-    if result.is_err() {
+    if result.is_err() && result != Err(ProvisioningRunError::Http) {
         let cancel = BridgeMessage::Cancel(
             RequestId::new(request_id),
             broker_handles
@@ -129,6 +143,158 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
         });
     }
     result
+}
+
+fn attempt_identity(
+    ids: (u64, [u8; 16]),
+    digests: (&[u8], &[u8; 32]),
+    handles: &[[u8; 32]],
+) -> Result<AttemptIdentity, ProvisioningRunError> {
+    let (request_id, batch_id) = ids;
+    let (challenge, csr_hash) = digests;
+    let mut request = [0_u8; 16];
+    request[8..].copy_from_slice(&request_id.to_be_bytes());
+    AttemptIdentity::new(
+        AttemptIds::new(request, batch_id),
+        AttemptDigests::new(sha256(challenge), *csr_hash),
+        handles.to_vec(),
+    )
+    .map_err(|_| ProvisioningRunError::Activation)
+}
+
+fn post_with_recovery<F>(
+    boundaries: (&ProductionConfig, &RoleExecutor),
+    identity: &AttemptIdentity,
+    mut post: F,
+) -> Result<(String, Vec<u8>), ProvisioningRunError>
+where
+    F: FnMut() -> Result<rka_rkp::SignedCertificateResponse, ClientError>,
+{
+    let (config, executor) = boundaries;
+    let store = FileStateStore::new(&config.state_root);
+    let responses = DurableResponseJournal::new(&store);
+    match responses.replay_for(identity) {
+        Ok(Some(replayed)) => return decode_durable_response(&replayed),
+        Ok(None) | Err(OutcomeError::StaleReplay) => {}
+        Err(_) => return Err(ProvisioningRunError::Activation),
+    }
+    let posting = DurablePostingJournal::new(&store);
+    if let Some(previous) = posting
+        .load()
+        .map_err(|_| ProvisioningRunError::Activation)?
+    {
+        if previous == *identity {
+            quarantine(config, executor, &previous)?;
+            return Err(ProvisioningRunError::Http);
+        }
+        validate_fresh_attempt(&previous, identity)
+            .map_err(|_| ProvisioningRunError::Activation)?;
+        match responses.replay_for(&previous) {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(OutcomeError::StaleReplay) => quarantine(config, executor, &previous)?,
+            Err(_) => return Err(ProvisioningRunError::Activation),
+        }
+    }
+    posting
+        .record(identity)
+        .map_err(|_| ProvisioningRunError::Activation)?;
+    if let Ok(signed) = post() {
+        let durable = encode_durable_response(signed.request_id(), signed.response().body())?;
+        responses
+            .record_validated(identity, &durable)
+            .map_err(|_| ProvisioningRunError::Activation)?;
+        return Ok((
+            signed.request_id().to_owned(),
+            signed.response().body().to_vec(),
+        ));
+    }
+    quarantine(config, executor, identity)?;
+    Err(ProvisioningRunError::Http)
+}
+
+fn encode_durable_response(
+    request_id: &str,
+    response: &[u8],
+) -> Result<Vec<u8>, ProvisioningRunError> {
+    if request_id.len() != 36 || request_id.as_bytes().contains(&b'\n') {
+        return Err(ProvisioningRunError::Validation);
+    }
+    let mut durable = Vec::with_capacity(37_usize.saturating_add(response.len()));
+    durable.extend_from_slice(request_id.as_bytes());
+    durable.push(b'\n');
+    durable.extend_from_slice(response);
+    Ok(durable)
+}
+
+fn decode_durable_response(durable: &[u8]) -> Result<(String, Vec<u8>), ProvisioningRunError> {
+    let request = durable.get(..36).ok_or(ProvisioningRunError::Validation)?;
+    if durable.get(36) != Some(&b'\n') {
+        return Err(ProvisioningRunError::Validation);
+    }
+    let request = std::str::from_utf8(request).map_err(|_| ProvisioningRunError::Validation)?;
+    let response = durable
+        .get(37..)
+        .ok_or(ProvisioningRunError::Validation)?
+        .to_vec();
+    Ok((request.to_owned(), response))
+}
+
+fn quarantine(
+    config: &ProductionConfig,
+    executor: &RoleExecutor,
+    identity: &AttemptIdentity,
+) -> Result<(), ProvisioningRunError> {
+    let material = AmbiguousMaterial::new(
+        *identity.request_id(),
+        *identity.batch_id(),
+        identity.handles().to_vec(),
+    )
+    .map_err(|_| ProvisioningRunError::Activation)?;
+    let store = FileStateStore::new(&config.state_root);
+    let mut ledger = QuarantineLedger::new(&store);
+    let mut actions = BrokerQuarantineActions {
+        executor,
+        socket: &config.socket,
+        material: &material,
+    };
+    ledger
+        .recover_crash(
+            CrashRecovery::new(MutationCrashState::PostAmbiguous, &material),
+            &mut actions,
+        )
+        .map_err(|_| ProvisioningRunError::Activation)
+}
+
+struct BrokerQuarantineActions<'a> {
+    executor: &'a RoleExecutor,
+    socket: &'a std::path::Path,
+    material: &'a AmbiguousMaterial,
+}
+
+impl QuarantineActions for BrokerQuarantineActions<'_> {
+    fn cancel(&mut self) -> bool {
+        let mut request_bytes = [0_u8; 8];
+        request_bytes.copy_from_slice(&self.material.request_id()[8..]);
+        let request = BridgeMessage::Cancel(
+            RequestId::new(u64::from_be_bytes(request_bytes)),
+            self.material
+                .handles()
+                .iter()
+                .copied()
+                .map(Hash32::new)
+                .collect(),
+        );
+        self.executor
+            .dispatch(BrokerOperation::Donor {
+                socket_path: self.socket,
+                request: &request,
+            })
+            .is_ok()
+    }
+
+    fn apply(&mut self, _handle: [u8; 32], _action: QuarantineAction) -> bool {
+        true
+    }
 }
 
 #[allow(
@@ -238,4 +404,72 @@ fn unix_seconds() -> Result<u64, ProvisioningRunError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ProvisioningRunError::Configuration)
         .map(|duration| duration.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        cell::Cell,
+        path::PathBuf,
+        process,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use rka_rkp::{
+        challenge::SignedCertificateResponse,
+        config::{BaseUrl, ProvisioningInfo},
+        outcome::DurableResponseJournal,
+    };
+
+    use super::{
+        FileStateStore, ProductionConfig, RoleExecutor, SidecarRole, attempt_identity,
+        encode_durable_response, post_with_recovery,
+    };
+
+    #[test]
+    fn production_post_path_replays_exact_durable_response_without_http() {
+        let root = unique_root();
+        let config = ProductionConfig {
+            socket: root.join("broker.sock"),
+            state_root: root.clone(),
+            validator_key: root.join("validator.pk8"),
+            base: BaseUrl::parse("https://example.test").unwrap(),
+            info: ProvisioningInfo::new("fixture", 1, 3).unwrap(),
+            fingerprint: "fixture".to_owned(),
+            epoch: 1,
+            key_count: 1,
+        };
+        let identity = attempt_identity((7, [2; 16]), (&[3; 16], &[4; 32]), &[[5; 32]]).unwrap();
+        let durable =
+            encode_durable_response("00000000-0000-4000-8000-000000000001", b"response").unwrap();
+        DurableResponseJournal::new(&FileStateStore::new(&root))
+            .record_validated(&identity, &durable)
+            .unwrap();
+        let calls = Cell::new(0_usize);
+        let result = post_with_recovery(
+            (&config, &RoleExecutor::new(SidecarRole::Donor)),
+            &identity,
+            || -> Result<SignedCertificateResponse, rka_rkp::ClientError> {
+                calls.set(calls.get().saturating_add(1));
+                Err(rka_rkp::ClientError::Transport)
+            },
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            result,
+            (
+                "00000000-0000-4000-8000-000000000001".to_owned(),
+                b"response".to_vec()
+            )
+        );
+    }
+
+    fn unique_root() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("rka-task19-{}-{nonce}", process::id()))
+    }
 }

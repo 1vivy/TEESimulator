@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+case $1 in
+    ctl.restart)
+        [ "$2" = rkpd ] || exit 1
+        rm -rf "$FAKE_RECOVERY_FIXTURE/proc/100"
+        mkdir -p "$FAKE_RECOVERY_FIXTURE/proc/101"
+        printf '%s\n' '1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 600' > "$FAKE_RECOVERY_FIXTURE/proc/101/stat"
+        ln -sf /system/bin/rkpd "$FAKE_RECOVERY_FIXTURE/proc/101/exe"
+        printf '%s\n' 101 > "$FAKE_RECOVERY_FIXTURE/pid"
+        printf '%s\n' '1.100 0.000' > "$FAKE_RECOVERY_FIXTURE/uptime"
+        if [ "${FAKE_DROP_PROPERTIES:-false}" = true ]; then
+            : > "$FAKE_RECOVERY_FIXTURE/property-one"
+            : > "$FAKE_RECOVERY_FIXTURE/property-two"
+        fi
+        ;;
+    remote_provisioning.hostname) printf '%s\n' "$2" > "$FAKE_RECOVERY_FIXTURE/property-one" ;;
+    remote_provisioning.hostname_2) printf '%s\n' "$2" > "$FAKE_RECOVERY_FIXTURE/property-two" ;;
+    *) exit 1 ;;
+esac

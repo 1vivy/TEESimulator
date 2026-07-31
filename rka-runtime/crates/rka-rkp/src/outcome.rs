@@ -7,6 +7,7 @@ use rka_state::{MAX_STATE_BYTES, StateError, StateStore, validate_record};
 use thiserror::Error;
 
 const RESPONSE_KEY: &[u8] = b"rkp-post-response-v1";
+const POSTING_KEY: &[u8] = b"rkp-posting-v1";
 const MAX_HANDLES: usize = 20;
 
 /// Exact identity of one non-idempotent provisioning attempt.
@@ -86,6 +87,65 @@ impl AttemptIdentity {
     pub const fn challenge_hash(&self) -> &[u8; 32] {
         &self.challenge_hash
     }
+
+    /// Returns the exact request identifier.
+    #[must_use]
+    pub const fn request_id(&self) -> &[u8; 16] {
+        &self.request_id
+    }
+
+    /// Returns the exact batch identifier.
+    #[must_use]
+    pub const fn batch_id(&self) -> &[u8; 16] {
+        &self.batch_id
+    }
+
+    /// Returns the exact mapped handles.
+    #[must_use]
+    pub fn handles(&self) -> &[[u8; 32]] {
+        &self.handles
+    }
+}
+
+/// Durable identity boundary written before a non-idempotent upload begins.
+pub struct DurablePostingJournal<'a> {
+    store: &'a dyn StateStore,
+}
+
+impl<'a> DurablePostingJournal<'a> {
+    /// Binds the posting journal to its durable state store.
+    #[must_use]
+    pub const fn new(store: &'a dyn StateStore) -> Self {
+        Self { store }
+    }
+
+    /// Loads the most recent upload identity.
+    pub fn load(&self) -> Result<Option<AttemptIdentity>, OutcomeError> {
+        let Some(bytes) = read_optional(self.store, POSTING_KEY)? else {
+            return Ok(None);
+        };
+        let (identity, response) = decode(&bytes)?;
+        if !response.is_empty() {
+            return Err(OutcomeError::Corrupt);
+        }
+        Ok(Some(identity))
+    }
+
+    /// Persists the exact identity before the transport is invoked.
+    pub fn record(&self, identity: &AttemptIdentity) -> Result<(), OutcomeError> {
+        let encoded = encode(identity, &[])?;
+        validate_record(&encoded)?;
+        self.store.replace(POSTING_KEY, &encoded)?;
+        Ok(())
+    }
+}
+
+impl fmt::Debug for DurablePostingJournal<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DurablePostingJournal")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Furthest point definitely reached by the POST transport.
@@ -114,6 +174,16 @@ pub enum PostFailure {
     SidecarDeath,
     /// A complete response was not durably recorded.
     MissingDurableResponse,
+    /// DNS resolution failed.
+    Dns,
+    /// TLS negotiation failed.
+    Tls,
+    /// Request encoding failed locally.
+    Encode,
+    /// A local I/O or process boundary failed.
+    Local,
+    /// Configuration was rejected locally.
+    Config,
 }
 
 /// Fail-closed outcome of a POST failure.
@@ -129,12 +199,10 @@ pub enum FailureDisposition {
 impl FailureDisposition {
     /// Classifies solely from the transport's proven upload boundary.
     #[must_use]
-    pub const fn classify(progress: UploadProgress, _failure: PostFailure) -> Self {
-        match progress {
-            UploadProgress::NoRequestByteWritten => Self::Retryable,
-            UploadProgress::UploadMayHaveBegun | UploadProgress::UploadCompleted => {
-                Self::PostAmbiguous
-            }
+    pub const fn classify(progress: UploadProgress, failure: PostFailure) -> Self {
+        match (progress, failure) {
+            (UploadProgress::NoRequestByteWritten, PostFailure::Connect) => Self::Retryable,
+            _ => Self::PostAmbiguous,
         }
     }
 }
@@ -185,19 +253,26 @@ impl<'a> DurableResponseJournal<'a> {
 
     /// Returns a local response only when every request identity field matches.
     pub fn replay_for(&self, identity: &AttemptIdentity) -> Result<Option<Vec<u8>>, OutcomeError> {
-        let mut stored = vec![0_u8; MAX_STATE_BYTES];
-        let size = match self.store.read(RESPONSE_KEY, &mut stored) {
-            Ok(size) => size,
-            Err(StateError::Missing) => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let Some(stored) = read_optional(self.store, RESPONSE_KEY)? else {
+            return Ok(None);
         };
-        stored.truncate(size);
         let (bound, response) = decode(&stored)?;
         if &bound != identity {
             return Err(OutcomeError::StaleReplay);
         }
         Ok(Some(response))
     }
+}
+
+fn read_optional(store: &dyn StateStore, key: &[u8]) -> Result<Option<Vec<u8>>, OutcomeError> {
+    let mut stored = vec![0_u8; MAX_STATE_BYTES];
+    let size = match store.read(key, &mut stored) {
+        Ok(size) => size,
+        Err(StateError::Missing) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    stored.truncate(size);
+    Ok(Some(stored))
 }
 
 impl fmt::Debug for DurableResponseJournal<'_> {

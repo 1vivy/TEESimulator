@@ -55,6 +55,22 @@ fn connect_before_upload_is_the_only_retryable_post_failure() {
         FailureDisposition::classify(UploadProgress::NoRequestByteWritten, PostFailure::Connect),
         FailureDisposition::Retryable
     );
+    for failure in [
+        PostFailure::Dns,
+        PostFailure::Tls,
+        PostFailure::Encode,
+        PostFailure::Local,
+        PostFailure::Config,
+        PostFailure::Timeout,
+        PostFailure::LostResponse,
+        PostFailure::SidecarDeath,
+        PostFailure::MissingDurableResponse,
+    ] {
+        assert_eq!(
+            FailureDisposition::classify(UploadProgress::NoRequestByteWritten, failure),
+            FailureDisposition::PostAmbiguous
+        );
+    }
     for progress in [
         UploadProgress::UploadMayHaveBegun,
         UploadProgress::UploadCompleted,

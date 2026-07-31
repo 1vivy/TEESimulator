@@ -11,7 +11,7 @@ readonly CONFIG_NAME=role.conf
 root=$DEFAULT_ROOT
 rka_state_root=$DEFAULT_STATE_ROOT
 
-script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 . "$script_directory/rka-paths.sh"
 
 print_inert() {
@@ -111,7 +111,178 @@ role=$requested_role
 }
 
 usage() {
-    printf '%s\n' 'usage: rka-control.sh [--root PATH] [--state-root PATH] {set-role ROLE|initialize|wipe|mutation-states|status|boot-decision|webui-open|webui ACTION NONCE}' >&2
+    printf '%s\n' 'usage: rka-control.sh [--root PATH] [--state-root PATH] {set-role ROLE|initialize|wipe|mutation-states|status|boot-decision|recover-exact ACTION TARGET [ARGS]|webui-open|webui ACTION NONCE}' >&2
+}
+
+recovery_read_profile() {
+    recovery_profile=$rka_state_root/profiles/recovery.conf
+    rka_private_file_is_valid "$recovery_profile" || return 1
+    [ "$(wc -l < "$recovery_profile")" -eq 9 ] || return 1
+    recovery_keystore_name=
+    recovery_keystore_executable=
+    recovery_keystore_restart=
+    recovery_rkpd_name=
+    recovery_rkpd_executable=
+    recovery_rkpd_restart=
+    recovery_property_one=
+    recovery_property_two=
+    while IFS= read -r recovery_line || [ -n "$recovery_line" ]; do
+        recovery_key=${recovery_line%%=*}
+        recovery_value=${recovery_line#*=}
+        [ "$recovery_key" != "$recovery_line" ] || return 1
+        case $recovery_value in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
+        case $recovery_key in
+            version) [ "$recovery_value" = 1 ] || return 1 ;;
+            keystore2_name) [ -z "$recovery_keystore_name" ]; recovery_keystore_name=$recovery_value ;;
+            keystore2_executable) [ -z "$recovery_keystore_executable" ]; recovery_keystore_executable=$recovery_value ;;
+            keystore2_restart) [ -z "$recovery_keystore_restart" ]; recovery_keystore_restart=$recovery_value ;;
+            rkpd_name) [ -z "$recovery_rkpd_name" ]; recovery_rkpd_name=$recovery_value ;;
+            rkpd_executable) [ -z "$recovery_rkpd_executable" ]; recovery_rkpd_executable=$recovery_value ;;
+            rkpd_restart) [ -z "$recovery_rkpd_restart" ]; recovery_rkpd_restart=$recovery_value ;;
+            rkpd_property_one) [ -z "$recovery_property_one" ]; recovery_property_one=$recovery_value ;;
+            rkpd_property_two) [ -z "$recovery_property_two" ]; recovery_property_two=$recovery_value ;;
+            *) return 1 ;;
+        esac
+    done < "$recovery_profile"
+    [ "$recovery_keystore_executable" = /system/bin/keystore2 ] &&
+        [ "$recovery_rkpd_executable" = /system/bin/rkpd ] &&
+        [ "$recovery_property_one" != "$recovery_property_two" ]
+}
+
+recovery_select_target() {
+    case $1 in
+        keystore2)
+            recovery_name=$recovery_keystore_name
+            recovery_executable=$recovery_keystore_executable
+            recovery_restart=$recovery_keystore_restart
+            ;;
+        rkpd)
+            recovery_name=$recovery_rkpd_name
+            recovery_executable=$recovery_rkpd_executable
+            recovery_restart=$recovery_rkpd_restart
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+recovery_getprop() {
+    "${RKA_RECOVERY_GETPROP:-getprop}" "$1"
+}
+
+recovery_setprop() {
+    "${RKA_RECOVERY_SETPROP:-setprop}" "$1" "$2"
+}
+
+recovery_find_service() {
+    recovery_pids=$("${RKA_RECOVERY_PIDOF:-pidof}" "$recovery_name") || return 1
+    case $recovery_pids in ''|*[!0-9]*) return 1 ;; esac
+    recovery_pid=$recovery_pids
+    recovery_proc_root=${RKA_RECOVERY_PROC_ROOT:-/proc}
+    recovery_start=$(awk '{print $22}' "$recovery_proc_root/$recovery_pid/stat") || return 1
+    case $recovery_start in ''|*[!0-9]*) return 1 ;; esac
+    recovery_actual_executable=$(readlink "$recovery_proc_root/$recovery_pid/exe") || return 1
+    [ "$recovery_actual_executable" = "$recovery_executable" ]
+}
+
+recovery_emit_snapshot() {
+    recovery_boot=$(cat "${RKA_RECOVERY_BOOT_ID_PATH:-/proc/sys/kernel/random/boot_id}") || return 1
+    case $recovery_boot in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    recovery_uptime=$(awk '{printf "%d", $1 * 1000}' "${RKA_RECOVERY_UPTIME_PATH:-/proc/uptime}") || return 1
+    recovery_find_service || return 1
+    printf 'boot_id=%s\nuptime_ms=%s\nservice=%s|%s|%s|%s\n' \
+        "$recovery_boot" "$recovery_uptime" "$1" "$recovery_pid" "$recovery_start" "$recovery_executable"
+    if [ "$1" = rkpd ]; then
+        if [ "${recovery_use_snapshot_values:-false}" != true ]; then
+            recovery_value_one=$(recovery_getprop "$recovery_property_one") || return 1
+            recovery_value_two=$(recovery_getprop "$recovery_property_two") || return 1
+        fi
+        recovery_hash_one=$(printf '%s' "$recovery_value_one" | sha256sum | awk '{print $1}')
+        recovery_hash_two=$(printf '%s' "$recovery_value_two" | sha256sum | awk '{print $1}')
+        [ -n "$recovery_value_one" ] || recovery_hash_one=
+        [ -n "$recovery_value_two" ] || recovery_hash_two=
+        printf 'property=%s|%s\n' "$recovery_property_one" "$(printf '%s' "$recovery_hash_one" | base64 | tr -d '\n')"
+        printf 'property=%s|%s\n' "$recovery_property_two" "$(printf '%s' "$recovery_hash_two" | base64 | tr -d '\n')"
+    fi
+    rka_path_is_private_directory "$rka_state_root/quarantine" || return 1
+    printf '%s\n' quarantine=RETAINED
+}
+
+recovery_snapshot() {
+    if [ "$1" = rkpd ]; then
+        recovery_value_one=$(recovery_getprop "$recovery_property_one") || return 1
+        recovery_value_two=$(recovery_getprop "$recovery_property_two") || return 1
+        recovery_use_snapshot_values=true
+    fi
+    recovery_output=$(recovery_emit_snapshot "$1") || return 1
+    recovery_state=$rka_state_root/journal/recovery-exact.state
+    rka_atomic_replace "$rka_state_root/journal" "$recovery_state" "$recovery_output
+" || return 1
+    if [ "$1" = rkpd ]; then
+        recovery_properties=$rka_state_root/journal/recovery-exact.properties
+        rka_atomic_replace "$rka_state_root/journal" "$recovery_properties" "property=$recovery_property_one|$(printf '%s' "$recovery_value_one" | base64 | tr -d '\n')
+property=$recovery_property_two|$(printf '%s' "$recovery_value_two" | base64 | tr -d '\n')
+" || return 1
+    fi
+    printf '%s\n' "$recovery_output"
+}
+
+recovery_restart_exact() {
+    [ "$#" -eq 3 ] || return 1
+    recovery_find_service || return 1
+    [ "$recovery_pid" = "$2" ] && [ "$recovery_start" = "$3" ] || return 1
+    recovery_setprop ctl.restart "$recovery_restart" || return 1
+    printf '%s\n' RESTARTED
+}
+
+recovery_ready() {
+    case $2 in ''|*[!0-9]*) return 1 ;; esac
+    [ "$2" -le 30000 ] || return 1
+    recovery_attempts=$((($2 + 99) / 100))
+    while [ "$recovery_attempts" -gt 0 ]; do
+        if recovery_find_service; then
+            printf '%s\n' READY
+            return 0
+        fi
+        sleep 0.1
+        recovery_attempts=$((recovery_attempts - 1))
+    done
+    return 1
+}
+
+recovery_reapply() {
+    [ "$1" = rkpd ] || return 1
+    case $2 in
+        "$recovery_property_one"|"$recovery_property_two") ;;
+        *) return 1 ;;
+    esac
+    [ -z "$(recovery_getprop "$2")" ] || return 1
+    recovery_properties=$rka_state_root/journal/recovery-exact.properties
+    rka_private_file_is_valid "$recovery_properties" || return 1
+    recovery_encoded=
+    while IFS= read -r recovery_property_line || [ -n "$recovery_property_line" ]; do
+        recovery_property_key=${recovery_property_line%%|*}
+        if [ "$recovery_property_key" = "property=$2" ]; then
+            [ -z "$recovery_encoded" ] || return 1
+            recovery_encoded=${recovery_property_line#*|}
+        fi
+    done < "$recovery_properties"
+    [ -n "$recovery_encoded" ] || return 1
+    recovery_value=$(printf '%s' "$recovery_encoded" | base64 -d) || return 1
+    recovery_setprop "$2" "$recovery_value"
+}
+
+recover_exact() {
+    [ "$#" -ge 2 ] || return 1
+    recovery_read_profile || return 1
+    recovery_select_target "$2" || return 1
+    case $1 in
+        snapshot) [ "$#" -eq 2 ] && recovery_snapshot "$2" ;;
+        verify) [ "$#" -eq 2 ] && recovery_emit_snapshot "$2" ;;
+        restart) [ "$#" -eq 4 ] && recovery_restart_exact "$2" "$3" "$4" ;;
+        ready) [ "$#" -eq 3 ] && recovery_ready "$2" "$3" ;;
+        reapply) [ "$#" -eq 3 ] && recovery_reapply "$2" "$3" ;;
+        *) return 1 ;;
+    esac
 }
 
 webui_invalid_request() {
@@ -490,6 +661,12 @@ while [ $# -gt 0 ]; do
                     ;;
                 *) print_inert; exit 1 ;;
             esac
+            ;;
+        recover-exact)
+            [ "$#" -ge 3 ] || exit 2
+            shift
+            recover_exact "$@" || exit 1
+            exit 0
             ;;
         webui-open)
             [ $# -eq 1 ] || exit 2

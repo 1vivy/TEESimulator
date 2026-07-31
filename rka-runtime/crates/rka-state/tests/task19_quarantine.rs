@@ -46,12 +46,14 @@ struct Actions {
 }
 
 impl QuarantineActions for Actions {
-    fn cancel(&mut self) {
+    fn cancel(&mut self) -> bool {
         self.cancels = self.cancels.saturating_add(1);
+        true
     }
 
-    fn apply(&mut self, handle: [u8; 32], action: QuarantineAction) {
+    fn apply(&mut self, handle: [u8; 32], action: QuarantineAction) -> bool {
         self.events.push((handle, action));
+        true
     }
 }
 
@@ -76,14 +78,14 @@ fn generating_crash_is_durably_quarantined_once_and_never_replayed() {
         ledger.reason().unwrap(),
         Some(QuarantineReason::GeneratingCrash)
     );
-    assert!(
-        ledger
-            .recover_crash(
-                CrashRecovery::new(MutationCrashState::RkpKeyGenerating, &material),
-                &mut actions,
-            )
-            .is_err()
-    );
+    ledger
+        .recover_crash(
+            CrashRecovery::new(MutationCrashState::RkpKeyGenerating, &material),
+            &mut actions,
+        )
+        .unwrap();
+    assert_eq!(actions.cancels, 1);
+    assert_eq!(actions.events.len(), 4);
 }
 
 #[test]
@@ -103,5 +105,68 @@ fn restart_in_every_mutating_state_retains_quarantine() {
             .unwrap();
         let restarted = QuarantineLedger::new(&store);
         assert!(!restarted.activation_allowed(&material).unwrap());
+    }
+}
+
+#[test]
+fn cleanup_resumes_after_every_persisted_step_boundary() {
+    for fail_at in 0..5 {
+        let store = MemoryStore::default();
+        let material =
+            AmbiguousMaterial::new([21; 16], [22; 16], vec![[23; 32], [24; 32]]).unwrap();
+        let mut first = FailingActions {
+            fail_at,
+            calls: 0,
+            completed: Vec::new(),
+        };
+        assert!(
+            QuarantineLedger::new(&store)
+                .recover_crash(
+                    CrashRecovery::new(MutationCrashState::PostAmbiguous, &material),
+                    &mut first,
+                )
+                .is_err()
+        );
+        assert_eq!(first.completed.len(), fail_at);
+        let mut resumed = Actions::default();
+        QuarantineLedger::new(&store)
+            .recover_crash(
+                CrashRecovery::new(MutationCrashState::PostAmbiguous, &material),
+                &mut resumed,
+            )
+            .unwrap();
+        assert_eq!(
+            resumed.cancels.saturating_add(resumed.events.len()),
+            5 - fail_at
+        );
+    }
+}
+
+struct FailingActions {
+    fail_at: usize,
+    calls: usize,
+    completed: Vec<usize>,
+}
+
+impl QuarantineActions for FailingActions {
+    fn cancel(&mut self) -> bool {
+        self.step()
+    }
+
+    fn apply(&mut self, _handle: [u8; 32], _action: QuarantineAction) -> bool {
+        self.step()
+    }
+}
+
+impl FailingActions {
+    fn step(&mut self) -> bool {
+        let current = self.calls;
+        self.calls = self.calls.saturating_add(1);
+        if current == self.fail_at {
+            false
+        } else {
+            self.completed.push(current);
+            true
+        }
     }
 }

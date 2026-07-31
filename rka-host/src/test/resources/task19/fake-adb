@@ -2,26 +2,56 @@
 set -eu
 
 printf '%s\n' "$*" >> "$FAKE_ADB_LOG"
-case " $* " in
-    *" recover-exact snapshot rkpd "*)
-        printf '%s\n' \
-            boot_id=boot-A \
-            uptime_ms=1000 \
-            'service=rkpd|100|500|/system/bin/rkpd' \
-            property=remote_provisioning.hostname\|YQ \
-            property=remote_provisioning.hostname_2\|Yg \
-            quarantine=RETAINED
-        ;;
-    *" recover-exact verify rkpd "*)
-        printf '%s\n' \
-            boot_id=boot-A \
-            uptime_ms=1100 \
-            'service=rkpd|101|600|/system/bin/rkpd' \
-            property=remote_provisioning.hostname\|YQ \
-            property=remote_provisioning.hostname_2\|Yg \
-            quarantine=RETAINED
-        ;;
-    *" recover-exact ready rkpd "*) printf '%s\n' READY ;;
-    *" recover-exact restart rkpd "*) printf '%s\n' RESTARTED ;;
-    *) exit 64 ;;
-esac
+
+fixture=${FAKE_ADB_FIXTURE:-$(dirname "$FAKE_ADB_LOG")/device}
+control=${RKA_CONTROL_SCRIPT:-module/rka-control.sh}
+fixture_root=$fixture/root
+fixture_state=$fixture/state
+fixture_bin=$(CDPATH='' cd -- "$(dirname -- "$(readlink -f "$0")")" && pwd)
+fixture_proc=$fixture/proc
+
+initialize_fixture() {
+    mkdir -p "$fixture_proc"
+    sh "$control" --root "$fixture_root" --state-root "$fixture_state" set-role DONOR >/dev/null
+    sh "$control" --root "$fixture_root" --state-root "$fixture_state" initialize >/dev/null
+    printf '%s\n' \
+        version=1 \
+        keystore2_name=keystore2 \
+        keystore2_executable=/system/bin/keystore2 \
+        keystore2_restart=keystore2 \
+        rkpd_name=rkpd \
+        rkpd_executable=/system/bin/rkpd \
+        rkpd_restart=rkpd \
+        rkpd_property_one=remote_provisioning.hostname \
+        rkpd_property_two=remote_provisioning.hostname_2 > "$fixture_state/profiles/recovery.conf"
+    chmod 600 "$fixture_state/profiles/recovery.conf"
+    printf '%s\n' boot-A > "$fixture/boot-id"
+    printf '%s\n' '1.000 0.000' > "$fixture/uptime"
+    printf '%s\n' 100 > "$fixture/pid"
+    printf '%s\n' a > "$fixture/property-one"
+    printf '%s\n' b > "$fixture/property-two"
+    make_process 100 500 /system/bin/rkpd
+}
+
+make_process() {
+    mkdir -p "$fixture_proc/$1"
+    printf '%s\n' "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 $2" > "$fixture_proc/$1/stat"
+    ln -sf "$3" "$fixture_proc/$1/exe"
+}
+
+[ -d "$fixture_state" ] || initialize_fixture
+
+while [ "$#" -gt 0 ] && [ "$1" != recover-exact ]; do
+    shift
+done
+[ "${1:-}" = recover-exact ] || exit 64
+shift
+
+RKA_RECOVERY_PROC_ROOT=$fixture_proc \
+RKA_RECOVERY_BOOT_ID_PATH=$fixture/boot-id \
+RKA_RECOVERY_UPTIME_PATH=$fixture/uptime \
+RKA_RECOVERY_PIDOF=$fixture_bin/pidof \
+RKA_RECOVERY_GETPROP=$fixture_bin/getprop \
+RKA_RECOVERY_SETPROP=$fixture_bin/setprop \
+FAKE_RECOVERY_FIXTURE=$fixture \
+sh "$control" --root "$fixture_root" --state-root "$fixture_state" recover-exact "$@"

@@ -38,6 +38,24 @@ impl AmbiguousMaterial {
             handles,
         })
     }
+
+    /// Returns the exact request identifier.
+    #[must_use]
+    pub const fn request_id(&self) -> &[u8; 16] {
+        &self.request_id
+    }
+
+    /// Returns the exact batch identifier.
+    #[must_use]
+    pub const fn batch_id(&self) -> &[u8; 16] {
+        &self.batch_id
+    }
+
+    /// Returns the exact mapped handles.
+    #[must_use]
+    pub fn handles(&self) -> &[[u8; 32]] {
+        &self.handles
+    }
 }
 
 /// Crash/restart point requiring quarantine rather than replay.
@@ -92,10 +110,10 @@ impl<'a> CrashRecovery<'a> {
 /// One-call broker cleanup boundary used only after quarantine is durable.
 pub trait QuarantineActions {
     /// Cancels the authenticated broker request.
-    fn cancel(&mut self);
+    fn cancel(&mut self) -> bool;
 
     /// Applies one exact action to one exact mapped handle.
-    fn apply(&mut self, handle: [u8; 32], action: QuarantineAction);
+    fn apply(&mut self, handle: [u8; 32], action: QuarantineAction) -> bool;
 }
 
 /// Durable fail-closed quarantine ledger.
@@ -116,9 +134,6 @@ impl<'a> QuarantineLedger<'a> {
         recovery: CrashRecovery<'_>,
         actions: &mut dyn QuarantineActions,
     ) -> Result<(), QuarantineError> {
-        if self.load()?.is_some() {
-            return Err(QuarantineError::AlreadyQuarantined);
-        }
         let reason = match recovery.state {
             MutationCrashState::RkpKeyGenerating | MutationCrashState::AppKeyGenerating => {
                 QuarantineReason::GeneratingCrash
@@ -127,13 +142,51 @@ impl<'a> QuarantineLedger<'a> {
                 QuarantineReason::PostAmbiguous
             }
         };
-        let encoded = encode(reason, recovery.material)?;
-        validate_record(&encoded)?;
-        self.store.replace(QUARANTINE_KEY, &encoded)?;
-        actions.cancel();
-        for handle in &recovery.material.handles {
-            actions.apply(*handle, QuarantineAction::Discard);
-            actions.apply(*handle, QuarantineAction::Wipe);
+        let mut completed = match self.load()? {
+            Some((stored_reason, stored_material, completed))
+                if stored_reason == reason && stored_material == *recovery.material =>
+            {
+                completed
+            }
+            Some(_) => return Err(QuarantineError::Material),
+            None => {
+                self.persist((reason, recovery.material, 0))?;
+                0
+            }
+        };
+        let total = 1_usize
+            .checked_add(
+                recovery
+                    .material
+                    .handles
+                    .len()
+                    .checked_mul(2)
+                    .ok_or(QuarantineError::Material)?,
+            )
+            .ok_or(QuarantineError::Material)?;
+        while completed < total {
+            if completed == 0 {
+                if !actions.cancel() {
+                    return Err(QuarantineError::Action);
+                }
+            } else {
+                let action_index = completed.checked_sub(1).ok_or(QuarantineError::Corrupt)?;
+                let handle = *recovery
+                    .material
+                    .handles
+                    .get(action_index / 2)
+                    .ok_or(QuarantineError::Corrupt)?;
+                let action = if action_index.is_multiple_of(2) {
+                    QuarantineAction::Discard
+                } else {
+                    QuarantineAction::Wipe
+                };
+                if !actions.apply(handle, action) {
+                    return Err(QuarantineError::Action);
+                }
+            }
+            completed = completed.checked_add(1).ok_or(QuarantineError::Corrupt)?;
+            self.persist((reason, recovery.material, completed))?;
         }
         Ok(())
     }
@@ -145,15 +198,28 @@ impl<'a> QuarantineLedger<'a> {
     ) -> Result<bool, QuarantineError> {
         Ok(self
             .load()?
-            .is_none_or(|(_, quarantined)| quarantined != *material))
+            .is_none_or(|(_, quarantined, _)| quarantined != *material))
     }
 
     /// Reads the retained reason without changing terminal state.
     pub fn reason(&self) -> Result<Option<QuarantineReason>, QuarantineError> {
-        Ok(self.load()?.map(|(reason, _)| reason))
+        Ok(self.load()?.map(|(reason, _, _)| reason))
     }
 
-    fn load(&self) -> Result<Option<(QuarantineReason, AmbiguousMaterial)>, QuarantineError> {
+    fn persist(
+        &self,
+        progress: (QuarantineReason, &AmbiguousMaterial, usize),
+    ) -> Result<(), QuarantineError> {
+        let (reason, material, completed) = progress;
+        let encoded = encode(reason, material, completed)?;
+        validate_record(&encoded)?;
+        self.store.replace(QUARANTINE_KEY, &encoded)?;
+        Ok(())
+    }
+
+    fn load(
+        &self,
+    ) -> Result<Option<(QuarantineReason, AmbiguousMaterial, usize)>, QuarantineError> {
         let mut stored = vec![0_u8; MAX_STATE_BYTES];
         let size = match self.store.read(QUARANTINE_KEY, &mut stored) {
             Ok(size) => size,
@@ -183,6 +249,9 @@ pub enum QuarantineError {
     /// This terminal record was already processed.
     #[error("material is already quarantined")]
     AlreadyQuarantined,
+    /// An external idempotent cleanup action failed before completion was recorded.
+    #[error("quarantine cleanup action failed")]
+    Action,
     /// Stored bytes do not match the canonical schema.
     #[error("quarantine record is corrupt")]
     Corrupt,
@@ -194,15 +263,16 @@ pub enum QuarantineError {
 fn encode(
     reason: QuarantineReason,
     material: &AmbiguousMaterial,
+    completed: usize,
 ) -> Result<Vec<u8>, QuarantineError> {
     let capacity = material
         .handles
         .len()
         .checked_mul(32)
-        .and_then(|size| size.checked_add(38))
+        .and_then(|size| size.checked_add(39))
         .ok_or(QuarantineError::Material)?;
     let mut bytes = Vec::with_capacity(capacity);
-    bytes.extend_from_slice(b"RKQ1");
+    bytes.extend_from_slice(b"RKQ2");
     bytes.push(match reason {
         QuarantineReason::GeneratingCrash => 1,
         QuarantineReason::PostAmbiguous => 2,
@@ -210,6 +280,7 @@ fn encode(
     bytes.extend_from_slice(&material.request_id);
     bytes.extend_from_slice(&material.batch_id);
     bytes.push(u8::try_from(material.handles.len()).map_err(|_| QuarantineError::Material)?);
+    bytes.push(u8::try_from(completed).map_err(|_| QuarantineError::Material)?);
     material
         .handles
         .iter()
@@ -217,8 +288,8 @@ fn encode(
     Ok(bytes)
 }
 
-fn decode(bytes: &[u8]) -> Result<(QuarantineReason, AmbiguousMaterial), QuarantineError> {
-    if bytes.len() < 38 || bytes.get(..4) != Some(b"RKQ1") {
+fn decode(bytes: &[u8]) -> Result<(QuarantineReason, AmbiguousMaterial, usize), QuarantineError> {
+    if bytes.len() < 39 || bytes.get(..4) != Some(b"RKQ2") {
         return Err(QuarantineError::Corrupt);
     }
     let reason = match bytes.get(4) {
@@ -237,14 +308,21 @@ fn decode(bytes: &[u8]) -> Result<(QuarantineReason, AmbiguousMaterial), Quarant
         .try_into()
         .map_err(|_| QuarantineError::Corrupt)?;
     let count = usize::from(*bytes.get(37).ok_or(QuarantineError::Corrupt)?);
-    let expected = 38_usize
+    let completed = usize::from(*bytes.get(38).ok_or(QuarantineError::Corrupt)?);
+    let total = 1_usize
+        .checked_add(count.checked_mul(2).ok_or(QuarantineError::Corrupt)?)
+        .ok_or(QuarantineError::Corrupt)?;
+    if completed > total {
+        return Err(QuarantineError::Corrupt);
+    }
+    let expected = 39_usize
         .checked_add(count.checked_mul(32).ok_or(QuarantineError::Corrupt)?)
         .ok_or(QuarantineError::Corrupt)?;
     if bytes.len() != expected {
         return Err(QuarantineError::Corrupt);
     }
     let handles = bytes
-        .get(38..)
+        .get(39..)
         .ok_or(QuarantineError::Corrupt)?
         .chunks_exact(32)
         .map(|handle| handle.try_into().map_err(|_| QuarantineError::Corrupt))
@@ -252,5 +330,6 @@ fn decode(bytes: &[u8]) -> Result<(QuarantineReason, AmbiguousMaterial), Quarant
     Ok((
         reason,
         AmbiguousMaterial::new(request_id, batch_id, handles)?,
+        completed,
     ))
 }

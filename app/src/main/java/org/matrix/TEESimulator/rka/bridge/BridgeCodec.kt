@@ -14,7 +14,8 @@ object BridgeCodec {
         val request =
             message is BridgeMessage.PublicKeyRequest ||
                 message is BridgeMessage.UpdateRequest ||
-                message is BridgeMessage.Cancel
+                message is BridgeMessage.Cancel ||
+                message is BridgeMessage.CandidateCommand
         val role =
             when (direction) {
                 BridgeDirection.SIDECAR_TO_BROKER ->
@@ -145,6 +146,14 @@ object BridgeCodec {
                         out.writeByte(message.code.wire)
                         writeFixed(out, message.detailHash)
                     }
+                    is BridgeMessage.CandidateCommand -> {
+                        out.writeByte(message.operation.wire)
+                        writeBytes(out, message.payload)
+                    }
+                    is BridgeMessage.CandidateReply -> {
+                        out.writeByte(message.operation.wire)
+                        writeBytes(out, message.payload)
+                    }
                 }
             }
             bytes.toByteArray()
@@ -237,6 +246,21 @@ object BridgeCodec {
                         val code = BridgeErrorCode.entries.singleOrNull { it.wire == codeValue }
                         requireNotNull(code)
                         BridgeMessage.Error(requestId, code, readHash(input))
+                    }
+                    BridgeTag.CANDIDATE_COMMAND,
+                    BridgeTag.CANDIDATE_REPLY -> {
+                        val operationValue = input.readUnsignedByte()
+                        val operation =
+                            CandidateBridgeOperation.entries.singleOrNull {
+                                it.wire == operationValue
+                            }
+                        requireNotNull(operation)
+                        val payload = readPublicBytes(input, BridgeLimits.MAX_FRAME_BYTES - 5)
+                        if (tag == BridgeTag.CANDIDATE_COMMAND) {
+                            BridgeMessage.CandidateCommand(requestId, operation, payload)
+                        } else {
+                            BridgeMessage.CandidateReply(requestId, operation, payload)
+                        }
                     }
                     else -> return BridgeResult.Failure(BridgeError.UnknownTag)
                 }

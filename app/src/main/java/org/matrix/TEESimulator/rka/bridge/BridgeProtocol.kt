@@ -34,9 +34,20 @@ object BridgeTag {
     const val PUBLIC_RESULT = 4
     const val CANCEL = 5
     const val ERROR = 6
+    const val CANDIDATE_COMMAND = 7
+    const val CANDIDATE_REPLY = 8
 
     internal val known =
-        setOf(PUBLIC_KEY_REQUEST, PUBLIC_KEY_RESPONSE, UPDATE_REQUEST, PUBLIC_RESULT, CANCEL, ERROR)
+        setOf(
+            PUBLIC_KEY_REQUEST,
+            PUBLIC_KEY_RESPONSE,
+            UPDATE_REQUEST,
+            PUBLIC_RESULT,
+            CANCEL,
+            ERROR,
+            CANDIDATE_COMMAND,
+            CANDIDATE_REPLY,
+        )
 }
 
 enum class BridgeExchangeRole(val direction: BridgeDirection, internal val tags: Set<Int>) {
@@ -55,7 +66,12 @@ enum class BridgeExchangeRole(val direction: BridgeDirection, internal val tags:
     ),
     CANDIDATE_REQUEST(
         BridgeDirection.BROKER_TO_SIDECAR,
-        setOf(BridgeTag.PUBLIC_KEY_REQUEST, BridgeTag.UPDATE_REQUEST, BridgeTag.CANCEL),
+        setOf(
+            BridgeTag.PUBLIC_KEY_REQUEST,
+            BridgeTag.UPDATE_REQUEST,
+            BridgeTag.CANCEL,
+            BridgeTag.CANDIDATE_COMMAND,
+        ),
     ),
     CANDIDATE_RESPONSE(
         BridgeDirection.SIDECAR_TO_BROKER,
@@ -64,8 +80,21 @@ enum class BridgeExchangeRole(val direction: BridgeDirection, internal val tags:
             BridgeTag.PUBLIC_RESULT,
             BridgeTag.CANCEL,
             BridgeTag.ERROR,
+            BridgeTag.CANDIDATE_REPLY,
         ),
     ),
+}
+
+enum class CandidateBridgeOperation(val wire: Int) {
+    GENERATE(1),
+    GET(2),
+    LIST(3),
+    DELETE(4),
+    BEGIN(5),
+    UPDATE_AAD(6),
+    UPDATE(7),
+    FINISH(8),
+    ABORT(9),
 }
 
 @JvmInline value class RequestId(val value: Long)
@@ -305,6 +334,36 @@ sealed class BridgeMessage : AutoCloseable {
             detailHash.close()
         }
     }
+
+    class CandidateCommand(
+        override val requestId: RequestId,
+        val operation: CandidateBridgeOperation,
+        val payload: PublicBytes,
+    ) : BridgeMessage() {
+        init {
+            require(payload.size <= BridgeLimits.MAX_FRAME_BYTES - 5)
+        }
+
+        override fun close() = payload.close()
+
+        override fun toString() =
+            "CandidateCommand(requestId=$requestId,operation=$operation,payloadLength=${payload.size})"
+    }
+
+    class CandidateReply(
+        override val requestId: RequestId,
+        val operation: CandidateBridgeOperation,
+        val payload: PublicBytes,
+    ) : BridgeMessage() {
+        init {
+            require(payload.size <= BridgeLimits.MAX_FRAME_BYTES - 5)
+        }
+
+        override fun close() = payload.close()
+
+        override fun toString() =
+            "CandidateReply(requestId=$requestId,operation=$operation,payloadLength=${payload.size})"
+    }
 }
 
 internal data class BridgeCorrelation(
@@ -327,6 +386,8 @@ internal object BridgeProtocol {
             is BridgeMessage.PublicResult -> BridgeTag.PUBLIC_RESULT
             is BridgeMessage.Cancel -> BridgeTag.CANCEL
             is BridgeMessage.Error -> BridgeTag.ERROR
+            is BridgeMessage.CandidateCommand -> BridgeTag.CANDIDATE_COMMAND
+            is BridgeMessage.CandidateReply -> BridgeTag.CANDIDATE_REPLY
         }
 
     fun correlationFor(request: BridgeMessage, generation: Long): BridgeCorrelation {
@@ -335,6 +396,7 @@ internal object BridgeProtocol {
                 is BridgeMessage.PublicKeyRequest -> BridgeTag.PUBLIC_KEY_RESPONSE
                 is BridgeMessage.UpdateRequest -> BridgeTag.PUBLIC_RESULT
                 is BridgeMessage.Cancel -> BridgeTag.CANCEL
+                is BridgeMessage.CandidateCommand -> BridgeTag.CANDIDATE_REPLY
                 else -> throw IllegalArgumentException("message is not a request")
             }
         return BridgeCorrelation(request.requestId, expected, generation, Thread.currentThread())

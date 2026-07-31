@@ -283,7 +283,13 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         data: Parcel,
     ): TransactionResult {
         if (code == GET_NUMBER_OF_ENTRIES_TRANSACTION) {
-            logTransaction(txId, transactionNames[code]!!, callingUid, callingPid, true)
+            logTransaction(
+                txId,
+                transactionNames[code] ?: "getNumberOfEntries",
+                callingUid,
+                callingPid,
+                true,
+            )
             routeCandidateList(txId, callingUid, countOnly = true)?.let {
                 return it
             }
@@ -291,7 +297,13 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                 TransactionResult.ContinueAndSkipPost
             else TransactionResult.Continue
         } else if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
-            logTransaction(txId, transactionNames[code]!!, callingUid, callingPid, true)
+            logTransaction(
+                txId,
+                transactionNames[code] ?: "listEntries",
+                callingUid,
+                callingPid,
+                true,
+            )
 
             val packages = ConfigurationManager.getPackagesForUid(callingUid).joinToString()
             val isGMS = packages.contains("com.google.android.gms")

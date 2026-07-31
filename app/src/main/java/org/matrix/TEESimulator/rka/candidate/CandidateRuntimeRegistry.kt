@@ -25,7 +25,7 @@ object CandidateRuntimeRegistry {
             val service =
                 RemoteCandidateService(
                     identityHash,
-                    PendingBridgeBackend,
+                    BridgeRemoteCandidateBackend(),
                     FileRemoteCandidateStore(
                         Path.of("/data/adb/teesimulator-rka/state/candidate-keystore")
                     ),
@@ -74,31 +74,6 @@ object CandidateRuntimeRegistry {
         override fun abort(handle: RemoteOperationHandle) = service.abort(handle)
 
         override fun peerDied() = service.peerDied()
-    }
-
-    private object PendingBridgeBackend : RemoteCandidateBackend {
-        private fun <T> pending(): CandidateResult<T> =
-            CandidateResult.Failure(CandidateError.TRANSPORT)
-
-        override fun generate(command: RemoteGenerateCommand) = pending<RemoteKeyMaterial>()
-
-        override fun get(handle: RemoteKeyHandle) = pending<Unit>()
-
-        override fun list(identityHash: IdentityHash) = pending<List<RemoteKeyHandle>>()
-
-        override fun delete(handle: RemoteKeyHandle) = pending<Unit>()
-
-        override fun begin(handle: RemoteKeyHandle) = pending<RemoteOperationHandle>()
-
-        override fun updateAad(handle: RemoteOperationHandle, input: ByteArray) = pending<Unit>()
-
-        override fun update(handle: RemoteOperationHandle, input: ByteArray) = pending<Unit>()
-
-        override fun finish(handle: RemoteOperationHandle, input: ByteArray) = pending<ByteArray>()
-
-        override fun abort(handle: RemoteOperationHandle) = pending<Unit>()
-
-        override fun peerDied() = Unit
     }
 }
 

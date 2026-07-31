@@ -73,6 +73,8 @@ class KeyMintSecurityLevelInterceptor(
 
     private val activeOps = ConcurrentHashMap<Int, ConcurrentLinkedDeque<SoftwareOperation>>()
     private val recentOps = ConcurrentHashMap<Int, ConcurrentLinkedDeque<Long>>()
+    private var candidateGenerateDecoder: ((Parcel) -> Pair<KeyDescriptor, KeyMintAttestation>)? =
+        null
 
     override fun onPreTransact(
         txId: Long,
@@ -85,7 +87,12 @@ class KeyMintSecurityLevelInterceptor(
     ): TransactionResult {
         when (code) {
             GENERATE_KEY_TRANSACTION -> {
-                logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
+                logTransaction(
+                    txId,
+                    transactionNames[code] ?: "generateKey",
+                    callingUid,
+                    callingPid,
+                )
 
                 return handleGenerateKey(txId, callingUid, callingPid, data)
             }
@@ -618,6 +625,11 @@ class KeyMintSecurityLevelInterceptor(
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
+        candidateGenerateDecoder?.invoke(data)?.let { (descriptor, parsed) ->
+            routeCandidateGenerate(callingUid, descriptor, parsed)?.let {
+                return it
+            }
+        }
         if (SystemLogger.isUidLogged(callingUid)) {
             val savedPos = data.dataPosition()
             val req = data.marshall()

@@ -167,6 +167,12 @@ enum class CandidateOperationState {
     LOST,
 }
 
+data class CandidateOperationRecord(
+    val handle: RemoteOperationHandle,
+    val keyId: CandidateKeyId,
+    val state: CandidateOperationState,
+)
+
 class CandidateKeyRecord(
     val id: CandidateKeyId,
     val identityHash: IdentityHash,
@@ -243,10 +249,15 @@ interface RemoteCandidateStore {
     fun find(id: CandidateKeyId): CandidateKeyRecord?
 
     fun replace(record: CandidateKeyRecord)
+
+    fun operationStates(): List<CandidateOperationRecord>
+
+    fun replaceOperation(record: CandidateOperationRecord)
 }
 
 class MemoryRemoteCandidateStore : RemoteCandidateStore {
     private val records = linkedMapOf<CandidateKeyId, CandidateKeyRecord>()
+    private val operations = linkedMapOf<RemoteOperationHandle, CandidateOperationRecord>()
 
     @Synchronized override fun all() = records.values.toList()
 
@@ -255,5 +266,12 @@ class MemoryRemoteCandidateStore : RemoteCandidateStore {
     @Synchronized
     override fun replace(record: CandidateKeyRecord) {
         records[record.id] = record
+    }
+
+    @Synchronized override fun operationStates() = operations.values.toList()
+
+    @Synchronized
+    override fun replaceOperation(record: CandidateOperationRecord) {
+        operations[record.handle] = record
     }
 }

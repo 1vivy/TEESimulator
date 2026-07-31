@@ -41,13 +41,50 @@ class RemoteCandidateLifecycleTest {
             restarted.list(fixture.uid, fixture.identity).success().map { it.id },
         )
         val operation = restarted.begin(fixture.uid, key.id).success()
-        restarted.peerDied()
+        val afterLiveRestart =
+            RemoteCandidateRouteAdapter(
+                RemoteCandidateService(
+                    fixture.identity,
+                    fixture.backend,
+                    FileRemoteCandidateStore(fixture.storePath),
+                ),
+                fixture.local,
+            )
 
         assertEquals(
             CandidateError.OPERATION_LOST,
-            restarted.update(operation, byteArrayOf(9)).failure(),
+            afterLiveRestart.update(operation, byteArrayOf(9)).failure(),
         )
         assertEquals(0, fixture.local.calls)
+    }
+
+    @Test
+    fun persistenceRoundTripsExactCharacteristics() {
+        val fixture = CandidateFixture()
+        val characteristics =
+            CandidateCharacteristics(
+                CandidateAlgorithm.RSA,
+                CandidateCurve.P384,
+                setOf(CandidatePurpose.SIGN, CandidatePurpose.VERIFY),
+                setOf(CandidateDigest.SHA256, CandidateDigest.NONE),
+                CandidateSecurityLevel.STRONGBOX,
+            )
+        val record =
+            CandidateKeyRecord(
+                fixture.request.id,
+                fixture.identity,
+                21,
+                22,
+                RemoteKeyHandle.of(ByteArray(16) { 4 }),
+                listOf(byteArrayOf(1), byteArrayOf(2)),
+                characteristics,
+                CandidateKeyState.CONSUMED,
+            )
+
+        fixture.store.replace(record)
+        val reopened = FileRemoteCandidateStore(fixture.storePath).find(record.id)!!
+
+        assertEquals(characteristics, reopened.characteristics)
     }
 
     @Test
@@ -88,6 +125,47 @@ class FailClosedRouteTest {
             fixture.request.copy(shape = fixture.request.shape.copy(digest = CandidateDigest.NONE))
         assertEquals(CandidateError.UNSUPPORTED_DIGEST, fixture.adapter.generate(bad).failure())
         assertEquals(1, fixture.local.calls)
+    }
+
+    @Test
+    fun everyPostAdmissionStageAndErrorClassNeverFallsBack() {
+        CandidateError.entries.forEach { error ->
+            val fixture = CandidateFixture()
+            fixture.backend.failure = "generate" to error
+            assertEquals(error, fixture.adapter.generate(fixture.request).failure())
+            assertEquals(0, fixture.local.calls)
+        }
+
+        listOf("get", "list", "delete", "begin").forEach { stage ->
+            val fixture = CandidateFixture()
+            val key = fixture.adapter.generate(fixture.request).success()
+            fixture.backend.failure = stage to CandidateError.TRANSPORT
+            val actual =
+                when (stage) {
+                    "get" -> fixture.adapter.get(fixture.uid, key.id)
+                    "list" -> fixture.adapter.list(fixture.uid, fixture.identity)
+                    "delete" -> fixture.adapter.delete(fixture.uid, key.id)
+                    else -> fixture.adapter.begin(fixture.uid, key.id)
+                }
+            assertEquals(CandidateError.TRANSPORT, actual.failure())
+            assertEquals(0, fixture.local.calls)
+        }
+
+        listOf("updateAad", "update", "finish", "abort").forEach { stage ->
+            val fixture = CandidateFixture()
+            val key = fixture.adapter.generate(fixture.request).success()
+            val operation = fixture.adapter.begin(fixture.uid, key.id).success()
+            fixture.backend.failure = stage to CandidateError.TRANSPORT
+            val actual =
+                when (stage) {
+                    "updateAad" -> fixture.adapter.updateAad(operation, byteArrayOf(1))
+                    "update" -> fixture.adapter.update(operation, byteArrayOf(1))
+                    "finish" -> fixture.adapter.finish(operation, byteArrayOf(1))
+                    else -> fixture.adapter.abort(operation)
+                }
+            assertEquals(CandidateError.TRANSPORT, actual.failure())
+            assertEquals(0, fixture.local.calls)
+        }
     }
 }
 
@@ -138,13 +216,13 @@ private class CountingLocalKeyMint : LocalCandidateKeyMint {
     }
 }
 
-private class FakeRemoteCandidateBackend(private val failGenerate: CandidateError?) :
-    RemoteCandidateBackend {
+private class FakeRemoteCandidateBackend(failGenerate: CandidateError?) : RemoteCandidateBackend {
     private val handle = RemoteKeyHandle.of(ByteArray(16) { 5 })
     private var operationId = 5
+    var failure: Pair<String, CandidateError>? = failGenerate?.let { "generate" to it }
 
     override fun generate(command: RemoteGenerateCommand) =
-        failGenerate?.let { CandidateResult.Failure(it) }
+        fail("generate")
             ?: CandidateResult.Success(
                 RemoteKeyMaterial(
                     handle,
@@ -155,29 +233,35 @@ private class FakeRemoteCandidateBackend(private val failGenerate: CandidateErro
                 )
             )
 
-    override fun get(handle: RemoteKeyHandle) = CandidateResult.Success(Unit)
+    override fun get(handle: RemoteKeyHandle) = fail("get") ?: CandidateResult.Success(Unit)
 
-    override fun list(identityHash: IdentityHash) = CandidateResult.Success(listOf(handle))
+    override fun list(identityHash: IdentityHash) =
+        fail("list") ?: CandidateResult.Success(listOf(handle))
 
-    override fun delete(handle: RemoteKeyHandle) = CandidateResult.Success(Unit)
+    override fun delete(handle: RemoteKeyHandle) = fail("delete") ?: CandidateResult.Success(Unit)
 
     override fun begin(handle: RemoteKeyHandle) =
-        CandidateResult.Success(
-            RemoteOperationHandle.of(ByteArray(16) { (++operationId).toByte() })
-        )
+        fail("begin")
+            ?: CandidateResult.Success(
+                RemoteOperationHandle.of(ByteArray(16) { (++operationId).toByte() })
+            )
 
     override fun updateAad(handle: RemoteOperationHandle, input: ByteArray) =
-        CandidateResult.Success(Unit)
+        fail("updateAad") ?: CandidateResult.Success(Unit)
 
     override fun update(handle: RemoteOperationHandle, input: ByteArray) =
-        CandidateResult.Success(Unit)
+        fail("update") ?: CandidateResult.Success(Unit)
 
     override fun finish(handle: RemoteOperationHandle, input: ByteArray) =
-        CandidateResult.Success(byteArrayOf(8, 9))
+        fail("finish") ?: CandidateResult.Success(byteArrayOf(8, 9))
 
-    override fun abort(handle: RemoteOperationHandle) = CandidateResult.Success(Unit)
+    override fun abort(handle: RemoteOperationHandle) =
+        fail("abort") ?: CandidateResult.Success(Unit)
 
     override fun peerDied() = Unit
+
+    private fun <T> fail(stage: String): CandidateResult<T>? =
+        failure?.takeIf { it.first == stage }?.let { CandidateResult.Failure(it.second) }
 }
 
 private fun <T> CandidateResult<T>.success(): T = (this as CandidateResult.Success<T>).value

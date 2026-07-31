@@ -8,6 +8,7 @@ import java.util.TreeMap
 import java.util.concurrent.ConcurrentHashMap
 import org.matrix.TEESimulator.interception.keystore.shim.KeyMintSecurityLevelInterceptor
 import org.matrix.TEESimulator.logging.SystemLogger
+import org.matrix.TEESimulator.rka.candidate.CandidateKeyRecord
 
 /**
  * Handler to intercept listEntries and listEntriesBatched transactions.
@@ -30,6 +31,18 @@ object ListEntriesHandler {
     )
 
     private val pendingParams = ConcurrentHashMap<Long, ListEntriesParams>()
+    private val pendingRemoteKeys = ConcurrentHashMap<Long, List<CandidateKeyRecord>>()
+    private val pendingRemoteCounts = ConcurrentHashMap<Long, Int>()
+
+    fun cacheRemoteKeys(txId: Long, records: List<CandidateKeyRecord>) {
+        pendingRemoteKeys[txId] = records
+    }
+
+    fun cacheRemoteCount(txId: Long, count: Int) {
+        pendingRemoteCounts[txId] = count
+    }
+
+    fun takeRemoteCount(txId: Long): Int = pendingRemoteCounts.remove(txId) ?: 0
 
     // Based on AOSP function `estimate_safe_amount_to_return` in utils.rs.
     private fun estimateSafeAmountToReturn(
@@ -89,7 +102,12 @@ object ListEntriesHandler {
         // The namespace parameter is thus ignored for non-privileged applications.
         // See AOSP function `get_key_descriptor_for_lookup` in service.rs.
         val keysToInject =
-            extractGeneratedKeyDescriptors(callingUid, callingUid.toLong(), params.startPastAlias)
+            extractGeneratedKeyDescriptors(callingUid, callingUid.toLong(), params.startPastAlias) +
+                extractRemoteKeyDescriptors(
+                    pendingRemoteKeys.remove(txId).orEmpty(),
+                    callingUid.toLong(),
+                    params.startPastAlias,
+                )
         val originalList = reply.createTypedArray(KeyDescriptor.CREATOR)!!
         val mergedArray = mergeKeyDescriptors(originalList, keysToInject)
 
@@ -139,4 +157,20 @@ object ListEntriesHandler {
                 }
             }
     }
+
+    private fun extractRemoteKeyDescriptors(
+        records: List<CandidateKeyRecord>,
+        namespace: Long,
+        startPastAlias: String?,
+    ): List<KeyDescriptor> =
+        records
+            .filter { startPastAlias == null || it.id.alias > startPastAlias }
+            .map { record ->
+                KeyDescriptor().apply {
+                    domain = Domain.APP
+                    nspace = namespace
+                    alias = record.id.alias
+                    blob = null
+                }
+            }
 }

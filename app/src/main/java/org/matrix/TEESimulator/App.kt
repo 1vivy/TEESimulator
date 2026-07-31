@@ -16,6 +16,7 @@ import org.matrix.TEESimulator.interception.keystore.KeystoreInterceptor
 import org.matrix.TEESimulator.interception.soter.SoterProcessSupervisor
 import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.pki.NativeCertGen
+import org.matrix.TEESimulator.rka.candidate.CandidateRuntimeRegistry
 import org.matrix.TEESimulator.util.AndroidDeviceUtils
 
 /**
@@ -48,6 +49,7 @@ object App {
 
             // Load the package configuration.
             ConfigurationManager.initialize()
+            CandidateRuntimeRegistry.initializeLifecycle()
 
             // Initialize and start the appropriate keystore interceptors.
             initializeInterceptors()

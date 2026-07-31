@@ -20,6 +20,31 @@ class RemoteCandidateService(
     private val operations = linkedMapOf<RemoteOperationHandle, LiveOperation>()
     private val operationStates = linkedMapOf<RemoteOperationHandle, CandidateOperationState>()
 
+    init {
+        store.operationStates().forEach { persisted ->
+            val reconciled =
+                if (persisted.state == CandidateOperationState.OPEN) {
+                    persisted
+                        .copy(state = CandidateOperationState.LOST)
+                        .also(store::replaceOperation)
+                } else {
+                    persisted
+                }
+            operationStates[reconciled.handle] = reconciled.state
+        }
+    }
+
+    @Synchronized
+    fun resolve(uid: Int, namespace: Long): CandidateKeyId? =
+        store
+            .all()
+            .firstOrNull {
+                it.id.uid == uid &&
+                    it.id.namespace == namespace &&
+                    it.state != CandidateKeyState.DELETED
+            }
+            ?.id
+
     @Synchronized
     fun generate(request: CandidateGenerateRequest): CandidateRoute<CandidateKeyRecord> {
         if (request.identityHash != admittedIdentity) return CandidateRoute.PassThrough
@@ -139,6 +164,9 @@ class RemoteCandidateService(
             }
             operations[handle] = LiveOperation(id, handle, CandidateOperationState.OPEN)
             operationStates[handle] = CandidateOperationState.OPEN
+            store.replaceOperation(
+                CandidateOperationRecord(handle, id, CandidateOperationState.OPEN)
+            )
         }
         return CandidateRoute.Remote(begun)
     }
@@ -161,6 +189,9 @@ class RemoteCandidateService(
             is CandidateResult.Success -> {
                 operation.state = CandidateOperationState.FINISHED
                 operationStates[handle] = operation.state
+                store.replaceOperation(
+                    CandidateOperationRecord(handle, operation.keyId, operation.state)
+                )
                 operations.remove(handle)
                 store.find(operation.keyId)?.let {
                     store.replace(it.withState(CandidateKeyState.CONSUMED))
@@ -178,6 +209,9 @@ class RemoteCandidateService(
             is CandidateResult.Success -> {
                 operation.state = CandidateOperationState.ABORTED
                 operationStates[handle] = operation.state
+                store.replaceOperation(
+                    CandidateOperationRecord(handle, operation.keyId, operation.state)
+                )
                 operations.remove(handle)
                 aborted
             }
@@ -190,6 +224,9 @@ class RemoteCandidateService(
         operations.values.forEach {
             it.state = CandidateOperationState.LOST
             operationStates[it.handle] = CandidateOperationState.LOST
+            store.replaceOperation(
+                CandidateOperationRecord(it.handle, it.keyId, CandidateOperationState.LOST)
+            )
         }
         operations.clear()
     }
@@ -232,6 +269,9 @@ class RemoteCandidateService(
         ) {
             operation.state = CandidateOperationState.LOST
             operationStates[operation.handle] = operation.state
+            store.replaceOperation(
+                CandidateOperationRecord(operation.handle, operation.keyId, operation.state)
+            )
             operations.remove(operation.handle)
         }
         return failure

@@ -33,6 +33,7 @@ import org.matrix.TEESimulator.attestation.DeviceAttestationService
 import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.interception.core.BinderInterceptor
+import org.matrix.TEESimulator.interception.keystore.CandidateBinderAdapter
 import org.matrix.TEESimulator.interception.keystore.InterceptorUtils
 import org.matrix.TEESimulator.interception.keystore.KeyIdentifier
 import org.matrix.TEESimulator.interception.keystore.Keystore2Interceptor
@@ -43,6 +44,16 @@ import org.matrix.TEESimulator.pki.CertificateGenerator
 import org.matrix.TEESimulator.pki.CertificateHelper
 import org.matrix.TEESimulator.pki.KeyBoxManager
 import org.matrix.TEESimulator.pki.NativeCertGen
+import org.matrix.TEESimulator.rka.candidate.CandidateAlgorithm
+import org.matrix.TEESimulator.rka.candidate.CandidateCurve
+import org.matrix.TEESimulator.rka.candidate.CandidateDigest
+import org.matrix.TEESimulator.rka.candidate.CandidateKeyId
+import org.matrix.TEESimulator.rka.candidate.CandidateKeyShape
+import org.matrix.TEESimulator.rka.candidate.CandidatePurpose
+import org.matrix.TEESimulator.rka.candidate.CandidateResult
+import org.matrix.TEESimulator.rka.candidate.CandidateRoute
+import org.matrix.TEESimulator.rka.candidate.CandidateRuntimeRegistry
+import org.matrix.TEESimulator.rka.candidate.CandidateSecurityLevel
 import org.matrix.TEESimulator.util.AndroidDeviceUtils
 import org.matrix.TEESimulator.util.AndroidPermissionUtils
 import org.matrix.TEESimulator.util.TeeLatencySimulator
@@ -336,6 +347,74 @@ class KeyMintSecurityLevelInterceptor(
         return null
     }
 
+    private fun routeCandidateBegin(
+        callingUid: Int,
+        descriptor: KeyDescriptor,
+    ): TransactionResult? {
+        if (securityLevel != SecurityLevel.TRUSTED_ENVIRONMENT) return null
+        val runtime = CandidateRuntimeRegistry.current() ?: return null
+        if (!runtime.admits(callingUid)) return null
+        val id =
+            when (descriptor.domain) {
+                Domain.APP ->
+                    descriptor.alias?.let { CandidateKeyId(callingUid, callingUid.toLong(), it) }
+                Domain.KEY_ID -> runtime.resolve(callingUid, descriptor.nspace)
+                else -> null
+            } ?: return null
+        return when (val route = runtime.begin(callingUid, id)) {
+            CandidateRoute.PassThrough -> null
+            is CandidateRoute.Remote ->
+                when (val result = route.result) {
+                    is CandidateResult.Success ->
+                        InterceptorUtils.createTypedObjectReply(
+                            CandidateBinderAdapter.operation(runtime, result.value)
+                        )
+                    is CandidateResult.Failure ->
+                        InterceptorUtils.createServiceSpecificErrorReply(
+                            CandidateBinderAdapter.errorCode(result.error)
+                        )
+                }
+        }
+    }
+
+    private fun routeCandidateGenerate(
+        callingUid: Int,
+        descriptor: KeyDescriptor,
+        parsed: KeyMintAttestation,
+    ): TransactionResult? {
+        if (securityLevel != SecurityLevel.TRUSTED_ENVIRONMENT) return null
+        val runtime = CandidateRuntimeRegistry.current() ?: return null
+        if (!runtime.admits(callingUid)) return null
+        val alias = descriptor.alias ?: return null
+        val id = CandidateKeyId(callingUid, callingUid.toLong(), alias)
+        val shape =
+            CandidateKeyShape(
+                if (parsed.algorithm == Algorithm.EC) CandidateAlgorithm.EC
+                else CandidateAlgorithm.RSA,
+                if (parsed.ecCurve == EcCurve.P_256) CandidateCurve.P256 else CandidateCurve.P384,
+                if (parsed.purpose.firstOrNull() == 2) CandidatePurpose.SIGN
+                else CandidatePurpose.VERIFY,
+                if (parsed.digest.firstOrNull() == Digest.SHA_2_256) CandidateDigest.SHA256
+                else CandidateDigest.NONE,
+                CandidateSecurityLevel.TEE,
+                parsed.attestationChallenge?.copyOf() ?: ByteArray(0),
+            )
+        return when (val route = runtime.generate(id, shape)) {
+            CandidateRoute.PassThrough -> null
+            is CandidateRoute.Remote ->
+                when (val result = route.result) {
+                    is CandidateResult.Success ->
+                        InterceptorUtils.createTypedObjectReply(
+                            CandidateBinderAdapter.metadata(result.value)
+                        )
+                    is CandidateResult.Failure ->
+                        InterceptorUtils.createServiceSpecificErrorReply(
+                            CandidateBinderAdapter.errorCode(result.error)
+                        )
+                }
+        }
+    }
+
     private fun handleCreateOperation(
         txId: Long,
         callingUid: Int,
@@ -351,6 +430,10 @@ class KeyMintSecurityLevelInterceptor(
                 SystemLogger.debug(
                     "[TX_ID: $txId] createOperation descriptor: domain=${keyDescriptor.domain} nspace=${keyDescriptor.nspace} alias=${keyDescriptor.alias}"
                 )
+
+                routeCandidateBegin(callingUid, keyDescriptor)?.let {
+                    return it
+                }
 
                 // Android framework calls createOperation with domain=APP+alias;
                 // keystore2 internally resolves to KEY_ID — but software keys never
@@ -578,6 +661,9 @@ class KeyMintSecurityLevelInterceptor(
                         } else raw
                     }
                 val parsedParams = KeyMintAttestation(params)
+                routeCandidateGenerate(callingUid, keyDescriptor, parsedParams)?.let {
+                    return it
+                }
                 val isAttestKeyRequest = parsedParams.isAttestKey()
 
                 val hasDeviceIdAttestation =
@@ -715,7 +801,8 @@ class KeyMintSecurityLevelInterceptor(
                 // Device-ID attestation must be forged, not patched: the real TEE returns
                 // CANNOT_ATTEST_IDS, so there is no real chain to patch — only a synthetic one
                 // carrying the requested IDs and rooted under the keybox will satisfy the caller.
-                // AUTO forges asymmetric attestation only when the real hardware cannot provision an
+                // AUTO forges asymmetric attestation only when the real hardware cannot provision
+                // an
                 // attestation key for that algorithm at the requested security level: a device may
                 // attest RSA in the TEE yet not in StrongBox, so the probe must match the request.
                 // Devices that can attest keep their genuine chain via PATCH, which strict callers
@@ -1252,9 +1339,11 @@ class KeyMintSecurityLevelInterceptor(
                     require(certChain.isNotEmpty()) { "Persisted key has empty certificate chain" }
 
                     val publicKey = certChain[0].publicKey
-                    // The private key ($algorithmName) signs leaves that callers verify against this
+                    // The private key ($algorithmName) signs leaves that callers verify against
+                    // this
                     // served chain's leaf public key. If the two disagree (EC private under an RSA
-                    // served leaf) every signature this key makes fails as DATA_TOO_LARGE_FOR_MODULUS
+                    // served leaf) every signature this key makes fails as
+                    // DATA_TOO_LARGE_FOR_MODULUS
                     // -- the A16 EC two-root. A split record is corrupt: drop it so the next
                     // generateKey rebirths a coherent one rather than serve a key that cannot sign.
                     require(publicKey.algorithm == algorithmName) {

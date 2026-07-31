@@ -303,6 +303,9 @@ pub enum ProfileError {
     /// Rotation cannot activate while a session is live.
     #[error("profile sessions are still live")]
     SessionsLive,
+    /// A direct profile field or closed direct evidence is invalid.
+    #[error("direct endpoint profile is invalid")]
+    Direct,
 }
 
 fn valid_dns(host: &str) -> bool {

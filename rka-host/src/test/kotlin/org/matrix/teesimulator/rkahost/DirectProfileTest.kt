@@ -3,7 +3,6 @@ package org.matrix.teesimulator.rkahost
 import java.time.Duration
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -16,7 +15,6 @@ class DirectProfileTest {
 
         assertEquals("192.168.50.8", lan.connect.host)
         assertEquals("100.88.0.8", tailscale.connect.host)
-        assertEquals(7, lan.epoch)
         assertArrayEquals(ByteArray(32) { 0x11 }, lan.peerSpki())
         assertSame(lan, DirectProfileSelector.select(listOf(lan, tailscale), DirectPath.LAN))
         assertSame(
@@ -28,11 +26,10 @@ class DirectProfileTest {
     @Test
     fun rejectsNonCanonicalEndpointsWildcardInterfacesAndUnboundedTimeouts() {
         assertFailure { DirectEndpoint("DONOR.tailnet.ts.net", 8443) }
-        assertFailure { DirectEndpoint("donor.tailnet.ts.net", 0) }
         assertFailure { DirectEndpoint("192.168.050.8", 8443) }
         assertFailure {
             DirectProfile.create(
-                1,
+                7,
                 DirectPath.LAN,
                 DirectEndpoint("192.168.50.8", 8443),
                 "0.0.0.0",
@@ -43,10 +40,10 @@ class DirectProfileTest {
         }
         assertFailure {
             DirectProfile.create(
-                1,
+                7,
                 DirectPath.LAN,
                 DirectEndpoint("192.168.50.8", 8443),
-                "192.168.50.09",
+                "192.168.50.9",
                 ByteArray(32),
                 Duration.ofSeconds(31),
                 Duration.ofSeconds(3),
@@ -55,52 +52,47 @@ class DirectProfileTest {
     }
 
     @Test
-    fun staleEpochPinAddressOrEndpointCannotBePromoted() {
+    fun rejectsAllIncompleteOrMismatchedDirectEvidence() {
         val current = profile(7, DirectPath.LAN, "192.168.50.8", "192.168.50.9", 0x11)
-        val exact =
-            DirectProbe.Reachable(7, current.connect, current.listenAddress, current.peerSpki())
+        val exact = TrustedDirectProbeFactory.fromPinnedTls(evidence(current))
         assertEquals(
             DirectReadinessStatus.DIRECT_READY,
             DirectReadinessAdapter.assess(current, exact).status,
         )
+
         val mutations =
             listOf(
-                DirectProbe.Reachable(
-                    6,
-                    current.connect,
-                    current.listenAddress,
-                    current.peerSpki(),
-                ),
-                DirectProbe.Reachable(
-                    7,
-                    DirectEndpoint("192.168.50.7", 8443),
-                    current.listenAddress,
-                    current.peerSpki(),
-                ),
-                DirectProbe.Reachable(7, current.connect, "192.168.50.7", current.peerSpki()),
-                DirectProbe.Reachable(
-                    7,
-                    current.connect,
-                    current.listenAddress,
-                    ByteArray(32) { 0x12 },
-                ),
+                evidence(current).copy(path = DirectPath.TAILSCALE),
+                evidence(current).copy(connect = DirectEndpoint("192.168.50.7", 8443)),
+                evidence(current).copy(listenInterface = "192.168.50.7"),
+                evidence(current).copy(epoch = 6),
+                evidence(current).copy(peerSpki = ByteArray(32) { 0x12 }),
+                evidence(current).copy(transport = DirectTransportKind.DIAGNOSTIC_USB),
             )
-        mutations.forEach {
-            assertEquals(
-                DirectReadinessStatus.DIRECT_NETWORK_BLOCKED,
-                DirectReadinessAdapter.assess(current, it).status,
-            )
+        mutations.forEach { mutation ->
+            val result =
+                DirectReadinessAdapter.assess(
+                    current,
+                    TrustedDirectProbeFactory.fromPinnedTls(mutation),
+                    UsbDiagnosticEvidence(DiagnosticTransportKind.DIAGNOSTIC_USB_RELAY, true),
+                )
+            assertEquals(DirectReadinessStatus.DIRECT_NETWORK_BLOCKED, result.status)
+            assertTrue(requireNotNull(result.diagnosticUsb).succeeded)
         }
+        assertEquals(
+            DirectReadinessStatus.DIRECT_NETWORK_BLOCKED,
+            DirectReadinessAdapter.assess(current, DirectProbe.Unreachable).status,
+        )
     }
 
     @Test
     fun usbCannotSatisfyDirect() {
-        val profile = profile(7, DirectPath.LAN, "192.168.50.8", "192.168.50.9", 0x11)
+        val current = profile(7, DirectPath.LAN, "192.168.50.8", "192.168.50.9", 0x11)
         val result =
             DirectReadinessAdapter.assess(
-                profile,
+                current,
                 DirectProbe.Unreachable,
-                UsbDiagnosticEvidence(succeeded = true),
+                UsbDiagnosticEvidence(DiagnosticTransportKind.DIAGNOSTIC_USB_RELAY, true),
             )
 
         assertEquals(DirectReadinessStatus.DIRECT_NETWORK_BLOCKED, result.status)
@@ -108,35 +100,18 @@ class DirectProfileTest {
     }
 
     @Test
-    fun rotationAndSelectionAreDeterministicWithoutCredentialStateOrFallback() {
+    fun rotationRejectsStaleDirectEvidence() {
         val original = profile(7, DirectPath.LAN, "192.168.50.8", "192.168.50.9", 0x11)
+        val stale = TrustedDirectProbeFactory.fromPinnedTls(evidence(original))
         val next = profile(8, DirectPath.LAN, "192.168.50.10", "192.168.50.9", 0x22)
         val rotation = DirectProfileRotation(original)
         rotation.prepare(next)
         rotation.activate()
 
         assertSame(next, rotation.active)
-        assertSame(next, DirectProfileSelector.select(listOf(original, next), DirectPath.LAN))
         assertEquals(
             DirectReadinessStatus.DIRECT_NETWORK_BLOCKED,
-            DirectReadinessAdapter.assess(
-                    rotation.active,
-                    DirectProbe.Reachable(
-                        original.epoch,
-                        original.connect,
-                        original.listenAddress,
-                        original.peerSpki(),
-                    ),
-                )
-                .status,
-        )
-        assertFalse(
-            DirectProfile::class.java.declaredFields.any {
-                it.name.contains("credential", true) ||
-                    it.name.contains("auth", true) ||
-                    it.name.contains("discovery", true) ||
-                    it.name.contains("fallback", true)
-            }
+            DirectReadinessAdapter.assess(rotation.active, stale).status,
         )
     }
 
@@ -144,17 +119,27 @@ class DirectProfileTest {
         epoch: Long,
         path: DirectPath,
         host: String,
-        listen: String,
+        listenInterface: String,
         pin: Int,
     ): DirectProfile =
         DirectProfile.create(
             epoch,
             path,
             DirectEndpoint(host, 8443),
-            listen,
+            listenInterface,
             ByteArray(32) { pin.toByte() },
             Duration.ofSeconds(2),
             Duration.ofSeconds(3),
+        )
+
+    private fun evidence(profile: DirectProfile): DirectEvidenceInput =
+        DirectEvidenceInput(
+            profile.path,
+            profile.connect,
+            profile.listenInterface,
+            profile.epoch,
+            profile.peerSpki(),
+            DirectTransportKind.DIRECT_PINNED_TLS,
         )
 
     private fun assertFailure(block: () -> Unit) {

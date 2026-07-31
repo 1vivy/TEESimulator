@@ -6,6 +6,8 @@ use thiserror::Error;
 mod audit;
 #[doc(hidden)]
 pub mod audit_codec;
+#[doc(hidden)]
+pub mod direct_profile;
 mod identity;
 mod profile;
 #[doc(hidden)]
@@ -22,6 +24,10 @@ pub mod tls_io;
 mod tls_types;
 
 pub use audit::{AuditChain, AuditEntry, AuditReceipt, ReceiptContext, ReceiptVerifier};
+pub use direct_profile::{
+    DirectEndpointProfile, DirectPath, DirectProfileInput, DirectProfileRotation,
+    DirectReachability, DirectReadiness, DirectReadinessStatus,
+};
 pub use identity::{IdentityError, TransportIdentity};
 pub use profile::{
     Endpoint, PairedProfile, ProfileError, ProfileInput, ProfileRotation, Role, TransportKind,

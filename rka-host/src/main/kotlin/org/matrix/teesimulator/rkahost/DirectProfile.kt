@@ -15,15 +15,11 @@ class DirectEndpoint private constructor(val host: String, val port: Int) {
                 "DIRECT_ENDPOINT_INVALID"
             }
             val labels = host.split('.')
-            require(labels.all { label -> label.matches(Regex("[a-z0-9]([a-z0-9-]*[a-z0-9])?")) }) {
+            require(labels.all { it.matches(Regex("[a-z0-9]([a-z0-9-]*[a-z0-9])?")) }) {
                 "DIRECT_ENDPOINT_INVALID"
             }
-            if (labels.size == 4 && labels.all { label -> label.all(Char::isDigit) }) {
-                require(
-                    labels.all { label ->
-                        label == "0" || (!label.startsWith('0') && label.toInt() <= 255)
-                    }
-                ) {
+            if (labels.size == 4 && labels.all { it.all(Char::isDigit) }) {
+                require(labels.all { it == "0" || (!it.startsWith('0') && it.toInt() <= 255) }) {
                     "DIRECT_ENDPOINT_INVALID"
                 }
             }
@@ -42,7 +38,7 @@ private constructor(
     val epoch: Long,
     val path: DirectPath,
     val connect: DirectEndpoint,
-    val listenAddress: String,
+    val listenInterface: String,
     private val pin: ByteArray,
     val connectTimeout: Duration,
     val listenTimeout: Duration,
@@ -54,20 +50,20 @@ private constructor(
             epoch: Long,
             path: DirectPath,
             connect: DirectEndpoint,
-            listenAddress: String,
+            listenInterface: String,
             peerSpki: ByteArray,
             connectTimeout: Duration,
             listenTimeout: Duration,
         ): DirectProfile {
             require(epoch > 0) { "DIRECT_PROFILE_EPOCH_INVALID" }
-            require(canonicalIpv4(listenAddress) != "0.0.0.0") { "DIRECT_LISTEN_ADDRESS_INVALID" }
+            require(canonicalIpv4(listenInterface) != "0.0.0.0") { "DIRECT_LISTEN_ADDRESS_INVALID" }
             require(peerSpki.size == PIN_BYTES) { "DIRECT_PEER_PIN_INVALID" }
             require(bounded(connectTimeout) && bounded(listenTimeout)) { "DIRECT_TIMEOUT_INVALID" }
             return DirectProfile(
                 epoch,
                 path,
                 connect,
-                listenAddress,
+                listenInterface,
                 peerSpki.copyOf(),
                 connectTimeout,
                 listenTimeout,
@@ -92,20 +88,50 @@ private constructor(
     }
 }
 
-sealed interface DirectProbe {
+internal enum class DirectTransportKind {
+    DIRECT_PINNED_TLS,
+    DIAGNOSTIC_USB,
+}
+
+internal data class DirectEvidenceInput(
+    val path: DirectPath,
+    val connect: DirectEndpoint,
+    val listenInterface: String,
+    val epoch: Long,
+    val peerSpki: ByteArray,
+    val transport: DirectTransportKind,
+)
+
+private object ReciprocalPinnedTlsAdmission
+
+internal sealed interface DirectProbe {
     data object Unreachable : DirectProbe
 
-    class Reachable(
-        val epoch: Long,
-        val connect: DirectEndpoint,
-        val listenAddress: String,
-        peerSpki: ByteArray,
+    class PinnedTls
+    private constructor(
+        val evidence: DirectEvidenceInput,
+        private val admission: ReciprocalPinnedTlsAdmission,
     ) : DirectProbe {
-        val peerSpki: ByteArray = peerSpki.copyOf()
+        companion object {
+            fun fromTrusted(input: DirectEvidenceInput): DirectProbe =
+                if (input.transport == DirectTransportKind.DIRECT_PINNED_TLS) {
+                    PinnedTls(
+                        input.copy(peerSpki = input.peerSpki.copyOf()),
+                        ReciprocalPinnedTlsAdmission,
+                    )
+                } else {
+                    Unreachable
+                }
+        }
     }
 }
 
-data class UsbDiagnosticEvidence(val succeeded: Boolean)
+internal object TrustedDirectProbeFactory {
+    fun fromPinnedTls(input: DirectEvidenceInput): DirectProbe =
+        DirectProbe.PinnedTls.fromTrusted(input)
+}
+
+data class UsbDiagnosticEvidence(val kind: DiagnosticTransportKind, val succeeded: Boolean)
 
 enum class DirectReadinessStatus {
     DIRECT_READY,
@@ -117,18 +143,22 @@ data class DirectReadiness(
     val diagnosticUsb: UsbDiagnosticEvidence?,
 )
 
-object DirectReadinessAdapter {
+internal object DirectReadinessAdapter {
     fun assess(
         profile: DirectProfile,
         probe: DirectProbe,
         usb: UsbDiagnosticEvidence? = null,
     ): DirectReadiness {
+        val evidence = (probe as? DirectProbe.PinnedTls)?.evidence
         val ready =
-            probe is DirectProbe.Reachable &&
-                probe.epoch == profile.epoch &&
-                probe.connect == profile.connect &&
-                probe.listenAddress == profile.listenAddress &&
-                probe.peerSpki.contentEquals(profile.peerSpki())
+            evidence != null &&
+                evidence.path == profile.path &&
+                evidence.connect == profile.connect &&
+                evidence.listenInterface == profile.listenInterface &&
+                evidence.epoch == profile.epoch &&
+                evidence.peerSpki.contentEquals(profile.peerSpki()) &&
+                evidence.transport == DirectTransportKind.DIRECT_PINNED_TLS &&
+                probeHasReciprocalAdmission(probe)
         return DirectReadiness(
             if (ready) DirectReadinessStatus.DIRECT_READY
             else DirectReadinessStatus.DIRECT_NETWORK_BLOCKED,
@@ -136,6 +166,9 @@ object DirectReadinessAdapter {
         )
     }
 }
+
+private fun probeHasReciprocalAdmission(probe: DirectProbe): Boolean =
+    (probe as? DirectProbe.PinnedTls) != null
 
 class DirectProfileRotation(initial: DirectProfile) {
     var active: DirectProfile = initial

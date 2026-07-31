@@ -1,31 +1,61 @@
 package org.matrix.TEESimulator.rka.broker
 
+import java.lang.reflect.Proxy
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class ProvisioningSnapshotTest {
     @Test
     fun captureReadsEveryObservationExactlyOnce() {
-        val source = RecordingObservationSource()
+        val calls = mutableListOf<String>()
+        val observations =
+            mapOf(
+                "getActiveBaseUrl" to "https://rkp.example",
+                "getRolloutId" to 42,
+                "getBuildFingerprint" to "brand/device/product:16/BP2A/42:user/release-keys",
+                "getRkpdVersion" to "rkpd-16",
+                "getApexVersion" to "com.android.rkpd.apex@16",
+                "getPackageVersion" to "com.android.rkpdapp@42",
+                "getProvisioningConfig" to "enabled",
+                "getFailureWindowStartMillis" to 100L,
+                "getFailureCount" to 2,
+                "getDataBudgetWindowStartMillis" to 200L,
+                "getDataBudgetBytes" to 4096L,
+                "getDefaultTeeIrpcIdentity" to
+                    "android.hardware.security.keymint.IRemotelyProvisionedComponent/default",
+            )
+        val source =
+            Proxy.newProxyInstance(
+                javaClass.classLoader,
+                arrayOf(ProvisioningObservationSource::class.java),
+            ) { _, method, _ ->
+                calls += method.name
+                observations[method.name]
+                    ?: error("capture attempted non-observation call ${method.name}")
+            } as ProvisioningObservationSource
+        assertEquals(
+            observations.keys.sorted(),
+            ProvisioningObservationSource::class.java.declaredMethods.map { it.name }.sorted(),
+        )
 
         val snapshot = ProvisioningSnapshot.capture(source)
 
         assertEquals(
             listOf(
-                "activeBaseUrl",
-                "rolloutId",
-                "buildFingerprint",
-                "rkpdVersion",
-                "apexVersion",
-                "packageVersion",
-                "provisioningConfig",
-                "failureWindowStartMillis",
-                "failureCount",
-                "dataBudgetWindowStartMillis",
-                "dataBudgetBytes",
-                "defaultTeeIrpcIdentity",
+                "getActiveBaseUrl",
+                "getRolloutId",
+                "getBuildFingerprint",
+                "getRkpdVersion",
+                "getApexVersion",
+                "getPackageVersion",
+                "getProvisioningConfig",
+                "getFailureWindowStartMillis",
+                "getFailureCount",
+                "getDataBudgetWindowStartMillis",
+                "getDataBudgetBytes",
+                "getDefaultTeeIrpcIdentity",
             ),
-            source.reads,
+            calls,
         )
         assertEquals("https://rkp.example", snapshot.activeBaseUrl)
         assertEquals(42, snapshot.rolloutId)
@@ -43,53 +73,4 @@ class ProvisioningSnapshotTest {
             snapshot.defaultTeeIrpcIdentity,
         )
     }
-}
-
-internal class RecordingObservationSource : ProvisioningObservationSource {
-    val reads = mutableListOf<String>()
-
-    private fun <T> read(name: String, value: T): T {
-        reads += name
-        return value
-    }
-
-    override val activeBaseUrl
-        get() = read("activeBaseUrl", "https://rkp.example")
-
-    override val rolloutId
-        get() = read("rolloutId", 42)
-
-    override val buildFingerprint
-        get() = read("buildFingerprint", "brand/device/product:16/BP2A/42:user/release-keys")
-
-    override val rkpdVersion
-        get() = read("rkpdVersion", "rkpd-16")
-
-    override val apexVersion
-        get() = read("apexVersion", "com.android.rkpd.apex@16")
-
-    override val packageVersion
-        get() = read("packageVersion", "com.android.rkpdapp@42")
-
-    override val provisioningConfig
-        get() = read("provisioningConfig", "enabled")
-
-    override val failureWindowStartMillis
-        get() = read("failureWindowStartMillis", 100L)
-
-    override val failureCount
-        get() = read("failureCount", 2)
-
-    override val dataBudgetWindowStartMillis
-        get() = read("dataBudgetWindowStartMillis", 200L)
-
-    override val dataBudgetBytes
-        get() = read("dataBudgetBytes", 4096L)
-
-    override val defaultTeeIrpcIdentity
-        get() =
-            read(
-                "defaultTeeIrpcIdentity",
-                "android.hardware.security.keymint.IRemotelyProvisionedComponent/default",
-            )
 }

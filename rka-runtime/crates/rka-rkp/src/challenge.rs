@@ -5,8 +5,8 @@ use std::io::Read;
 
 use thiserror::Error;
 
-use crate::MAX_PROVISIONING_BYTES;
 use crate::config::{BaseUrl, ConfigError, ProvisioningInfo, parse_fetch_response};
+use crate::{MAX_PROVISIONING_BYTES, ResponseHeaders, base64_url, uuid};
 
 const MAX_CHALLENGE_BYTES: usize = 64;
 
@@ -26,22 +26,42 @@ pub struct HttpRequest<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct HttpResponse {
-    /// HTTP status code.
-    pub status: u16,
-    /// Response headers.
-    pub headers: Vec<(String, String)>,
-    /// Bounded response body.
-    pub body: Vec<u8>,
+    status: u16,
+    headers: ResponseHeaders,
+    body: Vec<u8>,
 }
 
 impl HttpResponse {
-    #[cfg(test)]
-    const fn ok(body: Vec<u8>) -> Self {
-        Self {
-            status: 200,
-            headers: Vec::new(),
-            body,
+    /// Constructs a response only from already bounded headers and a bounded body.
+    pub fn new(status: u16, headers: ResponseHeaders, body: Vec<u8>) -> Result<Self, ClientError> {
+        if body.len() > MAX_PROVISIONING_BYTES {
+            return Err(ClientError::ResponseTooLarge);
         }
+        Ok(Self {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    /// Returns the response status.
+    pub const fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// Returns the bounded response body.
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    #[cfg(test)]
+    fn ok(body: Vec<u8>) -> Self {
+        Self::new(
+            200,
+            ResponseHeaders::collect_bounded(std::iter::empty::<(&str, &str)>()).unwrap(),
+            body,
+        )
+        .unwrap()
     }
 }
 
@@ -187,7 +207,7 @@ impl<T: HttpTransport, S: EffectiveBaseStore, E: EntropySource, J: AttemptJourna
             body: &body,
         })?;
         validate_response(&response)?;
-        let (challenge, override_url) = parse_fetch_response(&response.body)?;
+        let (challenge, override_url) = parse_fetch_response(response.body())?;
         if let Some(base) = override_url {
             self.store.store(&base).map_err(|_| ClientError::Store)?;
             self.effective_base = base;
@@ -246,70 +266,13 @@ impl<T: HttpTransport, S: EffectiveBaseStore, E: EntropySource, J: AttemptJourna
 }
 
 fn validate_response(response: &HttpResponse) -> Result<(), ClientError> {
-    if (300..400).contains(&response.status)
-        || response
-            .headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("location"))
-    {
+    if (300..400).contains(&response.status()) || response.headers.has_location() {
         return Err(ClientError::Redirect);
     }
-    if !(200..300).contains(&response.status) {
+    if !(200..300).contains(&response.status()) {
         return Err(ClientError::HttpStatus);
     }
-    if response.body.len() > MAX_PROVISIONING_BYTES {
-        return Err(ClientError::ResponseTooLarge);
-    }
     Ok(())
-}
-
-fn uuid(bytes: &[u8; 16]) -> String {
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15]
-    )
-}
-
-fn base64_url(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut output = String::new();
-    for chunk in input.chunks(3) {
-        let value = (u32::from(*chunk.first().unwrap_or(&0)) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        output.push(char::from(
-            *TABLE.get(((value >> 18) & 63) as usize).unwrap_or(&b'A'),
-        ));
-        output.push(char::from(
-            *TABLE.get(((value >> 12) & 63) as usize).unwrap_or(&b'A'),
-        ));
-        if chunk.len() > 1 {
-            output.push(char::from(
-                *TABLE.get(((value >> 6) & 63) as usize).unwrap_or(&b'A'),
-            ));
-        }
-        if chunk.len() > 2 {
-            output.push(char::from(
-                *TABLE.get((value & 63) as usize).unwrap_or(&b'A'),
-            ));
-        }
-    }
-    output
 }
 
 #[cfg(test)]
@@ -410,11 +373,7 @@ mod tests {
 
     #[test]
     fn reject_redirect_downgrade() {
-        let redirect = HttpResponse {
-            status: 302,
-            headers: vec![("Location".into(), "http://attacker.example".into())],
-            body: Vec::new(),
-        };
+        let redirect = response(302, [("location", "http://attacker.example")], Vec::new());
         let mut client = ProvisioningHttpClient::new(
             BaseUrl::parse("https://rkp.example").unwrap(),
             (
@@ -493,21 +452,8 @@ mod tests {
     #[test]
     fn response_policy_rejects_location_status_and_oversize() {
         for response in [
-            HttpResponse {
-                status: 200,
-                headers: vec![("location".into(), "https://other.example".into())],
-                body: Vec::new(),
-            },
-            HttpResponse {
-                status: 500,
-                headers: Vec::new(),
-                body: Vec::new(),
-            },
-            HttpResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: vec![0; crate::MAX_PROVISIONING_BYTES + 1],
-            },
+            response(200, [("location", "https://other.example")], Vec::new()),
+            response(500, std::iter::empty::<(&str, &str)>(), Vec::new()),
         ] {
             let mut client = ProvisioningHttpClient::new(
                 BaseUrl::parse("https://rkp.example").unwrap(),
@@ -525,6 +471,28 @@ mod tests {
             );
             assert!(client.store().loaded().is_none());
         }
+        assert_eq!(
+            HttpResponse::new(
+                200,
+                ResponseHeaders::collect_bounded(std::iter::empty::<(&str, &str)>()).unwrap(),
+                vec![0; crate::MAX_PROVISIONING_BYTES + 1],
+            ),
+            Err(ClientError::ResponseTooLarge)
+        );
+    }
+
+    fn response<I, N, V>(status: u16, headers: I, body: Vec<u8>) -> HttpResponse
+    where
+        I: IntoIterator<Item = (N, V)>,
+        N: AsRef<str>,
+        V: AsRef<str>,
+    {
+        HttpResponse::new(
+            status,
+            ResponseHeaders::collect_bounded(headers).unwrap(),
+            body,
+        )
+        .unwrap()
     }
 
     fn fetch_response(challenge: &[u8], url: Option<&str>) -> Vec<u8> {

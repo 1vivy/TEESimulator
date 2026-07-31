@@ -56,6 +56,7 @@ fn lease(order: u8) -> RkpLease {
         },
         validator_public_key: validator_public_key(42),
         profile_epoch: 17,
+        phase_hashes: [[11; 32], [12; 32], [13; 32], [14; 32], [15; 32]],
     })
     .unwrap()
 }
@@ -162,6 +163,53 @@ fn storage_failure_prevents_activation_exposure() {
         Err(RkpLeaseError::State(StateError::Storage))
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn active_batch_reopens_from_the_durable_record() {
+    // Given
+    let batch = RkpLeaseBatch::new(vec![lease(0)]).unwrap();
+    let (root, registry) = registry();
+    let token = verify_validated_chain_receipts(&batch, &[receipt(0, 42)], &registry).unwrap();
+    let store = MemoryStore {
+        fail: false,
+        value: RefCell::new(Vec::new()),
+    };
+    batch.activate(token, &store).unwrap();
+
+    // When
+    let reopened = RkpLeaseBatch::load_active(&store).unwrap();
+
+    // Then
+    assert_eq!(reopened.leases().len(), 1);
+    let first = reopened.leases().first().expect("one active lease");
+    assert_eq!(first.metadata(), lease(0).metadata());
+    assert_eq!(first.state(), LeaseState::Active);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn missing_or_corrupt_active_batch_fails_closed() {
+    // Given
+    let missing = MemoryStore {
+        fail: false,
+        value: RefCell::new(Vec::new()),
+    };
+    let corrupt = MemoryStore {
+        fail: false,
+        value: RefCell::new(b"not-a-lease".to_vec()),
+    };
+
+    // When
+    let missing_result = RkpLeaseBatch::load_active(&missing);
+    let corrupt_result = RkpLeaseBatch::load_active(&corrupt);
+
+    // Then
+    assert!(missing_result.is_err());
+    assert_eq!(
+        corrupt_result,
+        Err(RkpLeaseError::State(StateError::Corrupt))
+    );
 }
 
 fn public_boundary_is_safe(source: &str) -> bool {

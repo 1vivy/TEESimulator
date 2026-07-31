@@ -34,8 +34,11 @@ impl DonorRkaService {
             return Err(DonorError::Broker);
         };
         if self.operation_retained(operation) {
-            self.retain_operation(operation);
-            let _ = broker.abort(operation);
+            if let Some(owner) = self.operation_owner(operation) {
+                self.invalidate(owner, broker);
+            } else {
+                let _ = broker.abort(operation);
+            }
             self.invalidate(request.alias, broker);
             return Err(DonorError::HandleCollision);
         }
@@ -44,6 +47,11 @@ impl DonorRkaService {
             self.invalidate(owner, broker);
             self.invalidate(request.alias, broker);
             return Err(DonorError::HandleCollision);
+        }
+        if let Err(error) = self.persist_operation(request.context, operation) {
+            let _ = broker.abort(operation);
+            self.invalidate(request.alias, broker);
+            return Err(error);
         }
         let record = self.active_mut(request.alias)?;
         record.operations = record.operations.saturating_add(1);
@@ -91,7 +99,6 @@ impl DonorRkaService {
             self.invalidate(request.0.alias, broker);
             return Err(DonorError::Broker);
         };
-        self.retain_operation(request.0.operation);
         let record = self.active_mut(request.0.alias)?;
         record.live = None;
         record.successful_finishes = record.successful_finishes.saturating_add(1);
@@ -111,7 +118,6 @@ impl DonorRkaService {
             self.invalidate(request.alias, broker);
             return Err(DonorError::Broker);
         }
-        self.retain_operation(request.operation);
         self.active_mut(request.alias)?.live = None;
         Ok(())
     }

@@ -12,8 +12,9 @@ use std::{
 };
 
 use rka_sidecar::{
-    LifecycleRole, committed_profile_epoch, dispatch_rotation, donor::DonorRuntime, provision_once,
-    run,
+    LifecycleRole, committed_profile_epoch, dispatch_rotation,
+    donor::{DonorIngress, DonorRuntime},
+    provision_once, run,
 };
 
 const BROKER_SOCKET: &str = "/data/adb/teesimulator-rka/run/sockets/broker.sock";
@@ -37,9 +38,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         || run(OsStr::new("health"), &mut io::stdout().lock()),
         |selected| run(selected, &mut io::stdout().lock()),
     )?;
-    let _donor_runtime = role
-        .filter(|selected| *selected == LifecycleRole::Donor)
-        .map(|_| DonorRuntime::new(PathBuf::from(BROKER_SOCKET).as_path()));
+    if role == Some(LifecycleRole::Donor) {
+        return run_donor();
+    }
     if role.is_some() {
         loop {
             dispatch_pending_rotation()?;
@@ -47,6 +48,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+fn run_donor() -> Result<(), Box<dyn Error>> {
+    let state_root = env::var_os("RKA_STATE_ROOT")
+        .map(PathBuf::from)
+        .ok_or("RKA_STATE_ROOT is required")?;
+    let broker_socket =
+        env::var_os("RKA_DONOR_SOCKET").map_or_else(|| PathBuf::from(BROKER_SOCKET), PathBuf::from);
+    let mut runtime = DonorRuntime::open(&state_root, &broker_socket);
+    let ingress = DonorIngress::bind(&state_root)?;
+    loop {
+        let _ = ingress.serve_once(&mut runtime);
+        dispatch_pending_rotation()?;
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn dispatch_pending_rotation() -> Result<(), Box<dyn Error>> {

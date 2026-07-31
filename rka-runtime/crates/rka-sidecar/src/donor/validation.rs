@@ -32,11 +32,6 @@ pub(super) fn validate_generate<'a>(
     authorize(policy, request.context)?;
     let candidate = decode_candidate_identity(request.candidate_identity)
         .map_err(|_| DonorError::IdentityDrift)?;
-    let authoritative = decode_candidate_identity(request.authoritative_identity)
-        .map_err(|_| DonorError::IdentityDrift)?;
-    if candidate != authoritative {
-        return Err(DonorError::IdentityDrift);
-    }
     if candidate.identity_hash != policy.candidate_identity_hash
         || candidate.identity_hash != request.context.candidate_identity_hash
     {
@@ -51,7 +46,7 @@ pub(super) fn validate_generate<'a>(
         envelope.validated_chain_set_hash,
     ];
     let expected_phases = request.phase_hashes.map(Some);
-    let aaid_hash = hash_bytes(HashDomain::Aaid, authoritative.aaid_der);
+    let aaid_hash = hash_bytes(HashDomain::Aaid, candidate.aaid_der);
     if envelope.candidate_identity_hash != candidate.identity_hash
         || envelope.aaid_hash != aaid_hash
         || envelope.profile_epoch != request.context.profile_epoch
@@ -66,7 +61,7 @@ pub(super) fn validate_generate<'a>(
     if envelope.donor_irpc_identity_hash != policy.donor_irpc_identity_hash {
         return Err(DonorError::IrpcIdentityMismatch);
     }
-    if request.prior_transcript_hash != request.expected_prior_transcript_hash {
+    if request.prior_transcript_hash != policy.prior_transcript_hash {
         return Err(DonorError::TranscriptMismatch);
     }
     let expires = envelope
@@ -79,7 +74,7 @@ pub(super) fn validate_generate<'a>(
     validate_upstream_rkp_bytes(request.upstream_body, request.envelope)
         .map_err(|_| DonorError::EnvelopeUpstream)?;
     Ok(ValidatedGenerate {
-        aaid: authoritative.aaid_der,
+        aaid: candidate.aaid_der,
         envelope_hash: hash_bytes(HashDomain::Envelope, request.envelope),
         started_ms: envelope.donor_monotonic_start_ms,
     })

@@ -8,6 +8,7 @@ pub struct PairedPolicy {
     pub(crate) profile_epoch: u64,
     pub(crate) candidate_identity_hash: [u8; 32],
     pub(crate) donor_irpc_identity_hash: [u8; 32],
+    pub(crate) prior_transcript_hash: [u8; 32],
 }
 
 impl PairedPolicy {
@@ -18,6 +19,7 @@ impl PairedPolicy {
         profile_epoch: u64,
         candidate_identity_hash: [u8; 32],
         donor_irpc_identity_hash: [u8; 32],
+        prior_transcript_hash: [u8; 32],
     ) -> Self {
         Self {
             peer_spki_hash,
@@ -25,6 +27,7 @@ impl PairedPolicy {
             profile_epoch,
             candidate_identity_hash,
             donor_irpc_identity_hash,
+            prior_transcript_hash,
         }
     }
 }
@@ -77,7 +80,6 @@ pub struct GenerateCoordinates {
 #[derive(Clone, Copy, Debug)]
 pub struct GenerateEvidence<'a> {
     pub candidate_identity: &'a [u8],
-    pub authoritative_identity: &'a [u8],
     pub envelope: &'a [u8],
     pub upstream_body: &'a [u8],
     pub ordered_rkp_public_hashes: &'a [[u8; 32]],
@@ -91,7 +93,6 @@ pub struct GenerateKeyMaterial<'a> {
     pub rkp_chain: &'a [&'a [u8]],
     pub challenge: &'a [u8],
     pub prior_transcript_hash: [u8; 32],
-    pub expected_prior_transcript_hash: [u8; 32],
 }
 
 /// Complete generate admission input.
@@ -101,7 +102,6 @@ pub struct GenerateRequest<'a> {
     pub(crate) context: AccessContext,
     pub(crate) alias: [u8; 16],
     pub(crate) candidate_identity: &'a [u8],
-    pub(crate) authoritative_identity: &'a [u8],
     pub(crate) envelope: &'a [u8],
     pub(crate) upstream_body: &'a [u8],
     pub(crate) rkp_handle: RkpKeyHandle,
@@ -110,7 +110,6 @@ pub struct GenerateRequest<'a> {
     pub(crate) ordered_rkp_public_hashes: &'a [[u8; 32]],
     pub(crate) phase_hashes: [[u8; 32]; 5],
     pub(crate) rkp_chain: &'a [&'a [u8]],
-    pub(crate) expected_prior_transcript_hash: [u8; 32],
 }
 
 impl<'a> GenerateRequest<'a> {
@@ -124,7 +123,6 @@ impl<'a> GenerateRequest<'a> {
             context: coordinates.context,
             alias: coordinates.alias,
             candidate_identity: evidence.candidate_identity,
-            authoritative_identity: evidence.authoritative_identity,
             envelope: evidence.envelope,
             upstream_body: evidence.upstream_body,
             rkp_handle: key.rkp_handle,
@@ -133,7 +131,6 @@ impl<'a> GenerateRequest<'a> {
             ordered_rkp_public_hashes: evidence.ordered_rkp_public_hashes,
             phase_hashes: evidence.phase_hashes,
             rkp_chain: key.rkp_chain,
-            expected_prior_transcript_hash: key.expected_prior_transcript_hash,
         }
     }
 }
@@ -246,4 +243,8 @@ pub enum DonorError {
     Capacity,
     #[error("typed broker operation failed")]
     Broker,
+    #[error("durable donor state failed")]
+    Storage,
+    #[error("canonical donor frame was rejected")]
+    InvalidFrame,
 }

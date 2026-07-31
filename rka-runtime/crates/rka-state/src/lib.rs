@@ -30,8 +30,8 @@ pub use quarantine::{
 pub use replay::{PersistedTombstone, ReplayManager, TombstoneTime};
 pub use rkp_lease::{
     BatchId, CertifiedLeaseMetadata, ChainHash, IrpcIdentityHash, LeaseId, LeaseState,
-    PublicChainMetadata, PublicKeyHash, RemoteKeyHandle, RkpLease, RkpLeaseBatch, RkpLeaseError,
-    SpkiHash, ValidatorPublicKey, hash_public_key,
+    PairedActivationRecord, PublicChainMetadata, PublicKeyHash, RemoteKeyHandle, RkpLease,
+    RkpLeaseBatch, RkpLeaseError, SpkiHash, ValidatorPublicKey, hash_public_key,
 };
 pub use rkp_receipt::{
     ValidatedCertificationToken, ValidatedChainClaims, ValidatedChainReceipt,

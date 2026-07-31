@@ -30,6 +30,7 @@ fn lease(order: u8, lease_id: u8) -> RkpLease {
         },
         validator_public_key: validator_public_key(42),
         profile_epoch: 17,
+        phase_hashes: [[11; 32], [12; 32], [13; 32], [14; 32], [15; 32]],
     })
     .unwrap()
 }

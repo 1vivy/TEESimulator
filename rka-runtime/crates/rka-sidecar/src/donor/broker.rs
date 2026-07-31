@@ -25,11 +25,12 @@ pub struct GeneratedKey {
     pub certificate_chain: Vec<Vec<u8>>,
     pub leaf_spki_hash: [u8; 32],
     pub characteristics_hash: [u8; 32],
+    pub transcript_signature: Vec<u8>,
 }
 
 impl GeneratedKey {
     #[must_use]
-    pub const fn new(
+    pub fn new(
         handle: RemoteKeyHandle,
         certificate_chain: Vec<Vec<u8>>,
         leaf_spki_hash: [u8; 32],
@@ -40,7 +41,13 @@ impl GeneratedKey {
             certificate_chain,
             leaf_spki_hash,
             characteristics_hash,
+            transcript_signature: vec![1],
         }
+    }
+
+    pub(crate) fn with_transcript_signature(mut self, signature: Vec<u8>) -> Self {
+        self.transcript_signature = signature;
+        self
     }
 }
 

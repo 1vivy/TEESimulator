@@ -176,7 +176,6 @@ impl Fixture {
             },
             GenerateEvidence {
                 candidate_identity: &self.identity,
-                authoritative_identity: &self.identity,
                 envelope,
                 upstream_body: upstream,
                 ordered_rkp_public_hashes: [RKP_PUBLIC].as_slice(),
@@ -187,7 +186,6 @@ impl Fixture {
                 rkp_chain: &RKP_CHAIN,
                 challenge: b"0123456789abcdef",
                 prior_transcript_hash: transcript,
-                expected_prior_transcript_hash: [0xc1; 32],
             },
         )
     }

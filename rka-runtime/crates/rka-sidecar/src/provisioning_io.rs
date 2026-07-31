@@ -3,6 +3,7 @@ use std::{
     fmt::Write as _,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
@@ -14,6 +15,7 @@ use rka_rkp::{
 use rka_state::{StateError, StateStore};
 
 const MAX_JOURNAL_BYTES: u64 = 131_072;
+const MAX_CHAIN_BYTES: usize = 524_288;
 
 #[derive(Debug)]
 #[allow(
@@ -179,6 +181,108 @@ impl FileStateStore {
         );
         Ok(self.0.join(name))
     }
+}
+
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "shared by sibling private modules through the crate root"
+)]
+pub(super) fn persist_lease_chains(
+    root: &Path,
+    handles: &[[u8; 32]],
+    chains: &[Vec<u8>],
+) -> Result<(), StateError> {
+    if handles.len() != chains.len() {
+        return Err(StateError::Corrupt);
+    }
+    let directory = root.join("lease-chains");
+    fs::create_dir_all(&directory).map_err(|_| StateError::Storage)?;
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+        .map_err(|_| StateError::Storage)?;
+    for (handle, chain) in handles.iter().zip(chains) {
+        decode_der_chain(chain)?;
+        let path = directory.join(hex_name(handle));
+        atomic_replace(&path, chain).map_err(|_| StateError::Storage)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|_| StateError::Storage)?;
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "shared by sibling private modules through the crate root"
+)]
+pub(super) fn load_lease_chain(root: &Path, handle: &[u8; 32]) -> Result<Vec<Vec<u8>>, StateError> {
+    let path = root.join("lease-chains").join(hex_name(handle));
+    let metadata = fs::symlink_metadata(&path).map_err(|_| StateError::Missing)?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_CHAIN_BYTES as u64 {
+        return Err(StateError::Corrupt);
+    }
+    let encoded = fs::read(path).map_err(|_| StateError::Storage)?;
+    decode_der_chain(&encoded)
+}
+
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "shared by sibling private modules through the crate root"
+)]
+pub(super) fn decode_der_chain(encoded: &[u8]) -> Result<Vec<Vec<u8>>, StateError> {
+    if encoded.is_empty() || encoded.len() > MAX_CHAIN_BYTES {
+        return Err(StateError::Corrupt);
+    }
+    let mut offset = 0_usize;
+    let mut certificates = Vec::new();
+    while offset < encoded.len() {
+        if encoded.get(offset) != Some(&0x30) {
+            return Err(StateError::Corrupt);
+        }
+        let first = *encoded
+            .get(offset.saturating_add(1))
+            .ok_or(StateError::Corrupt)?;
+        let (header, body) = if first & 0x80 == 0 {
+            (2_usize, usize::from(first))
+        } else {
+            let count = usize::from(first & 0x7f);
+            if count == 0 || count > 4 {
+                return Err(StateError::Corrupt);
+            }
+            let length_bytes = encoded
+                .get(offset.saturating_add(2)..offset.saturating_add(2 + count))
+                .ok_or(StateError::Corrupt)?;
+            let body = length_bytes.iter().try_fold(0_usize, |value, byte| {
+                value
+                    .checked_mul(256)
+                    .and_then(|next| next.checked_add(usize::from(*byte)))
+                    .ok_or(StateError::Corrupt)
+            })?;
+            (2_usize.saturating_add(count), body)
+        };
+        let end = offset
+            .checked_add(header)
+            .and_then(|value| value.checked_add(body))
+            .ok_or(StateError::Corrupt)?;
+        let certificate = encoded.get(offset..end).ok_or(StateError::Corrupt)?;
+        if certificate.len() > 65_536 {
+            return Err(StateError::Corrupt);
+        }
+        certificates.push(certificate.to_vec());
+        offset = end;
+    }
+    if !(2..=20).contains(&certificates.len()) {
+        return Err(StateError::Corrupt);
+    }
+    Ok(certificates)
+}
+
+fn hex_name(bytes: &[u8]) -> String {
+    bytes.iter().fold(
+        String::with_capacity(bytes.len().saturating_mul(2)),
+        |mut encoded, byte| {
+            let _ = write!(encoded, "{byte:02x}");
+            encoded
+        },
+    )
 }
 
 #[allow(

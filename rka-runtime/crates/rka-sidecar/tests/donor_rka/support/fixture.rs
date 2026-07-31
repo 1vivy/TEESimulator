@@ -44,7 +44,14 @@ impl Fixture {
     }
 
     pub const fn policy(&self) -> PairedPolicy {
-        PairedPolicy::new(PEER, PROFILE, PROFILE_EPOCH, self.identity_hash, IRPC)
+        PairedPolicy::new(
+            PEER,
+            PROFILE,
+            PROFILE_EPOCH,
+            self.identity_hash,
+            IRPC,
+            [0xc1; 32],
+        )
     }
 
     pub fn begin(&self, request: u8) -> BeginRequest {

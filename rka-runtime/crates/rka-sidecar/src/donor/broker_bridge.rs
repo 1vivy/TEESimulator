@@ -171,14 +171,15 @@ fn decode_public_key(response: &[u8]) -> Result<GeneratedKey, BrokerFailure> {
     for _ in 0..count {
         chain.push(cursor.bytes(1, 65_536)?);
     }
-    let _transcript_signature = cursor.bytes(1, 65_536)?;
+    let transcript_signature = cursor.bytes(1, 65_536)?;
     cursor.finish()?;
     Ok(GeneratedKey::new(
         handle,
         chain,
         hash_bytes(HashDomain::RkpPublic, &spki),
         exact_characteristics_hash(),
-    ))
+    )
+    .with_transcript_signature(transcript_signature))
 }
 
 fn decode_update(response: &[u8]) -> Result<(usize, Vec<u8>), BrokerFailure> {

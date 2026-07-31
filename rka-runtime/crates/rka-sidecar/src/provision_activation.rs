@@ -46,6 +46,7 @@ pub(crate) fn prepare(
     request_id: u64,
     broker_batch_id: [u8; 16],
     irpc_identity_hash: [u8; 32],
+    phase_hashes: [[u8; 32]; 5],
     epoch: u64,
     validator_path: &Path,
     quarantine: &mut dyn FnMut([u8; 32]),
@@ -89,6 +90,7 @@ pub(crate) fn prepare(
             },
             validator_public_key: validator,
             profile_epoch: epoch,
+            phase_hashes,
         };
         leases.push(RkpLease::certified(metadata).map_err(|_| ProvisioningRunError::Activation)?);
         claims.push(ValidatedChainClaims {

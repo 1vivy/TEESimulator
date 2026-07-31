@@ -56,9 +56,14 @@ fn production_donor_runtime_is_closed_until_authenticated_pairing() {
 }
 
 #[test]
-fn donor_role_entry_constructs_the_production_runtime() {
-    let entry = include_str!("../src/main.rs");
+fn donor_runtime_open_requires_both_durable_trust_records() -> Result<(), Box<dyn std::error::Error>>
+{
+    let root = std::env::temp_dir().join(format!("rka-donor-open-{}", std::process::id()));
+    std::fs::create_dir_all(&root)?;
 
-    assert!(entry.contains("DonorRuntime::new"));
-    assert!(entry.contains("LifecycleRole::Donor"));
+    let runtime = DonorRuntime::open(&root, std::path::Path::new("/unused/broker.sock"));
+
+    assert!(!runtime.is_active());
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }

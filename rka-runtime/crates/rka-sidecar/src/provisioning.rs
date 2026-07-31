@@ -374,11 +374,21 @@ fn complete(
         &mut quarantine,
     )
     .map_err(|_| ProvisioningRunError::Validation)?;
+    let encoded_chains = rka_rkp::parse_signed_certificates(response, expected.len())
+        .map_err(|_| ProvisioningRunError::Validation)?;
+    let phase_hashes = [
+        prepared.hal_csr_hash(),
+        sha256(prepared.body()),
+        challenge_hash,
+        sha256(response),
+        chain_set_hash(&encoded_chains)?,
+    ];
     let prepared_activation = prepare(
         &validated,
         request_id,
         broker_batch_id,
         irpc_identity_hash,
+        phase_hashes,
         roots.epoch(),
         &config.validator_key,
         &mut quarantine,
@@ -420,6 +430,13 @@ fn complete(
     {
         return Err(ProvisioningRunError::Broker);
     }
+    let handles = validated
+        .chains()
+        .iter()
+        .map(|chain| chain.handle)
+        .collect::<Vec<_>>();
+    crate::provisioning_io::persist_lease_chains(&config.state_root, &handles, &encoded_chains)
+        .map_err(|_| ProvisioningRunError::Activation)?;
     prepared_activation.activate(&FileStateStore::new(&config.state_root))?;
     Ok(())
 }
@@ -428,6 +445,23 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     let mut value = [0; 32];
     value.copy_from_slice(digest(&SHA256, bytes).as_ref());
     value
+}
+
+fn chain_set_hash(chains: &[Vec<u8>]) -> Result<[u8; 32], ProvisioningRunError> {
+    let mut writer = rka_protocol::CborWriter::with_capacity(4096);
+    writer.array(chains.len());
+    for chain in chains {
+        let certificates = crate::provisioning_io::decode_der_chain(chain)
+            .map_err(|_| ProvisioningRunError::Validation)?;
+        writer.array(certificates.len());
+        for certificate in certificates {
+            writer.bytes(&certificate);
+        }
+    }
+    Ok(rka_protocol::hash_cbor(
+        rka_protocol::HashDomain::ChainSet,
+        &writer.finish(),
+    ))
 }
 
 fn unix_seconds() -> Result<u64, ProvisioningRunError> {

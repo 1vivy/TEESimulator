@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+};
 
 use super::{
     AccessContext, BrokerGenerate, DeleteRequest, DonorBroker, DonorError, DonorKeyState,
@@ -15,7 +18,7 @@ const MAX_CHUNK: usize = 65_536;
 pub(super) struct KeyRecord {
     pub(super) context: AccessContext,
     pub(super) remote: RemoteKeyHandle,
-    public: PublicKeyResult,
+    pub(super) public: PublicKeyResult,
     pub(super) state: DonorKeyState,
     pub(super) started_ms: u64,
     pub(super) successful_finishes: u8,
@@ -58,6 +61,7 @@ pub struct DonorRkaService {
     candidate_nonces: HashSet<[u8; 32]>,
     remote_keys: HashSet<RemoteKeyHandle>,
     pub(super) operation_tombstones: HashSet<RemoteOperationHandle>,
+    pub(super) replay_root: Option<PathBuf>,
 }
 
 impl DonorRkaService {
@@ -71,6 +75,16 @@ impl DonorRkaService {
             candidate_nonces: HashSet::new(),
             remote_keys: HashSet::new(),
             operation_tombstones: HashSet::new(),
+            replay_root: None,
+        }
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn new_durable(policy: PairedPolicy, state_root: &Path) -> Self {
+        Self {
+            replay_root: Some(state_root.to_path_buf()),
+            ..Self::new(policy)
         }
     }
 
@@ -255,19 +269,5 @@ impl DonorRkaService {
 
     pub(super) fn aliases(&self) -> Vec<[u8; 16]> {
         self.keys.keys().copied().collect()
-    }
-
-    pub(super) fn retain_operation(&mut self, operation: RemoteOperationHandle) -> bool {
-        self.operation_tombstones.insert(operation)
-    }
-
-    pub(super) fn operation_retained(&self, operation: RemoteOperationHandle) -> bool {
-        self.operation_tombstones.contains(&operation)
-    }
-
-    pub(super) fn operation_owner(&self, operation: RemoteOperationHandle) -> Option<[u8; 16]> {
-        self.keys
-            .iter()
-            .find_map(|(alias, record)| (record.live == Some(operation)).then_some(*alias))
     }
 }

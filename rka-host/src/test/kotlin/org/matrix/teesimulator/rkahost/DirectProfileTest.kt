@@ -62,12 +62,41 @@ class DirectProfileTest {
 
         val mutations =
             listOf(
-                evidence(current).copy(path = DirectPath.TAILSCALE),
-                evidence(current).copy(connect = DirectEndpoint("192.168.50.7", 8443)),
-                evidence(current).copy(listenInterface = "192.168.50.7"),
-                evidence(current).copy(epoch = 6),
-                evidence(current).copy(peerSpki = ByteArray(32) { 0x12 }),
-                evidence(current).copy(transport = DirectTransportKind.DIAGNOSTIC_USB),
+                proof(
+                    DirectPath.TAILSCALE,
+                    current.connect,
+                    current.listenInterface,
+                    current.epoch,
+                    current.peerSpki(),
+                ),
+                proof(
+                    current.path,
+                    DirectEndpoint("192.168.50.7", 8443),
+                    current.listenInterface,
+                    current.epoch,
+                    current.peerSpki(),
+                ),
+                proof(
+                    current.path,
+                    current.connect,
+                    "192.168.50.7",
+                    current.epoch,
+                    current.peerSpki(),
+                ),
+                proof(
+                    current.path,
+                    current.connect,
+                    current.listenInterface,
+                    6,
+                    current.peerSpki(),
+                ),
+                proof(
+                    current.path,
+                    current.connect,
+                    current.listenInterface,
+                    current.epoch,
+                    ByteArray(32) { 0x12 },
+                ),
             )
         mutations.forEach { mutation ->
             val result =
@@ -82,6 +111,24 @@ class DirectProfileTest {
         assertEquals(
             DirectReadinessStatus.DIRECT_NETWORK_BLOCKED,
             DirectReadinessAdapter.assess(current, DirectProbe.Unreachable).status,
+        )
+    }
+
+    @Test
+    fun trustedProofSeamsAreJvmSynthetic() {
+        assertTrue(
+            TrustedDirectProbeFactory::class
+                .java
+                .declaredMethods
+                .single { it.name == "fromPinnedTls" }
+                .isSynthetic
+        )
+        assertTrue(
+            DirectPinnedTlsProbeResult.Companion::class
+                .java
+                .declaredMethods
+                .single { it.name == "successful" }
+                .isSynthetic
         )
     }
 
@@ -132,15 +179,23 @@ class DirectProfileTest {
             Duration.ofSeconds(3),
         )
 
-    private fun evidence(profile: DirectProfile): DirectEvidenceInput =
-        DirectEvidenceInput(
+    private fun evidence(profile: DirectProfile): DirectPinnedTlsProbeResult =
+        proof(
             profile.path,
             profile.connect,
             profile.listenInterface,
             profile.epoch,
             profile.peerSpki(),
-            DirectTransportKind.DIRECT_PINNED_TLS,
         )
+
+    private fun proof(
+        path: DirectPath,
+        connect: DirectEndpoint,
+        listenInterface: String,
+        epoch: Long,
+        peerSpki: ByteArray,
+    ): DirectPinnedTlsProbeResult =
+        DirectPinnedTlsProbeResult.successful(path, connect, listenInterface, epoch, peerSpki)
 
     private fun assertFailure(block: () -> Unit) {
         try {

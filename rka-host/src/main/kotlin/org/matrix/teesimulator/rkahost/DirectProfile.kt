@@ -1,6 +1,8 @@
 package org.matrix.teesimulator.rkahost
 
 import java.time.Duration
+import kotlin.jvm.JvmName
+import kotlin.jvm.JvmSynthetic
 
 enum class DirectPath {
     LAN,
@@ -88,46 +90,59 @@ private constructor(
     }
 }
 
-internal enum class DirectTransportKind {
-    DIRECT_PINNED_TLS,
-    DIAGNOSTIC_USB,
-}
+private object ReciprocalPinnedTlsAdmission
 
-internal data class DirectEvidenceInput(
+internal class DirectPinnedTlsProbeResult
+private constructor(
     val path: DirectPath,
     val connect: DirectEndpoint,
     val listenInterface: String,
     val epoch: Long,
-    val peerSpki: ByteArray,
-    val transport: DirectTransportKind,
-)
+    peerSpki: ByteArray,
+) {
+    val peerSpki: ByteArray = peerSpki.copyOf()
 
-private object ReciprocalPinnedTlsAdmission
+    companion object {
+        @JvmSynthetic
+        @JvmName("successful")
+        internal fun successful(
+            path: DirectPath,
+            connect: DirectEndpoint,
+            listenInterface: String,
+            epoch: Long,
+            peerSpki: ByteArray,
+        ): DirectPinnedTlsProbeResult =
+            DirectPinnedTlsProbeResult(path, connect, listenInterface, epoch, peerSpki)
+    }
+}
 
-internal sealed interface DirectProbe {
+sealed interface DirectProbe {
     data object Unreachable : DirectProbe
 
     class PinnedTls
     private constructor(
-        val evidence: DirectEvidenceInput,
+        private val evidence: DirectPinnedTlsProbeResult,
         private val admission: ReciprocalPinnedTlsAdmission,
     ) : DirectProbe {
+        fun matches(profile: DirectProfile): Boolean =
+            evidence.path == profile.path &&
+                evidence.connect == profile.connect &&
+                evidence.listenInterface == profile.listenInterface &&
+                evidence.epoch == profile.epoch &&
+                evidence.peerSpki.contentEquals(profile.peerSpki()) &&
+                admission === ReciprocalPinnedTlsAdmission
+
         companion object {
-            fun fromTrusted(input: DirectEvidenceInput): DirectProbe =
-                if (input.transport == DirectTransportKind.DIRECT_PINNED_TLS) {
-                    PinnedTls(
-                        input.copy(peerSpki = input.peerSpki.copyOf()),
-                        ReciprocalPinnedTlsAdmission,
-                    )
-                } else {
-                    Unreachable
-                }
+            internal fun fromTrusted(input: DirectPinnedTlsProbeResult): DirectProbe =
+                PinnedTls(input, ReciprocalPinnedTlsAdmission)
         }
     }
 }
 
 internal object TrustedDirectProbeFactory {
-    fun fromPinnedTls(input: DirectEvidenceInput): DirectProbe =
+    @JvmSynthetic
+    @JvmName("fromPinnedTls")
+    internal fun fromPinnedTls(input: DirectPinnedTlsProbeResult): DirectProbe =
         DirectProbe.PinnedTls.fromTrusted(input)
 }
 
@@ -143,22 +158,13 @@ data class DirectReadiness(
     val diagnosticUsb: UsbDiagnosticEvidence?,
 )
 
-internal object DirectReadinessAdapter {
+object DirectReadinessAdapter {
     fun assess(
         profile: DirectProfile,
         probe: DirectProbe,
         usb: UsbDiagnosticEvidence? = null,
     ): DirectReadiness {
-        val evidence = (probe as? DirectProbe.PinnedTls)?.evidence
-        val ready =
-            evidence != null &&
-                evidence.path == profile.path &&
-                evidence.connect == profile.connect &&
-                evidence.listenInterface == profile.listenInterface &&
-                evidence.epoch == profile.epoch &&
-                evidence.peerSpki.contentEquals(profile.peerSpki()) &&
-                evidence.transport == DirectTransportKind.DIRECT_PINNED_TLS &&
-                probeHasReciprocalAdmission(probe)
+        val ready = (probe as? DirectProbe.PinnedTls)?.matches(profile) == true
         return DirectReadiness(
             if (ready) DirectReadinessStatus.DIRECT_READY
             else DirectReadinessStatus.DIRECT_NETWORK_BLOCKED,
@@ -166,9 +172,6 @@ internal object DirectReadinessAdapter {
         )
     }
 }
-
-private fun probeHasReciprocalAdmission(probe: DirectProbe): Boolean =
-    (probe as? DirectProbe.PinnedTls) != null
 
 class DirectProfileRotation(initial: DirectProfile) {
     var active: DirectProfile = initial

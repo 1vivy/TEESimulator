@@ -6,28 +6,6 @@ import android.os.IBinder
 import android.os.ServiceManager
 import java.util.concurrent.atomic.AtomicBoolean
 
-internal class IrpcGeneratedKey(publicKey: ByteArray, keyBlob: ByteArray) {
-    private val publicKey = publicKey.copyOf()
-    private val keyBlob = keyBlob.copyOf()
-
-    internal fun copyPublicKey(): ByteArray = publicKey.copyOf()
-
-    internal fun copyKeyBlob(): ByteArray = keyBlob.copyOf()
-
-    override fun toString(): String = "IrpcGeneratedKey(redacted)"
-}
-
-class IrpcKeyBatch internal constructor(keys: List<IrpcGeneratedKey>) {
-    private val keys = keys.map { IrpcGeneratedKey(it.copyPublicKey(), it.copyKeyBlob()) }
-
-    fun publicKeys(): List<ByteArray> = keys.map(IrpcGeneratedKey::copyPublicKey)
-
-    internal fun opaqueKeys(): List<IrpcGeneratedKey> =
-        keys.map { IrpcGeneratedKey(it.copyPublicKey(), it.copyKeyBlob()) }
-
-    override fun toString(): String = "IrpcKeyBatch(count=${keys.size})"
-}
-
 class HalCertificateRequest internal constructor(bytes: ByteArray) {
     private val bytes = bytes.copyOf()
 

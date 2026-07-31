@@ -6,12 +6,22 @@ mod failure_budget;
 mod replay;
 #[doc(hidden)]
 pub mod replay_codec;
+#[allow(
+    missing_docs,
+    reason = "typed lease names and fields are self-describing"
+)]
+mod rkp_lease;
 mod sensitive;
 
 pub use failure_budget::{
     FAILURE_THRESHOLD, FAILURE_WINDOW_SECONDS, FailureAdmission, FailureBudget, FailureBudgetError,
 };
 pub use replay::{PersistedTombstone, ReplayManager, TombstoneTime};
+pub use rkp_lease::{
+    BatchId, CertifiedLeaseMetadata, ChainHash, IrpcIdentityHash, LeaseId, LeaseState,
+    PublicChainMetadata, PublicKeyHash, RemoteKeyHandle, RkpLease, RkpLeaseBatch, RkpLeaseError,
+    SpkiHash, ValidatedCertificationToken, hash_public_key,
+};
 pub use sensitive::SensitiveStateStore;
 
 /// Maximum serialized state record size.

@@ -1,0 +1,32 @@
+package org.matrix.TEESimulator.rka.broker
+
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
+class IrpcKeyBatchTest {
+    @Test
+    fun preservesHardwareOrderAndRedactsBlobs() {
+        val batch =
+            IrpcKeyBatch(
+                listOf(
+                    IrpcGeneratedKey(byteArrayOf(1), byteArrayOf(91)),
+                    IrpcGeneratedKey(byteArrayOf(2), byteArrayOf(92)),
+                )
+            )
+
+        assertArrayEquals(byteArrayOf(1), batch.publicKeys()[0])
+        assertArrayEquals(byteArrayOf(2), batch.publicKeys()[1])
+        assertEquals("IrpcKeyBatch(count=2)", batch.toString())
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun rejectsDuplicatePublicKeys() {
+        IrpcKeyBatch(
+            listOf(
+                IrpcGeneratedKey(byteArrayOf(1), byteArrayOf(2)),
+                IrpcGeneratedKey(byteArrayOf(1), byteArrayOf(3)),
+            )
+        )
+    }
+}

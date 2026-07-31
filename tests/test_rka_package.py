@@ -56,8 +56,38 @@ class RkaPackageTest(unittest.TestCase):
             self.assertEqual(command, f"exec /data/adb/modules/tricky_store/rka-sepolicy-probe.sh {digest}")
             self.assertLessEqual(len(command), 256)
         deploy = (REPOSITORY_ROOT / "scripts" / "rka-deploy.sh").read_text(encoding="utf-8")
-        self.assertGreater(deploy.index('"$active/rka-supervisor.sh" start'), deploy.index("ksud sepolicy apply"))
-        self.assertGreater(deploy.index("timeout 5 nsenter -t 1 -m -- sh -eu -c"), deploy.index('"$active/rka-supervisor.sh" start'))
+        paired_start = deploy.index('RKA_REQUIRE_DIRECT_READY=true RKA_DIRECT_PROFILE_PATH="$state/profiles/direct.conf"')
+        self.assertGreater(paired_start, deploy.index("ksud sepolicy apply"))
+        self.assertGreater(deploy.index("timeout 5 nsenter -t 1 -m -- sh -eu -c"), paired_start)
+        helper = SEPOLICY_LIVE_PROBE.read_text(encoding="utf-8")
+        rule_by_digest = {hashlib.sha256(rule.encode()).hexdigest(): rule for rule in rules}
+        dispatch = {
+            line.split(") ", 1)[0].strip(): line.split(") ", 1)[1].split(" ", 1)[0]
+            for line in helper.splitlines()
+            if line.startswith("    ") and ") " in line and len(line.split(") ", 1)[0].strip()) == 64
+        }
+        self.assertEqual(set(dispatch), set(rule_by_digest))
+        self.assertEqual(len(dispatch), len(set(dispatch)))
+        for digest, rule in rule_by_digest.items():
+            expected = (
+                "tcp_loopback_probe" if "tcp_socket" in rule else
+                "udp_loopback_probe" if "udp_socket" in rule else
+                "unix_broker_probe" if "unix_stream_socket" in rule else
+                "scratch_transition_probe" if rule.startswith(("type ", "type_transition")) or "teesimulator_rka_socket" in rule else
+                "toybox"
+            )
+            self.assertEqual(dispatch[digest], expected, rule)
+        self.assert_live_probe_contract(helper)
+        for replacement in (
+            ("toybox nc -l -s 127.0.0.1", "toybox stat -c"),
+            ("toybox nc -l -u -s 127.0.0.1", "toybox stat -c"),
+            ("toybox nc -U -w 2", "toybox stat -c"),
+            ("toybox nc -l -U \"$scratch/sockets/broker.sock\"", "toybox stat -c"),
+            ("mv \"$scratch/sockets/create\"", "toybox stat -c"),
+            ("rmdir \"$scratch\"", ":"),
+        ):
+            with self.assertRaises(AssertionError):
+                self.assert_live_probe_contract(helper.replace(*replacement))
 
     def test_production_validator_rejects_every_tampered_archive_class(self) -> None:
         release = self.current_archives()["Release"]
@@ -242,6 +272,24 @@ class RkaPackageTest(unittest.TestCase):
 
     def parse_hash_manifest(self, payload: bytes) -> dict[str, str]:
         return {name: digest for digest, name in (line.split("  ", 1) for line in payload.decode().splitlines())}
+
+    def assert_live_probe_contract(self, helper: str) -> None:
+        for required in (
+            "toybox nc -l -s 127.0.0.1",
+            "toybox nc -w 2 127.0.0.1",
+            "toybox nc -l -u -s 127.0.0.1",
+            "toybox nc -u -w 2 127.0.0.1",
+            "toybox nc -U -w 2 \"$socket\"",
+            "mkdir -p \"$scratch/sockets\"",
+            "toybox nc -l -U \"$scratch/sockets/broker.sock\"",
+            "toybox nc -U -w 2 \"$scratch/sockets/broker.sock\"",
+            "mv \"$scratch/sockets/create\" \"$scratch/sockets/renamed\"",
+            "rm -f \"$scratch/sockets/renamed\"",
+            "rmdir \"$scratch\"",
+            "trap cleanup EXIT HUP INT TERM",
+            "cleanup",
+        ):
+            self.assertIn(required, helper)
 
 
 if __name__ == "__main__":

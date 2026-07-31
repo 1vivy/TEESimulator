@@ -357,17 +357,6 @@ deploy)
     [ "$active_inode" = "$(stat -c %d:%i "$pending/module.prop")" ]
     nsenter -t 1 -m -- cmp -s "$active/module.prop" "$pending/module.prop"
     nsenter -t 1 -m -- cmp -s "$active/webroot/index.html" "$pending/webroot/index.html"
-    : > "$txn/sepolicy-probes.stdout"
-    : > "$txn/sepolicy-probes.stderr"
-    probe_marker=$(date +%s.%N)
-    while IFS="|" read -r rule_hash probe; do
-        [ -n "$rule_hash" ] && [ -n "$probe" ] || exit 1
-        command=$(printf %s "$probe" | base64 -d) || exit 1
-        [ -n "$command" ] && [ "$(printf %s "$command" | wc -c)" -le 256 ] || exit 1
-        timeout 5 nsenter -t 1 -m -- sh -eu -c "$command" >> "$txn/sepolicy-probes.stdout" 2>> "$txn/sepolicy-probes.stderr"
-    done < "$txn/sepolicy.probes.validated"
-    logcat -b all -T "$probe_marker" -d 2>/dev/null | grep -Ei "avc:.*denied.*(teesimulator|rka|ksu)" > "$txn/sepolicy-probes.reject" || :
-    [ ! -s "$txn/sepolicy-probes.reject" ]
     tree_hash "$pending" > "$txn/staged.after"
     touch "$txn/installed"
     sync "$txn/installed"
@@ -390,6 +379,17 @@ pair)
     profile_sha=$(sha256sum "$profile_tmp" | awk "{print \$1}")
     mv "$profile_tmp" "$state/profiles/direct.conf"
     RKA_REQUIRE_DIRECT_READY=true RKA_DIRECT_PROFILE_PATH="$state/profiles/direct.conf" nsenter -t 1 -m -- "$active/rka-supervisor.sh" start
+    : > "$txn/sepolicy-probes.stdout"
+    : > "$txn/sepolicy-probes.stderr"
+    probe_marker=$(date +%s.%N)
+    while IFS="|" read -r rule_hash probe; do
+        [ -n "$rule_hash" ] && [ -n "$probe" ] || exit 1
+        command=$(printf %s "$probe" | base64 -d) || exit 1
+        [ -n "$command" ] && [ "$(printf %s "$command" | wc -c)" -le 256 ] || exit 1
+        timeout 5 nsenter -t 1 -m -- sh -eu -c "$command" >> "$txn/sepolicy-probes.stdout" 2>> "$txn/sepolicy-probes.stderr"
+    done < "$txn/sepolicy.probes.validated"
+    logcat -b all -T "$probe_marker" -d 2>/dev/null | grep -Ei "avc:.*denied.*(teesimulator|rka|ksu)" > "$txn/sepolicy-probes.reject" || :
+    [ ! -s "$txn/sepolicy-probes.reject" ]
     nsenter -t 1 -m -- "$active/rka-supervisor.sh" status > "$txn/new.graph"
     grep -q "broker=RUNNING" "$txn/new.graph"
     grep -q "sidecar=RUNNING" "$txn/new.graph"

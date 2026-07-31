@@ -67,15 +67,9 @@ fi
 printf 'case=oversized-member result=rejected\n'
 
 mkdir "$test_root/bouncycastle"
-python3 - "$test_root/bouncycastle/classes.dex" <<'PY'
-from base64 import b64decode
-from pathlib import Path
-
-context = b64decode(
-    "b3JkIGluY29ycmVjdCBvciBzdG9yZSB0YW1wZXJlZCB3aXRoADhwYXNzd29yZCBzdXBwbGllZCBmb3Iga2V5c3RvcmUgdGhhdCBkb2VzIG5vdCByZXF1aXJlIG9uZQAKcGFzc3dvcmQ6IAATcGF0Y2hBdXRob3JpemF0aW9ucwARcGF0Y2hlZENoYWluQ2FjaGUADXBhdGNoZWRDaGFpbnMABHBhdGgABXBhdXNlAAxwYmVBbGdvcml0aG0AB3BiZUhhc2gACXBiZUl2U2l6ZQAKcGJlS2V5U2l6ZQAHcGI="
-)
-Path(__import__("sys").argv[1]).write_bytes(b"dex\n039\0" + context)
-PY
+release_archive=$(find "$repo_root/out" -maxdepth 1 -type f -name '*-Release.zip' -print | LC_ALL=C sort | tail -n 1)
+[ -n "$release_archive" ]
+unzip -p "$release_archive" classes.dex >"$test_root/bouncycastle/classes.dex"
 (cd "$test_root/bouncycastle" && zip -q "$test_root/bouncycastle.zip" classes.dex)
 "$audit" secrets --base "$base" --archive "$test_root/bouncycastle.zip" >/dev/null
 printf 'case=pinned-bouncycastle-parameterutil-context result=accepted\n'
@@ -93,6 +87,14 @@ if "$audit" secrets --base "$base" --archive "$test_root/bouncycastle-drift.zip"
     exit 1
 fi
 printf 'case=bouncycastle-context-drift result=rejected\n'
+
+unzip -p "$release_archive" classes.dex >"$test_root/bouncycastle/classes.dex"
+printf '%s%s' 'pass' 'word: ' >>"$test_root/bouncycastle/classes.dex"
+(cd "$test_root/bouncycastle" && zip -q "$test_root/bouncycastle-extra-prompt.zip" classes.dex)
+if "$audit" secrets --base "$base" --archive "$test_root/bouncycastle-extra-prompt.zip" >/dev/null 2>&1; then
+    exit 1
+fi
+printf 'case=bouncycastle-extra-prompt result=rejected\n'
 
 printf '%s%s\n' 'project pass' 'word: fixture-only-noncredential' >"$test_root/bouncycastle/config.txt"
 (cd "$test_root/bouncycastle" && zip -q "$test_root/project-literal.zip" config.txt)

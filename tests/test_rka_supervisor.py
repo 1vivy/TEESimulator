@@ -53,7 +53,7 @@ class RkaSupervisorTest(unittest.TestCase):
         root.mkdir()
         child = root / "fake-child.sh"
         child.write_text(
-            "#!/bin/sh\nprintf '%s %s\\n' \"$0\" \"$*\" >> \"$RKA_CHILD_LOG\"\n[ \"${RKA_CHILD_MODE:-hold}\" = crash ] && exit 7\ntrap 'printf term\\n >> \"$RKA_CHILD_LOG\"; exit 0' TERM INT\nwhile :; do sleep 1; done\n",
+            "#!/bin/sh\nprintf '%s %s\\n' \"$0\" \"$*\" >> \"$RKA_CHILD_LOG\"\n[ \"${RKA_CHILD_MODE:-hold}\" = crash ] && exit 7\nif [ \"${RKA_CHILD_MODE:-hold}\" = crash-once ] && [ ! -e \"$RKA_CRASH_ONCE_FILE\" ]; then : > \"$RKA_CRASH_ONCE_FILE\"; sleep 1; exit 7; fi\ntrap 'printf term\\n >> \"$RKA_CHILD_LOG\"; exit 0' TERM INT\nwhile :; do sleep 1; done\n",
             encoding="utf-8",
         )
         child.chmod(0o755)
@@ -191,6 +191,43 @@ class RkaSupervisorTest(unittest.TestCase):
         finally:
             self.clean(root, state)
             temporary.cleanup()
+
+    def test_marker_matrix_quarantines_ambiguous_and_restarts_normal(self) -> None:
+        quarantined = ("POST_AMBIGUOUS", "RKP_KEY_GENERATING", "APP_KEY_GENERATING", "malformed", "unreadable")
+        normal = (None, "IDLE", "COMPLETED")
+        for marker_value in quarantined + normal:
+            temporary, root, state = self.fixture("LOCAL")
+            try:
+                if marker_value is not None:
+                    marker = state / "journal" / "mutation.state"
+                    marker.parent.mkdir(parents=True)
+                    marker.write_text(f"{marker_value}\n", encoding="utf-8")
+                    if marker_value == "unreadable":
+                        os.chmod(marker, 0o000)
+                crash_file = root / "crashed-once"
+                self.assertEqual(
+                    self.command(
+                        root,
+                        state,
+                        "start",
+                        environment={"RKA_CHILD_MODE": "crash-once", "RKA_CRASH_ONCE_FILE": str(crash_file)},
+                    ).returncode,
+                    0,
+                )
+                deadline = monotonic() + 3
+                while "state=RUNNING" in self.command(root, state, "status").stdout and monotonic() < deadline:
+                    sleep(0.02)
+                status = self.command(root, state, "status").stdout
+                launches = (root / "children.log").read_text(encoding="utf-8").count("legacy")
+                if marker_value in quarantined:
+                    self.assertIn("state=QUARANTINED_AMBIGUOUS_MUTATION", status)
+                    self.assertEqual(launches, 1)
+                else:
+                    self.assertIn("legacy=RUNNING", status)
+                    self.assertEqual(launches, 2)
+            finally:
+                self.clean(root, state)
+                temporary.cleanup()
 
     def test_forbidden_process_control_tokens_are_absent(self) -> None:
         source = SUPERVISOR.read_text(encoding="utf-8")

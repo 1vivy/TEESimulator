@@ -86,6 +86,7 @@ dependencies {
     compileOnly(project(":stub"))
     compileOnly(libs.annotation)
     implementation(libs.bcpkix)
+    implementation(libs.bcpg)
     testImplementation(project(":stub"))
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
@@ -286,6 +287,8 @@ androidComponents {
                     include(
                         "daemon",
                         "module.prop",
+                        "rka-agent-pgp-public.gpg",
+                        "rka-agent-pgp-verify",
                         "rka-control.sh",
                         "rka-paths.sh",
                         "rka-profile.schema",
@@ -329,6 +332,7 @@ androidComponents {
                     val executableEntries =
                         setOf(
                             "daemon",
+                            "rka-agent-pgp-verify",
                             "rka-control.sh",
                             "rka-paths.sh",
                             "rka-sidecar",
@@ -378,6 +382,8 @@ androidComponents {
                             "LICENSE",
                             "module/daemon",
                             "module/module.prop",
+                            "module/rka-agent-pgp-public.gpg",
+                            "module/rka-agent-pgp-verify",
                             "module/rka-control.sh",
                             "module/rka-paths.sh",
                             "module/rka-profile.schema",
@@ -419,6 +425,7 @@ androidComponents {
                 from(tempModuleDir) {
                     include(
                         "daemon",
+                        "rka-agent-pgp-verify",
                         "rka-control.sh",
                         "rka-paths.sh",
                         "rka-sidecar",
@@ -431,6 +438,7 @@ androidComponents {
                 from(tempModuleDir) {
                     exclude(
                         "daemon",
+                        "rka-agent-pgp-verify",
                         "rka-control.sh",
                         "rka-paths.sh",
                         "rka-sidecar",
@@ -539,6 +547,8 @@ val verifyRkaModuleArchive by
             val commonEntries =
                 setOf(
                     "daemon",
+                    "rka-agent-pgp-public.gpg",
+                    "rka-agent-pgp-verify",
                     "rka-sidecar",
                     "rka-control.sh",
                     "rka-paths.sh",
@@ -564,6 +574,7 @@ val verifyRkaModuleArchive by
             val executableEntries =
                 setOf(
                     "daemon",
+                    "rka-agent-pgp-verify",
                     "rka-control.sh",
                     "rka-paths.sh",
                     "rka-sidecar",

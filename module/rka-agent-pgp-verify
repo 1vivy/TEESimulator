@@ -1,0 +1,57 @@
+#!/system/bin/sh
+
+set -f
+
+[ "$#" -eq 4 ] || exit 2
+
+module_directory=${0%/*}
+anchor=$module_directory/rka-agent-pgp-public.gpg
+manifest=$module_directory/META-INF/rka-artifacts.sha256
+classes=$module_directory/classes.dex
+apk=$module_directory/service.apk
+
+trusted_regular_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] &&
+        [ "$(stat -c '%u:%a' "$1")" = "$(id -u):$2" ]
+}
+
+trusted_regular_file "$anchor" 644 || exit 1
+trusted_regular_file "$manifest" 644 || exit 1
+[ "$(wc -c < "$anchor")" -eq 53 ] || exit 1
+[ "$(sha256sum "$anchor" | awk '{print $1}')" = \
+    db3d0beed0e376dc631b9c6c57ac1d610955e08b1734828ca1dd5d24ceeef4b1 ] || exit 1
+
+classpath=
+if trusted_regular_file "$classes" 644 && [ ! -e "$apk" ] && [ ! -L "$apk" ]; then
+    classpath=$classes
+elif trusted_regular_file "$apk" 644 && [ ! -e "$classes" ] && [ ! -L "$classes" ]; then
+    classpath=$apk
+else
+    exit 1
+fi
+
+artifact=${classpath##*/}
+expected=$(awk -v name="$artifact" '$2 == name {print $1}' "$manifest") || exit 1
+[ "$(printf '%s\n' "$expected" | wc -l)" -eq 1 ] || exit 1
+case $expected in
+    ????????????????????????????????????????????????????????????????) ;;
+    *) exit 1 ;;
+esac
+case $expected in *[!0123456789abcdef]*) exit 1 ;; esac
+[ "$(sha256sum "$classpath" | awk '{print $1}')" = "$expected" ] || exit 1
+[ "$(wc -c < "$classpath")" -le 67108864 ] || exit 1
+
+case $3 in
+    ????????????????????????????????????????????????????????????????) ;;
+    *) exit 1 ;;
+esac
+case $4 in
+    ????????????????????????????????????????????????????????????????) ;;
+    *) exit 1 ;;
+esac
+case $3$4 in *[!0123456789abcdef]*) exit 1 ;; esac
+[ "$3" != "$4" ] || exit 1
+
+exec /system/bin/app_process -Djava.class.path="$classpath" "$module_directory" \
+    --nice-name=RkaAgentPgpVerifier \
+    org.matrix.TEESimulator.rka.trust.AgentPgpVerifier "$anchor" "$1" "$2" "$3" "$4"

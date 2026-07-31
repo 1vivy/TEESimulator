@@ -758,9 +758,17 @@ EOF
     if [ "$webui_overlap" = NO_OVERLAP ]; then
         webui_signed_bundle=$root/rka-root-bundle.signed
         webui_signed_signature=$root/rka-root-bundle.signed.sig
-        webui_verifier=$root/rka-agent-pgp-verify.sh
-        [ -x "$webui_verifier" ] && [ -f "$webui_signed_bundle" ] &&
-            [ -f "$webui_signed_signature" ] || return 1
+        webui_verifier=$script_directory/rka-agent-pgp-verify
+        webui_agent_anchor=$script_directory/rka-agent-pgp-public.gpg
+        [ -x "$webui_verifier" ] && [ ! -L "$webui_verifier" ] &&
+            [ "$(stat -c '%u:%a' "$webui_verifier")" = "$(id -u):755" ] ||
+            return 1
+        [ -f "$webui_agent_anchor" ] && [ ! -L "$webui_agent_anchor" ] &&
+            [ "$(stat -c '%u:%a' "$webui_agent_anchor")" = "$(id -u):644" ] ||
+            return 1
+        rka_private_file_is_valid "$webui_signed_bundle" &&
+            rka_private_file_is_valid "$webui_signed_signature" || return 1
+        [ "$(wc -c < "$webui_signed_signature")" -le 8192 ] || return 1
         "$webui_verifier" "$webui_signed_bundle" "$webui_signed_signature" \
             "$webui_old_hash" "$webui_new_hash" || return 1
         webui_root_bundle_fields "$webui_signed_bundle" || return 1

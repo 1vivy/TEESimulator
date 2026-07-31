@@ -10,6 +10,7 @@ robolectric = "4.16.1"
 [libraries]
 annotation = { module = "androidx.annotation:annotation", version.ref = "annotation" }
 bcpkix = { module = "org.bouncycastle:bcpkix-jdk18on", version.ref = "jdk18on" }
+bcpg = { module = "org.bouncycastle:bcpg-jdk18on", version.ref = "jdk18on" }
 junit = { module = "junit:junit", version.ref = "junit" }
 robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
 

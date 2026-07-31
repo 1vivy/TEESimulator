@@ -3,8 +3,11 @@ import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const evidence = resolve(
-  import.meta.dirname,
-  "../../../TEESimulator-RS/.omo/evidence/two-device-rkp-rka-rust-runtime/round8/task-26-executor",
+  process.env.RKA_WEBUI_EVIDENCE_DIR ??
+    resolve(
+      import.meta.dirname,
+      "../../../TEESimulator-RS/.omo/evidence/two-device-rkp-rka-rust-runtime/round8/task-26-executor",
+    ),
 );
 
 test("live fixed controls expose stable accessible state", async ({ page }) => {

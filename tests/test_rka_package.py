@@ -63,6 +63,17 @@ class RkaPackageTest(unittest.TestCase):
             missing = temporary_root / "missing-Release.zip"
             self.copy_archive(release, missing, {}, {"rka-sidecar"})
             self.assert_rejected(missing, "ENTRY_MISSING", "missing")
+            for required_agent_pgp_entry in (
+                "rka-agent-pgp-public.gpg",
+                "rka-agent-pgp-verify",
+            ):
+                missing_agent_pgp = temporary_root / f"missing-{required_agent_pgp_entry}-Release.zip"
+                self.copy_archive(release, missing_agent_pgp, {}, {required_agent_pgp_entry})
+                self.assert_rejected(
+                    missing_agent_pgp,
+                    "ENTRY_MISSING",
+                    required_agent_pgp_entry,
+                )
             wrong_mode = temporary_root / "wrong-mode-Release.zip"
             self.copy_archive(release, wrong_mode, {"daemon": b"#!/system/bin/sh\n"}, modes={"daemon": 0o644})
             self.assert_rejected(wrong_mode, "MODE_MISMATCH", "wrong mode")

@@ -9,6 +9,8 @@ const EXPECTED = Object.freeze({
   "ffmpeg-1011/ffmpeg-linux": "460d44f3416005662f528d4b92e7b94ace924e8a0288106d3803b73c56eaadc8",
 });
 const expectedVersion = "Google Chrome for Testing 151.0.7922.34";
+const payloads = [];
+const executables = [];
 function fail(message) { throw new Error(message); }
 const supplied = process.env.PLAYWRIGHT_BROWSERS_PATH ?? "";
 if (!isAbsolute(supplied)) fail("browser root must be absolute");
@@ -36,9 +38,18 @@ for (const [name, digest] of Object.entries(EXPECTED)) {
   }
   const actual = createHash("sha256").update(readFileSync(canonical)).digest("hex");
   if (actual !== digest) fail(`digest drift: ${name}`);
+  payloads.push({ path: name, sha256: actual });
 }
 for (const name of Object.keys(EXPECTED).slice(0, 2)) {
   const reported = execFileSync(join(root, name), ["--version"], { encoding: "utf8" }).trim();
   if (reported !== expectedVersion) fail("executable version drift");
+  executables.push({ path: name, version: reported });
 }
-process.stdout.write('{"verified":true,"payloads":3,"executables":2}\n');
+process.stdout.write(`${JSON.stringify({
+  browserVersion: "151.0.7922.34",
+  executables,
+  packageVersion,
+  payloads,
+  revision: chromium.revision,
+  verified: true,
+})}\n`);

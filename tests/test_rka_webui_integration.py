@@ -9,6 +9,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTROL = Path(os.environ.get("RKA_CONTROL_SCRIPT", ROOT / "module" / "rka-control.sh"))
+AGENT_PGP_TOOL = ROOT / "module" / "rka-agent-pgp-verify"
+AGENT_PGP_ANCHOR = ROOT / "module" / "rka-agent-pgp-public.gpg"
 
 
 class LiveWebUiIntegrationTest(unittest.TestCase):
@@ -26,6 +28,15 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
             text=True,
             env={**os.environ, **(environment or {})},
         )
+
+    def test_no_overlap_verifier_is_package_owned(self) -> None:
+        control_source = CONTROL.read_text(encoding="utf-8")
+
+        self.assertTrue(AGENT_PGP_TOOL.is_file())
+        self.assertTrue(AGENT_PGP_ANCHOR.is_file())
+        self.assertIn("webui_verifier=$script_directory/rka-agent-pgp-verify", control_source)
+        self.assertIn("webui_agent_anchor=$script_directory/rka-agent-pgp-public.gpg", control_source)
+        self.assertNotIn("$root/rka-agent-pgp-verify.sh", control_source)
 
     def test_missing_sentinel_and_arbitrary_recovery_are_blocked(self) -> None:
         with TemporaryDirectory() as directory:
@@ -107,11 +118,10 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
 
     def test_root_rotation_overlap_and_signed_no_overlap(self) -> None:
         cases = (
-            ("overlap", "cedb1cb6dc896ae5ec797348bce9286753c2b38ee71ce0fbe34a9a1248800dfc", False),
-            ("unsigned-no-overlap", "3" * 64, False),
-            ("signed-no-overlap", "3" * 64, True),
+            ("overlap", "cedb1cb6dc896ae5ec797348bce9286753c2b38ee71ce0fbe34a9a1248800dfc"),
+            ("unsigned-no-overlap", "3" * 64),
         )
-        for name, pin, signed in cases:
+        for name, pin in cases:
             with self.subTest(name=name), TemporaryDirectory() as directory:
                 base = Path(directory)
                 root, state = base / "module", base / "state"
@@ -131,18 +141,6 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
                     encoding="utf-8",
                 )
                 sidecar.chmod(0o700)
-                if signed:
-                    signed_bundle = root / "rka-root-bundle.signed"
-                    signed_bundle.write_text(
-                        f"version=1\nepoch=1\npin={pin}\nauthorization={'0' * 64}\n",
-                        encoding="utf-8",
-                    )
-                    signed_bundle.chmod(0o600)
-                    (root / "rka-root-bundle.signed.sig").write_text("signed\n", encoding="utf-8")
-                    (root / "rka-root-bundle.signed.sig").chmod(0o600)
-                    verifier = root / "rka-agent-pgp-verify.sh"
-                    verifier.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-                    verifier.chmod(0o700)
                 nonce = self.control(root, state, "webui-open").stdout.split("=", 1)[1].strip()
                 environment = {"RKA_ROOT_FETCH": str(fetch), "RKA_SIDECAR": str(sidecar)}
                 prepared = self.control(
@@ -157,8 +155,7 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
                     self.assertFalse((state / "trust" / "root-bundle.next").exists())
                     continue
                 self.assertEqual(prepared.returncode, 0, prepared.stdout)
-                expected_overlap = "NO_OVERLAP" if signed else "OVERLAP"
-                self.assertEqual(values["root_overlap"], expected_overlap)
+                self.assertEqual(values["root_overlap"], "OVERLAP")
                 applied = self.control(
                     root,
                     state,

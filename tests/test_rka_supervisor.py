@@ -175,6 +175,23 @@ class RkaSupervisorTest(unittest.TestCase):
             self.clean(root, state)
             temporary.cleanup()
 
+    def test_no_restart_during_generating(self) -> None:
+        temporary, root, state = self.fixture("LOCAL")
+        try:
+            marker = state / "journal" / "mutation.state"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("RKP_KEY_GENERATING\n", encoding="utf-8")
+            result = self.command(root, state, "start", environment={"RKA_CHILD_MODE": "crash"})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "state=QUARANTINED_AMBIGUOUS_MUTATION",
+                self.command(root, state, "status").stdout,
+            )
+            self.assertEqual((root / "children.log").read_text(encoding="utf-8").count("legacy"), 1)
+        finally:
+            self.clean(root, state)
+            temporary.cleanup()
+
     def test_forbidden_process_control_tokens_are_absent(self) -> None:
         source = SUPERVISOR.read_text(encoding="utf-8")
         for forbidden in ("killall", "pkill", "reboot", "keystore2", "rkpd", "classpath"):
@@ -184,3 +201,4 @@ class RkaSupervisorTest(unittest.TestCase):
         source = CUSTOMIZE.read_text(encoding="utf-8")
         self.assertIn("rka-supervisor.sh", source)
         self.assertIn('chmod 755 "$MODPATH/rka-supervisor.sh"', source)
+        self.assertIn("rka-sidecar", source)

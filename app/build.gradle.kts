@@ -240,6 +240,7 @@ androidComponents {
                     dependsOn("strip${capitalized}DebugSymbols")
                 }
                 dependsOn(buildRustCertgen)
+                dependsOn(stageRkaRuntimeArm64)
                 dependsOn(refreshUpdateJson)
 
                 if (isDebug) {
@@ -272,6 +273,7 @@ androidComponents {
                         "**/libcertgen.so",
                     )
                 }
+                from(rkaRuntimeStageDir) { include("rka-sidecar") }
 
                 // Now, copy and process the files from 'module' directory.
                 val sourceModuleDir = rootProject.projectDir.resolve("module")

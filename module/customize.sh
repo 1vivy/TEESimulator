@@ -48,10 +48,11 @@ install_file() {
 
 # --- Installation ---
 ui_print "- Extracting module files"
-for file in customize.sh module.prop service.sh sepolicy.rule daemon action.sh action_i18n.sh uninstall.sh rka-supervisor.sh; do
+for file in customize.sh module.prop service.sh sepolicy.rule daemon action.sh action_i18n.sh uninstall.sh rka-supervisor.sh rka-sidecar; do
   install_file "$file" "$MODPATH"
 done
 chmod 755 "$MODPATH/rka-supervisor.sh"
+chmod 755 "$MODPATH/rka-sidecar"
 
 # Handle service.apk or classes.dex
 if unzip -l "$ZIPFILE" | grep -q "service.apk"; then

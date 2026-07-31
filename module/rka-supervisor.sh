@@ -67,9 +67,14 @@ child_loop() {
         started=$(date +%s)
         setsid "$@" &
         child=$!
-        write_record "$name" "$child" || exit 1
+        write_record "$name" "$child" || :
         wait "$child"
         [ "$(cat "$state_file" 2>/dev/null)" = RUNNING ] || exit 0
+        if restart_blocked; then
+            printf '%s\n' QUARANTINED_AMBIGUOUS_MUTATION > "$state_file"
+            rm -f "$pids/$name.pid"
+            exit 1
+        fi
         finished=$(date +%s)
         if [ $((finished - started)) -ge "$stable_seconds" ]; then
             crashes=0
@@ -83,6 +88,18 @@ child_loop() {
         fi
         sleep "$backoff"
     done
+}
+
+restart_blocked() {
+    marker=$state/journal/mutation.state
+    [ ! -e "$marker" ] && [ ! -L "$marker" ] && return 1
+    [ -f "$marker" ] && [ ! -L "$marker" ] && [ -r "$marker" ] || return 0
+    marker_state=$(cat "$marker") || return 0
+    case $marker_state in
+        POST_AMBIGUOUS|RKP_KEY_GENERATING|APP_KEY_GENERATING) return 0 ;;
+        RKP_KEY_RECORDED|CSR_PREPARED|CSR_POSTING|RKP_CERTIFIED|APP_KEY_RECORDED|EXPOSED|TERMINAL|DELETE|IDLE|COMPLETED) return 1 ;;
+        *) return 0 ;;
+    esac
 }
 
 start_one() {
@@ -116,11 +133,11 @@ start() {
         LOCAL) start_one legacy "$daemon" legacy ;;
         DONOR)
             start_one broker "$daemon" broker --rka-role DONOR --rka-no-candidate || { stop; return 1; }
-            start_one sidecar "$sidecar" donor || { stop; return 1; }
+            start_one sidecar env RKA_STATE_ROOT="$state" RKA_PROFILE_PATH="$state/profiles/active.conf" "$sidecar" donor || { stop; return 1; }
             ;;
         CANDIDATE)
             start_one broker "$daemon" broker --rka-role CANDIDATE --rka-candidate || { stop; return 1; }
-            start_one sidecar "$sidecar" candidate || { stop; return 1; }
+            start_one sidecar env RKA_STATE_ROOT="$state" RKA_PROFILE_PATH="$state/profiles/active.conf" "$sidecar" candidate || { stop; return 1; }
             ;;
     esac
 }

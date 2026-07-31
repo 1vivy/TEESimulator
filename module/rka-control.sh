@@ -213,16 +213,18 @@ webui_read_active_profile() {
 
 webui_sentinel_status() {
     webui_sentinel_path=$rka_state_root/run/boot-continuity.state
-    if rka_private_file_is_valid "$webui_sentinel_path" && [ "$(cat "$webui_sentinel_path")" = LIVE ]; then
-        printf '%s\n' LIVE
-    else
-        printf '%s\n' NOT_READY
+    webui_sentinel=NOT_READY
+    if rka_private_file_is_valid "$webui_sentinel_path" && [ "$(wc -c < "$webui_sentinel_path")" -le 16 ] && [ "$(cat "$webui_sentinel_path")" = LIVE ]; then
+        webui_sentinel=LIVE
     fi
 }
 
 webui_quarantine_count() {
     if rka_layout_is_valid; then
-        find "$rka_state_root/quarantine" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' '
+        webui_quarantine_total=$(find "$rka_state_root/quarantine" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ') || return 1
+        case $webui_quarantine_total in '' | *[!0-9]*) return 1 ;; esac
+        [ "$webui_quarantine_total" -le 9999 ] || return 1
+        printf '%s\n' "$webui_quarantine_total"
     else
         printf '%s\n' 0
     fi
@@ -236,51 +238,80 @@ webui_pair_request_is_valid() {
 action=PAIR_DIRECT" ]
 }
 
+webui_runtime_state() {
+    webui_runtime=STOPPED
+    webui_runtime_path=$rka_state_root/run/supervisor.state
+    if [ ! -e "$webui_runtime_path" ] && [ ! -L "$webui_runtime_path" ]; then
+        return 0
+    fi
+    rka_private_file_is_valid "$webui_runtime_path" || return 1
+    [ "$(wc -c < "$webui_runtime_path")" -le 64 ] || return 1
+    webui_runtime=$(cat "$webui_runtime_path") || return 1
+    case $webui_runtime in RUNNING|STOPPED|FAILED_CRASH_CAP|QUARANTINED_AMBIGUOUS_MUTATION) return 0 ;; *) return 1 ;; esac
+}
+
+webui_transport_key_is_valid() {
+    webui_transport_key_path=$rka_state_root/secrets/transport.key
+    rka_private_file_is_valid "$webui_transport_key_path" || return 1
+    webui_transport_key_bytes=$(wc -c < "$webui_transport_key_path") || return 1
+    case $webui_transport_key_bytes in '' | *[!0-9]*) return 1 ;; esac
+    [ "$webui_transport_key_bytes" -ge 16 ] && [ "$webui_transport_key_bytes" -le 16384 ]
+}
+
+webui_transport_trust_is_valid() {
+    webui_transport_trust_path=$rka_state_root/trust/transport-trust.pem
+    rka_private_file_is_valid "$webui_transport_trust_path" || return 1
+    webui_transport_trust_bytes=$(wc -c < "$webui_transport_trust_path") || return 1
+    case $webui_transport_trust_bytes in '' | *[!0-9]*) return 1 ;; esac
+    [ "$webui_transport_trust_bytes" -ge 64 ] && [ "$webui_transport_trust_bytes" -le 16384 ] || return 1
+    webui_trust_phase=header
+    webui_trust_payload_seen=false
+    while IFS= read -r webui_trust_line || [ -n "$webui_trust_line" ]; do
+        case $webui_trust_phase in
+            header)
+                [ "$webui_trust_line" = '-----BEGIN CERTIFICATE-----' ] || return 1
+                webui_trust_phase=payload
+                ;;
+            payload)
+                if [ "$webui_trust_line" = '-----END CERTIFICATE-----' ]; then
+                    [ "$webui_trust_payload_seen" = true ] || return 1
+                    webui_trust_phase=footer
+                else
+                    case $webui_trust_line in ''|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=]*) return 1 ;; esac
+                    webui_trust_payload_seen=true
+                fi
+                ;;
+            footer) return 1 ;;
+        esac
+    done < "$webui_transport_trust_path"
+    [ "$webui_trust_phase" = footer ]
+}
+
 webui_status_state() {
-    webui_status_path=$rka_state_root/profiles/webui-status.conf
     webui_pairing=UNPAIRED
     webui_direct_profile=UNAVAILABLE
     webui_direct_readiness=NOT_READY
     webui_diagnostic=DIAGNOSTIC_ONLY
-    if [ ! -e "$webui_status_path" ] && [ ! -L "$webui_status_path" ]; then
-        if [ -e "$rka_state_root/profiles/pair.request" ] || [ -L "$rka_state_root/profiles/pair.request" ]; then
-            webui_pair_request_is_valid || return 1
-            webui_pairing=PENDING
-            webui_direct_profile=DIRECT_NETWORK
-        fi
+    if [ ! -e "$rka_state_root/profiles/pair.request" ] && [ ! -L "$rka_state_root/profiles/pair.request" ]; then
         return 0
     fi
-    rka_private_file_is_valid "$webui_status_path" || return 1
-    [ "$(wc -c < "$webui_status_path")" -le 256 ] || return 1
-    webui_status_version=false
-    webui_status_pairing=false
-    webui_status_profile=false
-    webui_status_readiness=false
-    webui_status_diagnostic=false
-    while IFS= read -r webui_status_line || [ -n "$webui_status_line" ]; do
-        webui_status_key=${webui_status_line%%=*}
-        webui_status_value=${webui_status_line#*=}
-        [ "$webui_status_key" != "$webui_status_line" ] || return 1
-        case $webui_status_key in
-            version) [ "$webui_status_version" = false ] && [ "$webui_status_value" = 1 ] || return 1; webui_status_version=true ;;
-            pairing) [ "$webui_status_pairing" = false ] || return 1; case $webui_status_value in UNPAIRED|PENDING|PAIRED) webui_pairing=$webui_status_value ;; *) return 1 ;; esac; webui_status_pairing=true ;;
-            direct_profile) [ "$webui_status_profile" = false ] || return 1; case $webui_status_value in UNAVAILABLE|DIRECT_NETWORK) webui_direct_profile=$webui_status_value ;; *) return 1 ;; esac; webui_status_profile=true ;;
-            direct_readiness) [ "$webui_status_readiness" = false ] || return 1; case $webui_status_value in NOT_READY|READY) webui_direct_readiness=$webui_status_value ;; *) return 1 ;; esac; webui_status_readiness=true ;;
-            diagnostic) [ "$webui_status_diagnostic" = false ] && [ "$webui_status_value" = DIAGNOSTIC_ONLY ] || return 1; webui_status_diagnostic=true ;;
-            *) return 1 ;;
-        esac
-    done < "$webui_status_path"
-    [ "$webui_status_version" = true ] && [ "$webui_status_pairing" = true ] && [ "$webui_status_profile" = true ] && [ "$webui_status_readiness" = true ] && [ "$webui_status_diagnostic" = true ] || return 1
-    case $webui_pairing:$webui_direct_profile:$webui_direct_readiness in
-        PAIRED:DIRECT_NETWORK:READY | PENDING:DIRECT_NETWORK:NOT_READY | UNPAIRED:UNAVAILABLE:NOT_READY) return 0 ;;
-        *) return 1 ;;
-    esac
+    webui_pair_request_is_valid || return 1
+    webui_pairing=PENDING
+    webui_direct_profile=DIRECT_NETWORK
+    if webui_transport_key_is_valid && webui_transport_trust_is_valid; then
+        webui_pairing=PAIRED
+        if [ "$webui_runtime" = RUNNING ] && [ "$webui_sentinel" = LIVE ]; then
+            webui_direct_readiness=READY
+        fi
+    fi
 }
 
 webui_status() {
     webui_role=$(read_role) || return 1
     webui_read_active_profile || return 1
     [ "$webui_role" = "$webui_profile_role" ] || return 1
+    webui_runtime_state || return 1
+    webui_sentinel_status
     webui_status_state || return 1
     printf 'role=%s\n' "$webui_role"
     printf 'phone_role=%s\n' "$(webui_phone_role "$webui_role")"
@@ -289,7 +320,8 @@ webui_status() {
     printf 'direct_readiness=%s\n' "$webui_direct_readiness"
     printf 'pairing=%s\n' "$webui_pairing"
     printf 'diagnostic=%s\n' "$webui_diagnostic"
-    printf 'sentinel=%s\n' "$(webui_sentinel_status)"
+    printf 'runtime=%s\n' "$webui_runtime"
+    printf 'sentinel=%s\n' "$webui_sentinel"
     printf 'quarantine_count=%s\n' "$(webui_quarantine_count)"
 }
 

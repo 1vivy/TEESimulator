@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from html.parser import HTMLParser
+import json
 import os
 from pathlib import Path
 from subprocess import CompletedProcess, run
@@ -13,6 +13,7 @@ import unittest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CONTROL_SCRIPT = REPOSITORY_ROOT / "module" / "rka-control.sh"
 WEBROOT = REPOSITORY_ROOT / "module" / "webroot"
+BROWSER_HARNESS = REPOSITORY_ROOT / "tests" / "webui_browser_harness.mjs"
 FIXED_ACTIONS = (
     "status",
     "role-donor",
@@ -29,22 +30,13 @@ FIXED_ACTIONS = (
 )
 
 
-class ActionParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.actions: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag != "button":
-            return
-        action = dict(attrs).get("data-action")
-        if action is not None:
-            self.actions.append(action)
-
-
 class RkaWebUiTest(unittest.TestCase):
     def run_control(
-        self, config_root: Path, state_root: Path, *arguments: str
+        self,
+        config_root: Path,
+        state_root: Path,
+        *arguments: str,
+        environment: dict[str, str] | None = None,
     ) -> CompletedProcess[str]:
         return run(
             [
@@ -59,6 +51,7 @@ class RkaWebUiTest(unittest.TestCase):
             check=False,
             capture_output=True,
             text=True,
+            env={**os.environ, **(environment or {})},
         )
 
     def initialize(self, config_root: Path, state_root: Path, role: str = "DONOR") -> None:
@@ -78,9 +71,16 @@ class RkaWebUiTest(unittest.TestCase):
         )
 
     def mutate(
-        self, config_root: Path, state_root: Path, action: str, nonce: str
+        self,
+        config_root: Path,
+        state_root: Path,
+        action: str,
+        nonce: str,
+        environment: dict[str, str] | None = None,
     ) -> tuple[CompletedProcess[str], str]:
-        result = self.run_control(config_root, state_root, "webui", action, nonce)
+        result = self.run_control(
+            config_root, state_root, "webui", action, nonce, environment=environment
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         return result, self.field(result.stdout, "next_nonce")
 
@@ -88,40 +88,61 @@ class RkaWebUiTest(unittest.TestCase):
         path.write_text(contents, encoding="utf-8")
         os.chmod(path, 0o600)
 
-    def write_ready_pairing(self, state_root: Path) -> None:
+    def write_live_transport_sources(self, state_root: Path) -> None:
         self.write_private(
-            state_root / "profiles" / "webui-status.conf",
-            "version=1\n"
-            "pairing=PAIRED\n"
-            "direct_profile=DIRECT_NETWORK\n"
-            "direct_readiness=READY\n"
-            "diagnostic=DIAGNOSTIC_ONLY\n",
+            state_root / "secrets" / "transport.key", "test-transport-key-material\n"
         )
+        self.write_private(
+            state_root / "trust" / "transport-trust.pem",
+            "-----BEGIN CERTIFICATE-----\n"
+            "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\n"
+            "-----END CERTIFICATE-----\n",
+        )
+        self.write_private(state_root / "run" / "boot-continuity.state", "LIVE\n")
 
-    def test_status_renders_validated_ready_pairing_without_secret_or_path(self) -> None:
+    def write_fake_runtime(self, temporary_root: Path) -> Path:
+        runtime = temporary_root / "fake-runtime.sh"
+        runtime.write_text("#!/bin/sh\nwhile :; do sleep 60; done\n", encoding="utf-8")
+        os.chmod(runtime, 0o700)
+        return runtime
+
+    def test_status_derives_ready_pairing_from_production_sources_without_secret_or_path(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             config_root = temporary_root / "tricky_store"
             state_root = temporary_root / "rka-state"
             self.initialize(config_root, state_root)
-            self.write_ready_pairing(state_root)
-            self.write_private(
-                state_root / "secrets" / "transport.key", "sensitive-material-must-not-render\n"
+            pending, nonce = self.mutate(
+                config_root, state_root, "pair-direct", self.open_webui(config_root, state_root)
             )
-            nonce = self.open_webui(config_root, state_root)
-            result = self.run_control(config_root, state_root, "webui", "status", nonce)
+            self.write_live_transport_sources(state_root)
+            fake_runtime = self.write_fake_runtime(temporary_root)
+            runtime_environment = {
+                "RKA_DAEMON": str(fake_runtime),
+                "RKA_SIDECAR": str(fake_runtime),
+                "RKA_STABLE_SECONDS": "60",
+            }
+            result, nonce = self.mutate(
+                config_root, state_root, "start", nonce, environment=runtime_environment
+            )
+            stopped, _ = self.mutate(
+                config_root, state_root, "stop", nonce, environment=runtime_environment
+            )
 
+        self.assertIn("pairing=PENDING", pending.stdout)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("role=DONOR", result.stdout)
         self.assertIn("phone_role=PHONE_A_DONOR", result.stdout)
         self.assertIn("direct_profile=DIRECT_NETWORK", result.stdout)
         self.assertIn("direct_readiness=READY", result.stdout)
         self.assertIn("pairing=PAIRED", result.stdout)
+        self.assertIn("runtime=RUNNING", result.stdout)
         self.assertIn("diagnostic=DIAGNOSTIC_ONLY", result.stdout)
-        self.assertNotIn("sensitive-material-must-not-render", result.stdout)
+        self.assertNotIn("test-transport-key-material", result.stdout)
         self.assertNotIn(str(state_root), result.stdout)
+        self.assertIn("runtime=STOPPED", stopped.stdout)
 
-    def test_status_rejects_malformed_or_cross_role_state(self) -> None:
+    def test_status_ignores_test_seeded_snapshot_and_rejects_cross_role_state(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             config_root = temporary_root / "tricky_store"
@@ -132,10 +153,9 @@ class RkaWebUiTest(unittest.TestCase):
                 "version=1\npairing=PAIRED\ndirect_profile=DIRECT_NETWORK\n"
                 "direct_readiness=NOT_READY\ndiagnostic=DIAGNOSTIC_ONLY\n",
             )
-            malformed = self.run_control(
+            seeded = self.run_control(
                 config_root, state_root, "webui", "status", self.open_webui(config_root, state_root)
             )
-            self.write_ready_pairing(state_root)
             self.write_private(
                 state_root / "profiles" / "active.conf",
                 "version=1\nrole=CANDIDATE\nprofile_epoch=0\n",
@@ -144,8 +164,10 @@ class RkaWebUiTest(unittest.TestCase):
                 config_root, state_root, "webui", "status", self.open_webui(config_root, state_root)
             )
 
-        self.assertEqual(malformed.stdout, "WEBUI_INVALID_REQUEST\n")
-        self.assertNotEqual(malformed.returncode, 0)
+        self.assertEqual(seeded.returncode, 0, seeded.stderr)
+        self.assertIn("pairing=UNPAIRED", seeded.stdout)
+        self.assertIn("direct_profile=UNAVAILABLE", seeded.stdout)
+        self.assertNotIn("pairing=PAIRED", seeded.stdout)
         self.assertEqual(cross_role.stdout, "WEBUI_INVALID_REQUEST\n")
         self.assertNotEqual(cross_role.returncode, 0)
 
@@ -195,29 +217,30 @@ class RkaWebUiTest(unittest.TestCase):
         self.assertEqual(started.stdout, "WEBUI_INVALID_REQUEST\n")
 
     def test_fixed_dom_actions_execute_their_command_contracts(self) -> None:
-        parser = ActionParser()
-        parser.feed((WEBROOT / "index.html").read_text(encoding="utf-8"))
-        self.assertEqual(tuple(parser.actions), FIXED_ACTIONS)
-        app = (WEBROOT / "app.js").read_text(encoding="utf-8")
-        self.assertIn("textContent", app)
-        self.assertNotIn("innerHTML", app)
-
         with TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             config_root = temporary_root / "tricky_store"
             state_root = temporary_root / "rka-state"
             self.initialize(config_root, state_root)
-            self.write_ready_pairing(state_root)
             nonce = self.open_webui(config_root, state_root)
             status = self.run_control(config_root, state_root, "webui", "status", nonce)
             _, nonce = self.mutate(config_root, state_root, "role-donor", nonce)
             _, nonce = self.mutate(config_root, state_root, "role-candidate", nonce)
             _, nonce = self.mutate(config_root, state_root, "pair-direct", nonce)
             _, nonce = self.mutate(config_root, state_root, "rotate-pairing", nonce)
-            start = self.run_control(config_root, state_root, "webui", "start", nonce)
-            self.assertNotEqual(start.returncode, 0)
-            nonce = self.open_webui(config_root, state_root)
-            _, nonce = self.mutate(config_root, state_root, "stop", nonce)
+            self.write_live_transport_sources(state_root)
+            fake_runtime = self.write_fake_runtime(temporary_root)
+            runtime_environment = {
+                "RKA_DAEMON": str(fake_runtime),
+                "RKA_SIDECAR": str(fake_runtime),
+                "RKA_STABLE_SECONDS": "60",
+            }
+            start, nonce = self.mutate(
+                config_root, state_root, "start", nonce, environment=runtime_environment
+            )
+            _, nonce = self.mutate(
+                config_root, state_root, "stop", nonce, environment=runtime_environment
+            )
             recovery, nonce = self.mutate(config_root, state_root, "recover-keystore2", nonce)
             audit, nonce = self.mutate(config_root, state_root, "export-audit", nonce)
             evidence, nonce = self.mutate(config_root, state_root, "export-evidence", nonce)
@@ -231,6 +254,7 @@ class RkaWebUiTest(unittest.TestCase):
             )
 
         self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("runtime=RUNNING", start.stdout)
         self.assertIn("recovery_target=KEYSTORE2", recovery.stdout)
         self.assertIn("audit_export=REDACTED_READY", audit.stdout)
         self.assertIn("evidence_export=REDACTED_READY", evidence.stdout)
@@ -240,6 +264,35 @@ class RkaWebUiTest(unittest.TestCase):
             self.assertNotIn("transport.key", export)
             self.assertNotIn(str(state_root), export)
             self.assertIn("pairing=PAIRED", export)
+
+    def test_browser_clicks_every_fixed_action_and_renders_bridge_failures_safely(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            browser_evidence = Path(temporary_directory) / "browser"
+            result = run(
+                ["node", str(BROWSER_HARNESS), str(browser_evidence)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            action_log = json.loads(
+                (browser_evidence / "browser-action-log.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([entry["action"] for entry in action_log["observed"]], list(FIXED_ACTIONS))
+        self.assertEqual(
+            [entry["commandState"] for entry in action_log["observed"]],
+            ["Status refreshed", *["Request accepted"] * (len(FIXED_ACTIONS) - 1)],
+        )
+        self.assertFalse(action_log["escaping"]["hostileExecuted"])
+        self.assertTrue(action_log["escaping"]["hostileText"])
+        self.assertFalse(action_log["escaping"]["imageChildren"])
+        self.assertEqual(action_log["failure"]["commandState"], "Fixed control request failed")
+        self.assertEqual(action_log["malformedState"], "WebUI bridge response was malformed")
+        self.assertTrue(action_log["busy"]["disabled"])
+        self.assertFalse(action_log["settled"]["disabled"])
+        self.assertEqual(action_log["settled"]["commandState"], "Status refreshed")
 
     def test_rejects_arbitrary_action_and_bad_nonce_without_command_evaluation(self) -> None:
         with TemporaryDirectory() as temporary_directory:

@@ -20,39 +20,66 @@ class RkaPackageTest(unittest.TestCase):
         release = self.current_archives()["Release"]
         mutations = {
             "secret": ("secrets/transport.key", b"secret"),
-            "profile": ("profiles/active.conf", b"role=DONOR\n"),
+            "profile": ("profiles/active.conf", b"profile"),
             "trust": ("trust/transport.pem", b"trust"),
             "device_identity": ("device-id.txt", b"identity"),
-            "legacy_keybox": ("keybox.xml", b"keybox"),
-            "companion": ("companion.apk", b"companion"),
+            "keybox": ("keybox.xml", b"keybox"),
+            "persistent": ("persistent_keys/key", b"key"),
+            "action": ("action.sh", b"action"),
+            "customize": ("customize.sh", b"customize"),
+            "diag": ("diag.sh", b"diag"),
             "probe": ("probe-service.sh", b"probe"),
-            "unexpected": ("unexpected.txt", b"unexpected"),
+            "companion": ("companion.apk", b"companion"),
+            "update": ("update.json", b"{}"),
         }
         with TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             for name, (entry, payload) in mutations.items():
                 archive = temporary_root / f"{name}-Release.zip"
                 self.copy_archive(release, archive, {entry: payload})
-                result = self.run_validator(archive)
-                self.assertNotEqual(result.returncode, 0, name)
+                self.assert_rejected(archive, "FORBIDDEN_ENTRY", name)
+
+            unexpected = temporary_root / "unexpected-Release.zip"
+            self.copy_archive(release, unexpected, {"unexpected.txt": b"unexpected"})
+            self.assert_rejected(unexpected, "UNEXPECTED_ENTRY", "unexpected")
 
             for name, payload in {
-                "role_specific": {"rka-role.conf": b"version=1\nrole=DONOR\n"},
-                "reboot": {"service.sh": b"#!/system/bin/sh\nreboot\n"},
-                "deploy": {"service.sh": b"#!/system/bin/sh\nadb push\n"},
-                "start_service": {"service.sh": b"#!/system/bin/sh\nstart-service\n"},
+                "donor": {"rka-role.conf": b"version=1\nrole=DONOR\n"},
+                "candidate": {"rka-role.conf": b"version=1\nrole=CANDIDATE\n"},
             }.items():
                 archive = temporary_root / f"{name}-Release.zip"
                 self.copy_archive(release, archive, payload)
-                result = self.run_validator(archive)
-                self.assertNotEqual(result.returncode, 0, name)
+                self.assert_rejected(archive, "ROLE_SPECIFIC", name)
+            for name, payload in {
+                "private": b"#!/system/bin/sh\nprivate key\n",
+                "reboot": b"#!/system/bin/sh\nreboot\n",
+                "deploy": b"#!/system/bin/sh\nadb push\n",
+                "start": b"#!/system/bin/sh\nstart-service\n",
+            }.items():
+                archive = temporary_root / f"{name}-Release.zip"
+                self.copy_archive(release, archive, {"service.sh": payload})
+                self.assert_rejected(archive, "FORBIDDEN_CONTENT", name)
 
             missing = temporary_root / "missing-Release.zip"
             self.copy_archive(release, missing, {}, {"rka-sidecar"})
-            self.assertNotEqual(self.run_validator(missing).returncode, 0)
+            self.assert_rejected(missing, "ENTRY_MISSING", "missing")
             wrong_mode = temporary_root / "wrong-mode-Release.zip"
             self.copy_archive(release, wrong_mode, {"daemon": b"#!/system/bin/sh\n"}, modes={"daemon": 0o644})
-            self.assertNotEqual(self.run_validator(wrong_mode).returncode, 0)
+            self.assert_rejected(wrong_mode, "MODE_MISMATCH", "wrong mode")
+            missing_webui = temporary_root / "webui-missing-Release.zip"
+            self.copy_archive(release, missing_webui, {}, {"webroot/DESIGN.md"})
+            self.assert_rejected(missing_webui, "WEBUI_MISSING", "missing webui")
+            extra_webui = temporary_root / "webui-extra-Release.zip"
+            self.copy_archive(release, extra_webui, {"webroot/nested/extra.txt": b"extra"})
+            self.assert_rejected(extra_webui, "WEBUI_EXTRA", "extra webui")
+            for name, payload in {
+                "schema": b"schema=9\n",
+                "roles": b"schema=1\nroles=DONOR\n",
+                "all": b"invalid\n",
+            }.items():
+                archive = temporary_root / f"manifest-{name}-Release.zip"
+                self.copy_archive(release, archive, {"rka-runtime.manifest": payload})
+                self.assert_rejected(archive, "MANIFEST_MISMATCH", name)
 
     def test_two_clean_fixed_epoch_release_builds_are_byte_identical(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -75,6 +102,11 @@ class RkaPackageTest(unittest.TestCase):
 
     def test_manifest_webui_modes_and_hashes_exactly_match_release_archive(self) -> None:
         manifest = self.parse_manifest(RUNTIME_MANIFEST)
+        self.assertEqual(manifest, {
+            "schema": "1", "roles": "LOCAL|DONOR|CANDIDATE", "sidecar_abi": "arm64-v8a",
+            "activation": "staged-by-installer", "runtime_state": "external-root-only",
+            "archive_entries": manifest["archive_entries"], "archive_executables": manifest["archive_executables"],
+        })
         release = self.current_archives()["Release"]
         source_webroot = {
             f"webroot/{path.relative_to(REPOSITORY_ROOT / 'module' / 'webroot').as_posix()}": path
@@ -84,6 +116,7 @@ class RkaPackageTest(unittest.TestCase):
         expected_entries = set(manifest["archive_entries"].split(",")) | set(source_webroot) | {"classes.dex"}
         expected_executables = set(manifest["archive_executables"].split(","))
         with ZipFile(release) as archive:
+            self.assertEqual(archive.read("rka-runtime.manifest"), RUNTIME_MANIFEST.read_bytes())
             relevant_entries = {
                 info.filename
                 for info in archive.infolist()
@@ -112,6 +145,11 @@ class RkaPackageTest(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+
+    def assert_rejected(self, archive: Path, code: str, name: str) -> None:
+        result = self.run_validator(archive)
+        self.assertNotEqual(result.returncode, 0, name)
+        self.assertIn(f"RKA_VALIDATE:{code}", result.stdout + result.stderr, name)
 
     def copy_archive(
         self,

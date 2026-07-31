@@ -585,21 +585,28 @@ val verifyRkaModuleArchive by
                 CommonsZipFile(archive).use { zip ->
                     val entries = zip.entries.asSequence().filterNot { it.isDirectory }.toList()
                     val names = entries.map { it.name }.toSet()
-                    require(names.containsAll(commonEntries)) { "Archive $archive is missing RKA runtime files." }
-                    require(names.none { entry -> forbiddenEntryFragments.any(entry.lowercase()::contains) }) {
-                        "Archive $archive contains forbidden legacy material."
-                    }
+                    fun reject(code: String): Nothing = error("RKA_VALIDATE:$code")
+                    val forbiddenEntry = names.firstOrNull { entry -> forbiddenEntryFragments.any(entry.lowercase()::contains) }
+                    if (forbiddenEntry != null) reject("FORBIDDEN_ENTRY")
+                    val sourceWebUi = commonEntries.filter { it.startsWith("webroot/") }.toSet()
+                    val archiveWebUi = names.filter { it.startsWith("webroot/") }.toSet()
+                    if (!archiveWebUi.containsAll(sourceWebUi)) reject("WEBUI_MISSING")
+                    if (!sourceWebUi.containsAll(archiveWebUi)) reject("WEBUI_EXTRA")
+                    val sourceManifest = rootProject.projectDir.resolve("module/rka-runtime.manifest").readBytes()
+                    val archiveManifest = zip.getInputStream(zip.getEntry("rka-runtime.manifest")).readBytes()
+                    if (!archiveManifest.contentEquals(sourceManifest)) reject("MANIFEST_MISMATCH")
+                    if (!names.containsAll(commonEntries)) reject("ENTRY_MISSING")
                     val variantEntry = if (archive.name.endsWith("-Release.zip")) "classes.dex" else "service.apk"
                     require(names.contains(variantEntry)) { "Archive $archive lacks $variantEntry." }
-                    require(names.all { entry ->
+                    if (!names.all { entry ->
                         entry in commonEntries || entry == variantEntry || entry.startsWith("lib/")
-                    }) { "Archive $archive contains an unexpected entry." }
+                    }) reject("UNEXPECTED_ENTRY")
                     entries.forEach { entry ->
                         val expectedMode = if (entry.name in executableEntries) 0b111101101 else 0b110100100
-                        require((entry.unixMode and 0b111111111) == expectedMode) { "Archive $archive has an invalid mode for ${entry.name}." }
+                        if ((entry.unixMode and 0b111111111) != expectedMode) reject("MODE_MISMATCH")
                     }
                     val roleConfig = zip.getInputStream(zip.getEntry("rka-role.conf")).bufferedReader().readText()
-                    require(roleConfig == "version=1\nrole=LOCAL\n") { "Archive $archive has role-specific bytes." }
+                    if (roleConfig != "version=1\nrole=LOCAL\n") reject("ROLE_SPECIFIC")
                     entries.filter { entry ->
                         entry.name.endsWith(".sh") ||
                             entry.name.endsWith(".conf") ||
@@ -610,9 +617,7 @@ val verifyRkaModuleArchive by
                             entry.name.endsWith(".css")
                     }.forEach { entry ->
                         val text = zip.getInputStream(entry).bufferedReader().readText().lowercase()
-                        require(!text.contains("private key") && !text.contains("reboot") && !text.contains("adb ") && !text.contains("start-service")) {
-                            "Archive $archive contains forbidden runtime text."
-                        }
+                        if (text.contains("private key") || text.contains("reboot") || text.contains("adb ") || text.contains("start-service")) reject("FORBIDDEN_CONTENT")
                     }
                     val sidecar = zip.getEntry("rka-sidecar") ?: error("Archive $archive lacks rka-sidecar.")
                     val magic = zip.getInputStream(sidecar).readNBytes(4)

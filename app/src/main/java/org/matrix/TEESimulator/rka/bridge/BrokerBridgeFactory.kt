@@ -1,8 +1,6 @@
 package org.matrix.TEESimulator.rka.bridge
 
 import java.util.concurrent.atomic.AtomicReference
-import org.matrix.TEESimulator.rka.candidate.CandidateRuntime
-import org.matrix.TEESimulator.rka.candidate.CandidateRuntimeRegistry
 
 object BrokerBridgeFactory {
     /**
@@ -106,19 +104,5 @@ object BrokerBridgeFactory {
             }
         if (result is BridgeResult.Failure) request.close()
         return result
-    }
-}
-
-internal object CandidateRuntimeBridgeInstaller {
-    fun install(runtime: CandidateRuntime): BridgeResult<Unit> {
-        val captured = captureProductionPeerAuthorization(BrokerSidecarRole.CANDIDATE)
-        if (captured is BridgeResult.Failure) return captured
-        val authorization = (captured as BridgeResult.Success).value
-        return try {
-            CandidateRuntimeRegistry.installFromValidatedBridge(runtime)
-            BridgeResult.Success(Unit)
-        } finally {
-            authorization.close()
-        }
     }
 }

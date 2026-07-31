@@ -391,10 +391,12 @@ class KeyMintSecurityLevelInterceptor(
             CandidateKeyShape(
                 if (parsed.algorithm == Algorithm.EC) CandidateAlgorithm.EC
                 else CandidateAlgorithm.RSA,
-                if (parsed.ecCurve == EcCurve.P_256) CandidateCurve.P256 else CandidateCurve.P384,
-                if (parsed.purpose.firstOrNull() == 2) CandidatePurpose.SIGN
+                if (parsed.ecCurve == EcCurve.P_256 && parsed.keySize == 256) CandidateCurve.P256
+                else CandidateCurve.P384,
+                if (parsed.purpose.size == 1 && parsed.purpose.single() == 2) CandidatePurpose.SIGN
                 else CandidatePurpose.VERIFY,
-                if (parsed.digest.firstOrNull() == Digest.SHA_2_256) CandidateDigest.SHA256
+                if (parsed.digest.size == 1 && parsed.digest.single() == Digest.SHA_2_256)
+                    CandidateDigest.SHA256
                 else CandidateDigest.NONE,
                 CandidateSecurityLevel.TEE,
                 parsed.attestationChallenge?.copyOf() ?: ByteArray(0),

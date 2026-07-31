@@ -4,13 +4,15 @@ import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertSame
 import org.junit.Test
 import org.matrix.TEESimulator.rka.candidate.CandidateCharacteristics
 import org.matrix.TEESimulator.rka.candidate.CandidateGenerateRequest
 import org.matrix.TEESimulator.rka.candidate.CandidateKeyId
+import org.matrix.TEESimulator.rka.candidate.CandidateKeyRecord
 import org.matrix.TEESimulator.rka.candidate.CandidateKeyShape
 import org.matrix.TEESimulator.rka.candidate.CandidateResult
+import org.matrix.TEESimulator.rka.candidate.CandidateRoute
+import org.matrix.TEESimulator.rka.candidate.CandidateRuntime
 import org.matrix.TEESimulator.rka.candidate.CandidateRuntimeRegistry
 import org.matrix.TEESimulator.rka.candidate.IdentityHash
 import org.matrix.TEESimulator.rka.candidate.MemoryRemoteCandidateStore
@@ -20,7 +22,6 @@ import org.matrix.TEESimulator.rka.candidate.RemoteGenerateCommand
 import org.matrix.TEESimulator.rka.candidate.RemoteKeyHandle
 import org.matrix.TEESimulator.rka.candidate.RemoteKeyMaterial
 import org.matrix.TEESimulator.rka.candidate.RemoteOperationHandle
-import org.matrix.TEESimulator.rka.candidate.ServiceCandidateRuntime
 
 class RemoteCandidateProductionIntegrationTest {
     @After
@@ -29,14 +30,10 @@ class RemoteCandidateProductionIntegrationTest {
     }
 
     @Test
-    fun registryPassesThroughUntilTrustedInstallerPublishesRuntime() {
-        val fixture = ProductionFixture()
-
+    fun registryPassesThroughWithoutCandidateAuthorization() {
         CandidateRuntimeRegistry.initializeLifecycle()
-        assertNull(CandidateRuntimeRegistry.current())
-        CandidateRuntimeRegistry.installFromValidatedBridge(fixture.runtime)
 
-        assertSame(fixture.runtime, CandidateRuntimeRegistry.current())
+        assertNull(CandidateRuntimeRegistry.current())
     }
 
     @Test
@@ -60,7 +57,7 @@ class RemoteCandidateProductionIntegrationTest {
     }
 }
 
-private class ProductionFixture {
+internal class ProductionFixture {
     val uid = 10123
     val identity = IdentityHash.of(ByteArray(32) { 3 })
     val id = CandidateKeyId(uid, uid.toLong(), "foreground")
@@ -70,11 +67,50 @@ private class ProductionFixture {
         RemoteCandidateService(identity, backend, MemoryRemoteCandidateStore()) {
             RemoteKeyHandle.of(ByteArray(16) { 5 })
         }
-    val runtime = ServiceCandidateRuntime(uid, identity, service)
+    val runtime: CandidateRuntime = ProductionRuntime(uid, identity, service)
 }
 
-private class ProductionBackend : RemoteCandidateBackend {
+private class ProductionRuntime(
+    private val admittedUid: Int,
+    private val identity: IdentityHash,
+    private val service: RemoteCandidateService,
+) : CandidateRuntime {
+    override fun admits(uid: Int) = uid == admittedUid
+
+    override fun resolve(uid: Int, namespace: Long) = service.resolve(uid, namespace)
+
+    override fun generate(id: CandidateKeyId, shape: CandidateKeyShape) =
+        service.generate(CandidateGenerateRequest(id, identity, shape))
+
+    override fun get(uid: Int, id: CandidateKeyId): CandidateRoute<CandidateKeyRecord> =
+        service.get(uid, id)
+
+    override fun list(uid: Int) = service.list(uid, identity)
+
+    override fun delete(uid: Int, id: CandidateKeyId) = service.delete(uid, id)
+
+    override fun grant(uid: Int, id: CandidateKeyId, granteeUid: Int) =
+        service.grant(uid, id, granteeUid)
+
+    override fun begin(uid: Int, id: CandidateKeyId) = service.begin(uid, id)
+
+    override fun updateAad(handle: RemoteOperationHandle, input: ByteArray) =
+        service.updateAad(handle, input)
+
+    override fun update(handle: RemoteOperationHandle, input: ByteArray) =
+        service.update(handle, input)
+
+    override fun finish(handle: RemoteOperationHandle, input: ByteArray) =
+        service.finish(handle, input)
+
+    override fun abort(handle: RemoteOperationHandle) = service.abort(handle)
+
+    override fun peerDied() = service.peerDied()
+}
+
+internal class ProductionBackend : RemoteCandidateBackend {
     val calls = mutableListOf<String>()
+    var failureStage: String? = null
     private val keyHandle = RemoteKeyHandle.of(ByteArray(16) { 5 })
     private val operationHandle = RemoteOperationHandle.of(ByteArray(16) { 6 })
 
@@ -114,11 +150,15 @@ private class ProductionBackend : RemoteCandidateBackend {
 
     private fun <T> success(stage: String, value: T): CandidateResult<T> {
         calls += stage
-        return CandidateResult.Success(value)
+        return if (failureStage == stage) {
+            CandidateResult.Failure(org.matrix.TEESimulator.rka.candidate.CandidateError.TRANSPORT)
+        } else {
+            CandidateResult.Success(value)
+        }
     }
 }
 
-private fun <T> org.matrix.TEESimulator.rka.candidate.CandidateRoute<T>.remoteSuccess(): T =
+internal fun <T> org.matrix.TEESimulator.rka.candidate.CandidateRoute<T>.remoteSuccess(): T =
     ((this as org.matrix.TEESimulator.rka.candidate.CandidateRoute.Remote).result
             as CandidateResult.Success)
         .value

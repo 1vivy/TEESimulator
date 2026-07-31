@@ -10,6 +10,8 @@ import java.util.concurrent.ConcurrentHashMap
 import org.matrix.TEESimulator.attestation.DeviceAttestationService
 import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.pki.KeyBoxManager
+import org.matrix.TEESimulator.rka.identity.AndroidCandidateIdentityAuthority
+import org.matrix.TEESimulator.rka.identity.CandidateIdentityGate
 
 /**
  * Manages application configuration, including which packages to process, what operation mode to
@@ -17,6 +19,7 @@ import org.matrix.TEESimulator.pki.KeyBoxManager
  * configuration files change.
  */
 object ConfigurationManager {
+    data class ConfiguredCandidateIdentity(val uid: Int, val identityHash: ByteArray)
 
     /** Defines the processing mode for a given package. */
     enum class Mode {
@@ -92,6 +95,32 @@ object ConfigurationManager {
     fun shouldGenerate(uid: Int): Boolean = getPackageModeForUid(uid) == Mode.GENERATE
 
     fun shouldSkipUid(uid: Int): Boolean = getPackageModeForUid(uid) == null
+
+    fun configuredCandidateIdentity(): ConfiguredCandidateIdentity? =
+        runCatching {
+                val packageManager = getPackageManager() ?: return null
+                val installed =
+                    if (Build.VERSION.SDK_INT >= 33) {
+                        packageManager.getInstalledPackages(0L, 0).list
+                    } else {
+                        packageManager.getInstalledPackages(0, 0).list
+                    }
+                val candidateUids =
+                    installed
+                        .filter { it.packageName in packageModes }
+                        .mapNotNull { it.applicationInfo?.uid }
+                        .distinct()
+                if (candidateUids.size != 1) return null
+                val uid = candidateUids.single()
+                val admission =
+                    CandidateIdentityGate(
+                            { uid },
+                            AndroidCandidateIdentityAuthority(packageManager),
+                        )
+                        .admitRemote()
+                ConfiguredCandidateIdentity(uid, admission.identityHash())
+            }
+            .getOrNull()
 
     fun isAutoMode(uid: Int): Boolean {
         for (pkg in getPackagesForUid(uid)) {

@@ -196,6 +196,10 @@ class RkpJournal(private val store: RkpJournalStore) {
     private var clearBrokerBlobs: (() -> Unit)? = null
     private var resolveBrokerBlob: ((ByteArray) -> Boolean)? = null
     private var withBrokerBlob: ((ByteArray, (ByteArray) -> Unit) -> Boolean)? = null
+    private var discardBrokerBlob: ((ByteArray) -> Unit)? = null
+    private var brokerBlobDiscarded: ((ByteArray) -> Boolean)? = null
+    private var wipeBrokerBlob: ((ByteArray) -> Unit)? = null
+    private var brokerBlobWiped: ((ByteArray) -> Boolean)? = null
 
     fun begin(
         count: RkpKeyCount,
@@ -240,6 +244,10 @@ class RkpJournal(private val store: RkpJournalStore) {
         entries: List<RkpJournalEntry>,
         resolveBlob: (ByteArray) -> Boolean = { false },
         withBlob: (ByteArray, (ByteArray) -> Unit) -> Boolean = { _, _ -> false },
+        discardBlob: ((ByteArray) -> Unit)? = null,
+        blobDiscarded: ((ByteArray) -> Boolean)? = null,
+        wipeBlob: ((ByteArray) -> Unit)? = null,
+        blobWiped: ((ByteArray) -> Boolean)? = null,
         clearBlobs: () -> Unit,
     ): RkpJournalRecord {
         requireCurrent(generating)
@@ -251,6 +259,10 @@ class RkpJournal(private val store: RkpJournalStore) {
             clearBrokerBlobs = clearBlobs
             resolveBrokerBlob = resolveBlob
             withBrokerBlob = withBlob
+            discardBrokerBlob = discardBlob
+            brokerBlobDiscarded = blobDiscarded
+            wipeBrokerBlob = wipeBlob
+            brokerBlobWiped = blobWiped
             return recorded
         } catch (failure: RuntimeException) {
             clearBlobs()
@@ -291,13 +303,28 @@ class RkpJournal(private val store: RkpJournalStore) {
     fun quarantineHandles(handles: List<ByteArray>): Boolean {
         val current = store.read()?.let(RkpJournalCodec::decode) ?: return false
         val expected = current.entries.map { it.handle.copyBytes() }
-        val exact =
-            handles.size == expected.size &&
-                handles.zip(expected).all { (actual, retained) ->
-                    actual.contentEquals(retained) && resolveBrokerBlob?.invoke(actual) == true
-                }
-        persist(current.copy(state = RkpJournalState.QUARANTINED))
-        return exact
+        return handles.size == expected.size &&
+            handles.zip(expected).all { (actual, retained) -> actual.contentEquals(retained) }
+    }
+
+    fun discardRetainedBlob(handle: ByteArray) {
+        require(handle.size == 32)
+        discardBrokerBlob?.invoke(handle)
+    }
+
+    fun retainedBlobDiscarded(handle: ByteArray): Boolean {
+        require(handle.size == 32)
+        return brokerBlobDiscarded?.invoke(handle) ?: true
+    }
+
+    fun wipeRetainedBlob(handle: ByteArray) {
+        require(handle.size == 32)
+        wipeBrokerBlob?.invoke(handle)
+    }
+
+    fun retainedBlobWiped(handle: ByteArray): Boolean {
+        require(handle.size == 32)
+        return brokerBlobWiped?.invoke(handle) ?: true
     }
 
     fun completeQuarantine(batchId: ByteArray): Boolean {
@@ -313,8 +340,14 @@ class RkpJournal(private val store: RkpJournalStore) {
                     store.clear()
                     return true
                 }
-                else -> return false
+                else -> {
+                    persist(current.copy(state = RkpJournalState.QUARANTINED))
+                    requireNotNull(store.read()?.let(RkpJournalCodec::decode))
+                }
             }
+        if (current.state == RkpJournalState.QUARANTINED) {
+            current = transition(current, RkpJournalState.TERMINAL)
+        }
         if (current.state == RkpJournalState.TERMINAL) {
             transition(current, RkpJournalState.DELETE)
             store.clear()
@@ -421,6 +454,10 @@ class RkpJournal(private val store: RkpJournalStore) {
         clearBrokerBlobs = null
         resolveBrokerBlob = null
         withBrokerBlob = null
+        discardBrokerBlob = null
+        brokerBlobDiscarded = null
+        wipeBrokerBlob = null
+        brokerBlobWiped = null
     }
 
     private fun successor(state: RkpJournalState): RkpJournalState =

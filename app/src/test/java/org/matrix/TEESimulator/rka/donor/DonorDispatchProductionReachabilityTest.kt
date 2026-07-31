@@ -24,6 +24,14 @@ class DonorDispatchProductionReachabilityTest {
         assertTrue(adapterCallsDispatcher)
     }
 
+    @Test
+    fun productionRuntimeWiresAuthenticatedDiscardAndWipeEffects() {
+        val runtime = source("bridge/DonorProvisioningRuntime.kt")
+
+        assertTrue(runtime.contains("discard = journal::discardRetainedBlob"))
+        assertTrue(runtime.contains("wipe = journal::wipeRetainedBlob"))
+    }
+
     private fun source(relative: String): String {
         val path =
             Path.of(System.getProperty("user.dir"))

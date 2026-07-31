@@ -69,14 +69,16 @@ class QuarantineControllerTest {
         val handle = ByteArray(32) { 4 }
         val batch = ByteArray(16) { 5 }
         var effects = 0
-        var durable: ByteArray? = null
+        val durable = linkedMapOf<String, ByteArray>()
         val receipts =
             object : QuarantineReceiptStore {
-                override fun read(key: ByteArray): ByteArray? = durable?.copyOf()
+                override fun read(key: ByteArray): ByteArray? =
+                    durable[key.joinToString("") { "%02x".format(it) }]?.copyOf()
 
                 override fun create(key: ByteArray, receipt: ByteArray): Boolean {
-                    if (durable != null) return false
-                    durable = receipt.copyOf()
+                    val name = key.joinToString("") { "%02x".format(it) }
+                    if (name in durable) return false
+                    durable[name] = receipt.copyOf()
                     return true
                 }
             }
@@ -173,6 +175,8 @@ class QuarantineControllerTest {
             QuarantineController(
                 exactQuarantine = { throw AssertionError("effects must not execute") },
                 cancel = {},
+                discard = {},
+                wipe = {},
                 receipts =
                     object : QuarantineReceiptStore {
                         override fun read(key: ByteArray): ByteArray = ByteArray(33) { 70 }

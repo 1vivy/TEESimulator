@@ -48,28 +48,57 @@ internal data class IrpcResolvedIdentity(
 
 private class BrokerKeyBlobOwner(private val onWipe: (ByteArray) -> Unit) : AutoCloseable {
     private val blobs = mutableMapOf<String, ByteArray>()
+    private val detached = mutableMapOf<String, ByteArray>()
 
+    @Synchronized
     fun retain(handle: ByteArray, key: IrpcGeneratedKey) {
         val blob = key.moveKeyBlob()
-        if (blobs.putIfAbsent(handle.hex(), blob) != null) {
+        val name = handle.hex()
+        if (name in blobs || name in detached || blobs.putIfAbsent(name, blob) != null) {
             blob.fill(0)
             onWipe(blob)
             throw IllegalArgumentException("duplicate opaque handle")
         }
     }
 
+    @Synchronized
+    fun discard(handle: ByteArray) {
+        val name = handle.hex()
+        val blob = blobs.remove(name) ?: return
+        check(detached.putIfAbsent(name, blob) == null) { "duplicate detached handle" }
+    }
+
+    @Synchronized fun discarded(handle: ByteArray): Boolean = handle.hex() !in blobs
+
+    @Synchronized
+    fun wipe(handle: ByteArray) {
+        val blob = detached.remove(handle.hex()) ?: return
+        blob.fill(0)
+        onWipe(blob)
+    }
+
+    @Synchronized
+    fun wiped(handle: ByteArray): Boolean {
+        val name = handle.hex()
+        return name !in blobs && name !in detached
+    }
+
+    @Synchronized
     fun clear() {
-        blobs.values.forEach { blob ->
+        detached.putAll(blobs)
+        blobs.clear()
+        detached.values.forEach { blob ->
             blob.fill(0)
             onWipe(blob)
         }
-        blobs.clear()
+        detached.clear()
     }
 
-    fun isEmpty(): Boolean = blobs.isEmpty()
+    @Synchronized fun isEmpty(): Boolean = blobs.isEmpty() && detached.isEmpty()
 
-    fun contains(handle: ByteArray): Boolean = blobs.containsKey(handle.hex())
+    @Synchronized fun contains(handle: ByteArray): Boolean = blobs.containsKey(handle.hex())
 
+    @Synchronized
     fun withBlob(handle: ByteArray, action: (ByteArray) -> Unit): Boolean {
         val blob = blobs[handle.hex()] ?: return false
         action(blob)
@@ -111,8 +140,20 @@ internal constructor(
     ) {
         require(entries.size == keys.size)
         try {
-            entries.zip(keys).forEach { (entry, key) -> owner.retain(entry.handle.copyBytes(), key) }
-            journal.record(intent, entries, owner::contains, owner::withBlob, owner::clear)
+            entries.zip(keys).forEach { (entry, key) ->
+                owner.retain(entry.handle.copyBytes(), key)
+            }
+            journal.record(
+                intent,
+                entries,
+                owner::contains,
+                owner::withBlob,
+                owner::discard,
+                owner::discarded,
+                owner::wipe,
+                owner::wiped,
+                owner::clear,
+            )
         } catch (failure: RuntimeException) {
             wipe()
             throw failure

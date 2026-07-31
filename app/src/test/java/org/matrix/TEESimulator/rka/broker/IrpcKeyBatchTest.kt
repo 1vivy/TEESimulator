@@ -8,9 +8,9 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import org.matrix.TEESimulator.rka.journal.RkpIrpcIdentity
 import org.matrix.TEESimulator.rka.journal.RkpCertification
 import org.matrix.TEESimulator.rka.journal.RkpCertifiedKey
+import org.matrix.TEESimulator.rka.journal.RkpIrpcIdentity
 import org.matrix.TEESimulator.rka.journal.RkpJournal
 import org.matrix.TEESimulator.rka.journal.RkpJournalStore
 
@@ -54,16 +54,41 @@ class IrpcKeyBatchTest {
         val journal = RkpJournal(TestJournalStore())
         val count = (RkpKeyCount.parse(1) as BrokerOutcome.Success).value
         val intent = journal.begin(count, RkpIrpcIdentity.from(testIrpcIdentity()))
-        val entries =
-            journal.deriveEntries(
-                intent,
-                batch.publicKeys().zip(batch.spkiPublicKeys()),
-            )
+        val entries = journal.deriveEntries(intent, batch.publicKeys().zip(batch.spkiPublicKeys()))
         batch.recordInJournal(journal, intent, entries)
         batch.wipe()
 
         assertTrue(wiped.single().all { it == 0.toByte() })
         assertFalse(batch.toString().toByteArray().containsSubsequence(byteArrayOf(81, 82, 83, 84)))
+    }
+
+    @Test
+    fun authenticatedCleanupDetachesThenWipesTheExactOwnedBlobOnce() {
+        val wiped = mutableListOf<ByteArray>()
+        val batch =
+            IrpcKeyBatch(
+                testIrpcIdentity(),
+                listOf(IrpcGeneratedKey(byteArrayOf(3), testSpki(), byteArrayOf(71, 72, 73))),
+                { wiped += it.copyOf() },
+            )
+        val journal = RkpJournal(TestJournalStore())
+        val count = (RkpKeyCount.parse(1) as BrokerOutcome.Success).value
+        val intent = journal.begin(count, RkpIrpcIdentity.from(testIrpcIdentity()))
+        val entries = journal.deriveEntries(intent, batch.publicKeys().zip(batch.spkiPublicKeys()))
+        batch.recordInJournal(journal, intent, entries)
+        val handle = entries.single().handle.copyBytes()
+
+        assertFalse(journal.retainedBlobDiscarded(handle))
+        journal.discardRetainedBlob(handle)
+        assertTrue(journal.retainedBlobDiscarded(handle))
+        assertFalse(journal.retainedBlobWiped(handle))
+        journal.discardRetainedBlob(handle)
+        journal.wipeRetainedBlob(handle)
+        journal.wipeRetainedBlob(handle)
+
+        assertTrue(journal.retainedBlobWiped(handle))
+        assertEquals(1, wiped.size)
+        assertTrue(wiped.single().all { it == 0.toByte() })
     }
 
     @Test
@@ -198,10 +223,7 @@ class IrpcKeyBatchTest {
             digest.update(ByteArray(32) { (entry.order + 20).toByte() })
             digest.update(2.toByte())
             digest.update(
-                ByteBuffer.allocate(Long.SIZE_BYTES)
-                    .order(ByteOrder.BIG_ENDIAN)
-                    .putLong(7L)
-                    .array()
+                ByteBuffer.allocate(Long.SIZE_BYTES).order(ByteOrder.BIG_ENDIAN).putLong(7L).array()
             )
         }
         return digest.digest()

@@ -33,13 +33,13 @@ class FileQuarantineReceiptRegistryTest {
         val owner = Files.getAttribute(parent, "unix:uid", LinkOption.NOFOLLOW_LINKS) as Int
         val directory = parent.resolve("receipts")
         val registry = FileQuarantineReceiptRegistry(directory, owner)
-        repeat(64) { index ->
+        repeat(128) { index ->
             val key = ByteArray(32)
             key[0] = index.toByte()
             assertTrue(registry.create(key, ByteArray(33) { index.toByte() }))
         }
         assertThrows(IllegalArgumentException::class.java) {
-            registry.create(ByteArray(32) { 65 }, ByteArray(33))
+            registry.create(ByteArray(32).also { it[1] = 1 }, ByteArray(33))
         }
 
         val weak = parent.resolve("weak")

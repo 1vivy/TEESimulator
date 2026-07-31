@@ -10,6 +10,7 @@ import org.matrix.TEESimulator.rka.broker.BrokerDeadline
 import org.matrix.TEESimulator.rka.broker.BrokerOutcome
 import org.matrix.TEESimulator.rka.broker.IrpcClient
 import org.matrix.TEESimulator.rka.broker.QuarantineController
+import org.matrix.TEESimulator.rka.broker.QuarantineReceiptStore
 import org.matrix.TEESimulator.rka.broker.QuarantineResult
 import org.matrix.TEESimulator.rka.broker.RkpKeyCount
 import org.matrix.TEESimulator.rka.donor.AndroidDonorKeyMintDevice
@@ -41,16 +42,39 @@ object DonorProvisioningRuntime {
         }
     }
     private var activeRequestId: RequestId? = null
+    private var activeCancellation: BrokerCancellation? = null
     private val quarantineController by lazy {
+        buildQuarantineController(
+            journal,
+            quarantineReceiptStore,
+            cancel = {
+                activeCancellation?.cancel()
+                activeCancellation = null
+                activeRequestId = null
+            },
+            cancelled = { activeRequestId == null && activeCancellation == null },
+        )
+    }
+
+    internal fun buildQuarantineController(
+        journal: RkpJournal,
+        receipts: QuarantineReceiptStore,
+        cancel: () -> Unit,
+        cancelled: () -> Boolean,
+    ): QuarantineController =
         QuarantineController(
             exactQuarantine = journal::quarantineHandles,
-            cancel = { activeRequestId = null },
-            receipts = quarantineReceiptStore,
+            cancel = cancel,
+            cancelled = cancelled,
+            discard = journal::discardRetainedBlob,
+            discarded = journal::retainedBlobDiscarded,
+            wipe = journal::wipeRetainedBlob,
+            wiped = journal::retainedBlobWiped,
+            receipts = receipts,
             expectedBatch = { journal.recover()?.batchId?.copyBytes() },
             complete = journal::completeQuarantine,
             requireActiveBatch = true,
         )
-    }
 
     fun initializeLifecycle() {
         if (!started.compareAndSet(false, true)) return
@@ -117,8 +141,10 @@ object DonorProvisioningRuntime {
             AttestationChallenge.parse(request.challenge.copyBytes()) as? BrokerOutcome.Success
                 ?: return failure(request.requestId)
         activeRequestId = null
+        activeCancellation = null
         val deadline = BrokerDeadline.at(BridgeLimits.DEADLINE_MILLIS)
         val cancellation = BrokerCancellation.active()
+        activeCancellation = cancellation
         val generator = DurableIrpcKeyBatchGenerator(client, journal)
         val count =
             RkpKeyCount.parse(request.keyCount) as? BrokerOutcome.Success
@@ -192,9 +218,11 @@ object DonorProvisioningRuntime {
             }
         if (!exact) {
             activeRequestId = null
+            activeCancellation = null
             return failure(request.requestId)
         }
         activeRequestId = null
+        activeCancellation = null
         return BridgeMessage.CertificationAck(
             request.requestId,
             BrokerBatchId.of(batchBytes),

@@ -109,7 +109,7 @@ internal constructor(private val directory: Path, private val ownerUid: Int = 0)
     companion object {
         private const val KEY_BYTES = 32
         private const val RECEIPT_BYTES = 33
-        private const val MAX_RECEIPTS = 64
+        private const val MAX_RECEIPTS = 128
         private const val RECEIPT_SUFFIX = ".receipt"
         private const val TEMP_PREFIX = ".receipt-"
         private const val TEMP_SUFFIX = ".tmp"

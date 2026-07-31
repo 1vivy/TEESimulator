@@ -154,6 +154,18 @@ class RkaPackageTest(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 0, f"{digest}: {result.stderr}")
                 self.assertFalse((state / "p").exists())
+                hostile_state = root / "state ; * ? [x]"
+                hostile_state.mkdir()
+                hostile_environment = environment | {"RKA_SEPOLICY_PROBE_STATE": str(hostile_state)}
+                result = run(
+                    ["timeout", "5", "sh", str(SEPOLICY_LIVE_PROBE), "b25eeb0f71d1a9d04fb60cf3b2693bfac938b5916d1ef774973739925bded4ab"],
+                    check=False,
+                    capture_output=True,
+                    env=hostile_environment,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((hostile_state / "p").exists())
             finally:
                 stopping.set()
                 server.close()

@@ -3,8 +3,8 @@
 set -eu
 set -f
 
-readonly state=${RKA_SEPOLICY_PROBE_STATE:-/data/adb/teesimulator-rka}
-readonly socket=${RKA_SEPOLICY_PROBE_SOCKET:-$state/run/sockets/broker.sock}
+readonly state="${RKA_SEPOLICY_PROBE_STATE:-/data/adb/teesimulator-rka}"
+readonly socket="${RKA_SEPOLICY_PROBE_SOCKET:-"$state"/run/sockets/broker.sock}"
 listener=
 scratch=
 
@@ -46,6 +46,16 @@ unix_broker_probe() {
     toybox nc -U -w 2 "$socket" </dev/null >/dev/null
 }
 
+wait_for_socket() {
+    attempt=0
+    while [ "$attempt" -lt 2 ]; do
+        [ -S "$1" ] && return 0
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    [ -S "$1" ]
+}
+
 scratch_transition_probe() {
     scratch=$state/p/$2
     scratch_socket=$scratch/sockets/broker.sock
@@ -53,6 +63,7 @@ scratch_transition_probe() {
     mkdir -p "$scratch/sockets"
     : > "$scratch/sockets/create"
     toybox nc -l -U "$scratch_socket" </dev/null >/dev/null 2>&1 & listener=$!
+    wait_for_socket "$scratch_socket"
     toybox nc -U -w 2 "$scratch_socket" </dev/null >/dev/null
     stop_listener
     rm -f "$scratch_socket"

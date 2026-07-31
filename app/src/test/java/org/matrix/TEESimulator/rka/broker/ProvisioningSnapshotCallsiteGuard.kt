@@ -8,73 +8,37 @@ import java.util.Comparator
 
 internal object ProvisioningSnapshotCallsiteGuard {
     val requiredCategories =
-        setOf("system-property", "settings", "mutable-rkpd", "reflection", "exec")
+        setOf("system-property", "settings", "configuration", "mutable-rkpd", "reflection", "exec")
 
     fun requireReadOnly(vararg classes: Class<*>) {
-        val violations =
-            classes.flatMap { type ->
+        val violations = detectedCategories(*classes)
+        require(violations.isEmpty()) {
+            "ProvisioningSnapshot contains forbidden mutation callsites: ${violations.sorted()}"
+        }
+    }
+
+    fun detectedCategories(vararg classes: Class<*>): Set<String> =
+        classes
+            .flatMap { type ->
                 val resource = "/${type.name.replace('.', '/')}.class"
                 val bytes =
                     type.getResourceAsStream(resource)?.use { it.readBytes() }
                         ?: error("missing production bytecode $resource")
                 forbiddenCallsites(bytes)
             }
-        require(violations.isEmpty()) {
-            "ProvisioningSnapshot contains forbidden mutation callsites: ${violations.sorted()}"
+            .toSet()
+
+    fun runMutationDriver(): Map<String, Set<String>> {
+        val rejected = mutableMapOf<String, Set<String>>()
+        mutationFixtures().forEach { (category, sources) ->
+            rejected[category] = compileAndReject(category, sources)
         }
+        return rejected
     }
 
-    fun runMutationDriver(): Set<String> {
-        val root = Files.createTempDirectory("provisioning-snapshot-mutations-")
+    private fun compileAndReject(category: String, sources: Map<String, String>): Set<String> {
+        val root = Files.createTempDirectory("provisioning-snapshot-$category-")
         return try {
-            val sources =
-                mapOf(
-                    "android/os/SystemProperties.java" to
-                        """
-                        package android.os;
-                        public final class SystemProperties {
-                          public static void set(String key, String value) {}
-                        }
-                        """,
-                    "android/provider/Settings.java" to
-                        """
-                        package android.provider;
-                        public final class Settings {
-                          public static final class Global {
-                            public static void putString(String key, String value) {}
-                          }
-                        }
-                        """,
-                    "com/android/rkpdapp/utils/Settings.java" to
-                        """
-                        package com.android.rkpdapp.utils;
-                        public final class Settings {
-                          public static void setUrl(String value) {}
-                        }
-                        """,
-                    "android/hardware/security/keymint/IRemotelyProvisionedComponent.java" to
-                        """
-                        package android.hardware.security.keymint;
-                        public interface IRemotelyProvisionedComponent {
-                          void generateEcdsaP256KeyPair();
-                        }
-                        """,
-                    "Mutant.java" to
-                        """
-                        public final class Mutant {
-                          public static void mutate(
-                              android.hardware.security.keymint.IRemotelyProvisionedComponent rkpd)
-                              throws Exception {
-                            android.os.SystemProperties.set("key", "value");
-                            android.provider.Settings.Global.putString("key", "value");
-                            com.android.rkpdapp.utils.Settings.setUrl("https://rkp.example");
-                            rkpd.generateEcdsaP256KeyPair();
-                            Class.forName("java.lang.String");
-                            Runtime.getRuntime().exec("false");
-                          }
-                        }
-                        """,
-                )
             val files =
                 sources.map { (relative, source) ->
                     root.resolve(relative).also {
@@ -91,11 +55,102 @@ internal object ProvisioningSnapshotCallsiteGuard {
             check(compiler.waitFor() == 0) { compilerOutput }
             val bytecode = Files.readAllBytes(output.resolve("Mutant.class"))
             check(runCatching { requireReadOnlyBytecode(bytecode) }.isFailure)
-            forbiddenCallsites(bytecode).toSet()
+            forbiddenCallsites(bytecode).toSet().also { check(it == setOf(category)) }
         } finally {
             Files.walk(root).use { paths ->
                 paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
             }
+        }
+    }
+
+    private fun mutationFixtures(): Map<String, Map<String, String>> =
+        mapOf(
+            "system-property" to
+                sources(
+                    "android/os/SystemProperties.java",
+                    """
+                    package android.os;
+                    public final class SystemProperties {
+                      public static void set(String key, String value) {}
+                    }
+                    """,
+                    "android.os.SystemProperties.set(\"key\", \"value\");",
+                ),
+            "settings" to
+                sources(
+                    "android/provider/Settings.java",
+                    """
+                    package android.provider;
+                    public final class Settings {
+                      public static final class Global {
+                        public static void putString(String key, String value) {}
+                      }
+                    }
+                    """,
+                    "android.provider.Settings.Global.putString(\"key\", \"value\");",
+                ),
+            "configuration" to
+                sources(
+                    "android/provider/DeviceConfig.java",
+                    """
+                    package android.provider;
+                    public final class DeviceConfig {
+                      public static boolean setProperty(
+                          String namespace, String name, String value, boolean makeDefault) {
+                        return true;
+                      }
+                    }
+                    """,
+                    "android.provider.DeviceConfig.setProperty(\"rkpd\", \"url\", \"value\", false);",
+                ),
+            "mutable-rkpd" to
+                sources(
+                    "android/hardware/security/keymint/IRemotelyProvisionedComponent.java",
+                    """
+                    package android.hardware.security.keymint;
+                    public interface IRemotelyProvisionedComponent {
+                      void generateEcdsaP256KeyPair();
+                    }
+                    """,
+                    null,
+                    """
+                    public final class Mutant {
+                      public static void mutate(
+                          android.hardware.security.keymint.IRemotelyProvisionedComponent rkpd) {
+                        rkpd.generateEcdsaP256KeyPair();
+                      }
+                    }
+                    """,
+                ),
+            "reflection" to
+                sources(null, null, "Class.forName(\"java.lang.String\");", throwsException = true),
+            "exec" to
+                sources(null, null, "Runtime.getRuntime().exec(\"false\");", throwsException = true),
+        )
+
+    private fun sources(
+        stubPath: String?,
+        stubSource: String?,
+        call: String?,
+        mutantSource: String =
+            """
+            public final class Mutant {
+              public static void mutate() throws Exception {
+                $call
+              }
+            }
+            """,
+        throwsException: Boolean = false,
+    ): Map<String, String> {
+        val mutant =
+            if (throwsException) {
+                mutantSource
+            } else {
+                mutantSource.replace(" throws Exception", "")
+            }
+        return buildMap {
+            if (stubPath != null && stubSource != null) put(stubPath, stubSource)
+            put("Mutant.java", mutant)
         }
     }
 
@@ -113,6 +168,10 @@ internal object ProvisioningSnapshotCallsiteGuard {
                     "settings"
                 owner.endsWith("/Settings") &&
                     (method.startsWith("set") || method.startsWith("put")) -> "settings"
+                owner == "android/provider/DeviceConfig" &&
+                    (method.startsWith("set") ||
+                        method.startsWith("put") ||
+                        method.startsWith("delete")) -> "configuration"
                 owner.contains("IRemotelyProvisionedComponent") &&
                     (method.startsWith("generate") ||
                         method.startsWith("create") ||

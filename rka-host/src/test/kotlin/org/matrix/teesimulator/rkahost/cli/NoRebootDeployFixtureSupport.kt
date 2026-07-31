@@ -142,13 +142,13 @@ case "${'$'}{1-}" in
 esac
 """
 
-internal val fixtureGit =
+internal fun fixtureGit(sourceSha: String) =
     """#!/bin/bash
 set -eu
 case " ${'$'}* " in
   *" status "*) exit 0 ;;
   *" verify-commit "*) exit 0 ;;
-  *" rev-parse "*) printf '%s\n' '6cb0fbf9f6c51d09f0b7df5206291a9815bd6555' ;;
+  *" rev-parse "*) printf '%s\n' '$sourceSha' ;;
   *" cat-file "*) exit 0 ;;
   *" diff "*) exit 0 ;;
   *) exit 1 ;;

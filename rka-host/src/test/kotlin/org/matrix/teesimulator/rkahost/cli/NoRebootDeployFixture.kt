@@ -89,7 +89,7 @@ exit 0
         Files.createDirectory(devices)
         Files.createDirectory(tools)
         tools.resolve("git").also {
-            Files.writeString(it, fixtureGit)
+            Files.writeString(it, fixtureGit(sourceSha))
             Files.setPosixFilePermissions(it, PosixFilePermissions.fromString("rwx------"))
         }
     }

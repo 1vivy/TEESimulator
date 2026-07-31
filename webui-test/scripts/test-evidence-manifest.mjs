@@ -110,7 +110,9 @@ function mutation(name, change, { keepManifest = false } = {}) {
   execFileSync("git", ["-C", clone, "config", "user.email", "evidence@example.invalid"]);
   execFileSync("git", ["-C", clone, "config", "commit.gpgsign", "false"]);
   execFileSync("git", ["-C", clone, "add", fixtureTestPath]);
-  execFileSync("git", ["-C", clone, "commit", "--quiet", "-m", "add evidence test fixture"]);
+  const stagedFixture = spawnSync("git", ["-C", clone, "diff", "--cached", "--quiet"]);
+  if (stagedFixture.status === 1) execFileSync("git", ["-C", clone, "commit", "--quiet", "-m", "add evidence test fixture"]);
+  else if (stagedFixture.status !== 0) throw new Error("could not inspect staged evidence fixture");
   mkdirSync(baseline);
   const png = Buffer.alloc(24);
   Buffer.from("89504e470d0a1a0a", "hex").copy(png);

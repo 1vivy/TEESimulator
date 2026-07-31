@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import base64
 import os
+import socket
+import threading
 from pathlib import Path
 from shutil import copy2
 from subprocess import CompletedProcess, run
@@ -82,12 +84,80 @@ class RkaPackageTest(unittest.TestCase):
             ("toybox nc -l -s 127.0.0.1", "toybox stat -c"),
             ("toybox nc -l -u -s 127.0.0.1", "toybox stat -c"),
             ("toybox nc -U -w 2", "toybox stat -c"),
-            ("toybox nc -l -U \"$scratch/sockets/broker.sock\"", "toybox stat -c"),
+            ("toybox nc -l -U \"$scratch_socket\"", "toybox stat -c"),
+            ("scratch=$state/p/$2", "scratch=$state/policy-probes/$1"),
             ("mv \"$scratch/sockets/create\"", "toybox stat -c"),
+            ("rm -f \"$scratch_socket\"", ":"),
             ("rmdir \"$scratch\"", ":"),
         ):
             with self.assertRaises(AssertionError):
                 self.assert_live_probe_contract(helper.replace(*replacement))
+        self.assert_probe_dispatch_contract(helper, rule_by_digest)
+        first_case = next(line for line in helper.splitlines() if line.startswith("    ") and ") " in line and len(line.split(") ", 1)[0].strip()) == 64)
+        with self.assertRaises(AssertionError):
+            self.assert_probe_dispatch_contract(helper.replace(first_case, "", 1), rule_by_digest)
+        with self.assertRaises(AssertionError):
+            self.assert_probe_dispatch_contract(helper.replace(first_case, f"{first_case}\n{first_case}", 1), rule_by_digest)
+        with self.assertRaises(AssertionError):
+            self.assert_probe_dispatch_contract(helper.replace(" t02 ;;", " t01 ;;", 1), rule_by_digest)
+
+    def test_sepolicy_probe_helper_executes_all_manifest_hashes(self) -> None:
+        hashes = [line.split("|", 1)[0] for line in SEPOLICY_PROBES.read_text(encoding="ascii").splitlines()]
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            suffix = "/p/t01/sockets/broker.sock"
+            state = root / ("x" * (107 - len(str(root)) - 1 - len(suffix)))
+            scratch_socket = state / "p" / "t01" / "sockets" / "broker.sock"
+            self.assertEqual(len(str(scratch_socket)), 107)
+            state.mkdir()
+            tools = root / "tools"
+            tools.mkdir()
+            toybox = tools / "toybox"
+            toybox.write_text(
+                "#!/bin/sh\ncommand=$1\nshift\ncase $command in nc) exec /usr/bin/nc \"$@\" ;; stat) exec /usr/bin/stat \"$@\" ;; *) exit 64 ;; esac\n",
+                encoding="utf-8",
+            )
+            toybox.chmod(0o755)
+            broker = root / "broker.sock"
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(str(broker))
+            server.listen()
+            server.settimeout(0.1)
+            stopping = threading.Event()
+
+            def accept_connections() -> None:
+                while not stopping.is_set():
+                    try:
+                        connection, _ = server.accept()
+                    except TimeoutError:
+                        continue
+                    except OSError:
+                        return
+                    with connection:
+                        pass
+
+            thread = threading.Thread(target=accept_connections, daemon=True)
+            thread.start()
+            environment = os.environ | {
+                "PATH": f"{tools}:{os.environ['PATH']}",
+                "RKA_SEPOLICY_PROBE_STATE": str(state),
+                "RKA_SEPOLICY_PROBE_SOCKET": str(broker),
+            }
+            try:
+                for digest in hashes:
+                    result = run(
+                        ["timeout", "5", "sh", str(SEPOLICY_LIVE_PROBE), digest],
+                        check=False,
+                        capture_output=True,
+                        env=environment,
+                        text=True,
+                    )
+                    self.assertEqual(result.returncode, 0, f"{digest}: {result.stderr}")
+                self.assertFalse((state / "p").exists())
+            finally:
+                stopping.set()
+                server.close()
+                thread.join(timeout=1)
 
     def test_production_validator_rejects_every_tampered_archive_class(self) -> None:
         release = self.current_archives()["Release"]
@@ -281,15 +351,39 @@ class RkaPackageTest(unittest.TestCase):
             "toybox nc -u -w 2 127.0.0.1",
             "toybox nc -U -w 2 \"$socket\"",
             "mkdir -p \"$scratch/sockets\"",
-            "toybox nc -l -U \"$scratch/sockets/broker.sock\"",
-            "toybox nc -U -w 2 \"$scratch/sockets/broker.sock\"",
+            "scratch=$state/p/$2",
+            "scratch_socket=$scratch/sockets/broker.sock",
+            "[ \"${#scratch_socket}\" -le 107 ]",
+            "toybox nc -l -U \"$scratch_socket\"",
+            "toybox nc -U -w 2 \"$scratch_socket\"",
+            "rm -f \"$scratch_socket\"",
             "mv \"$scratch/sockets/create\" \"$scratch/sockets/renamed\"",
             "rm -f \"$scratch/sockets/renamed\"",
             "rmdir \"$scratch\"",
+            "rmdir \"$state/p\"",
             "trap cleanup EXIT HUP INT TERM",
             "cleanup",
         ):
             self.assertIn(required, helper)
+
+    def assert_probe_dispatch_contract(self, helper: str, rule_by_digest: dict[str, str]) -> None:
+        dispatch: dict[str, str] = {}
+        scratch_keys: list[str] = []
+        for line in helper.splitlines():
+            if not line.startswith("    ") or ") " not in line:
+                continue
+            digest, action = line.strip().split(") ", 1)
+            if len(digest) != 64:
+                continue
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+            self.assertNotIn(digest, dispatch)
+            dispatch[digest] = action
+            if action.startswith('scratch_transition_probe "$1" '):
+                scratch_keys.append(action.removesuffix(" ;;").rsplit(" ", 1)[1])
+        self.assertEqual(set(dispatch), set(rule_by_digest))
+        self.assertEqual(len(scratch_keys), 10)
+        self.assertEqual(len(scratch_keys), len(set(scratch_keys)))
+        self.assertEqual(set(scratch_keys), {f"t{index:02d}" for index in range(1, 11)})
 
 
 if __name__ == "__main__":

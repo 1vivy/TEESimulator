@@ -3,8 +3,8 @@
 set -eu
 set -f
 
-readonly state=/data/adb/teesimulator-rka
-readonly socket=$state/run/sockets/broker.sock
+readonly state=${RKA_SEPOLICY_PROBE_STATE:-/data/adb/teesimulator-rka}
+readonly socket=${RKA_SEPOLICY_PROBE_SOCKET:-$state/run/sockets/broker.sock}
 listener=
 scratch=
 
@@ -22,6 +22,7 @@ cleanup() {
         rm -f "$scratch/sockets/broker.sock" "$scratch/sockets/renamed" "$scratch/sockets/create"
         rmdir "$scratch/sockets" 2>/dev/null || :
         rmdir "$scratch" 2>/dev/null || :
+        rmdir "$state/p" 2>/dev/null || :
         scratch=
     fi
 }
@@ -46,16 +47,20 @@ unix_broker_probe() {
 }
 
 scratch_transition_probe() {
-    scratch=$state/policy-probes/$1
+    scratch=$state/p/$2
+    scratch_socket=$scratch/sockets/broker.sock
+    [ "${#scratch_socket}" -le 107 ] || exit 65
     mkdir -p "$scratch/sockets"
     : > "$scratch/sockets/create"
-    toybox nc -l -U "$scratch/sockets/broker.sock" </dev/null >/dev/null 2>&1 & listener=$!
-    toybox nc -U -w 2 "$scratch/sockets/broker.sock" </dev/null >/dev/null
+    toybox nc -l -U "$scratch_socket" </dev/null >/dev/null 2>&1 & listener=$!
+    toybox nc -U -w 2 "$scratch_socket" </dev/null >/dev/null
     stop_listener
+    rm -f "$scratch_socket"
     mv "$scratch/sockets/create" "$scratch/sockets/renamed"
     rm -f "$scratch/sockets/renamed"
     rmdir "$scratch/sockets"
     rmdir "$scratch"
+    rmdir "$state/p"
     scratch=
 }
 
@@ -75,17 +80,17 @@ case ${1-} in
     3a9281f83546e00271c332deaa60f9e5acde1b48d38d2f872a6d3c93a7b8ba59) udp_loopback_probe ;;
     eb5bb2cc68696f45c152aefaef40c566ac29e58b3d0952c0f2e454c0b6d6d589) udp_loopback_probe ;;
     75bfa7a588b76db9ba5167727ae7c073e1736830f4d9eb419b833f250f21fdbe) udp_loopback_probe ;;
-    b25eeb0f71d1a9d04fb60cf3b2693bfac938b5916d1ef774973739925bded4ab) scratch_transition_probe "$1" ;;
-    861d9f53be100384cab7ee82c939d6357771105123a10ef999232c5f41cb1582) scratch_transition_probe "$1" ;;
-    52456abd2e61dd74a98d9ad360b409d9d481a950ca41f0d115de394559176a24) scratch_transition_probe "$1" ;;
-    66a0cb145bebfbb97eb044cf2496d2785d183a975854b6ebca1a299c2475132a) scratch_transition_probe "$1" ;;
-    02c6fdc421f86ba69259065a757a1bebe0032036dbf7033687832b5d1df69fa4) scratch_transition_probe "$1" ;;
-    e0f3d140c7c052636351dd0c4431e04514a5c6873d981dfe7185aa3959733fea) scratch_transition_probe "$1" ;;
+    b25eeb0f71d1a9d04fb60cf3b2693bfac938b5916d1ef774973739925bded4ab) scratch_transition_probe "$1" t01 ;;
+    861d9f53be100384cab7ee82c939d6357771105123a10ef999232c5f41cb1582) scratch_transition_probe "$1" t02 ;;
+    52456abd2e61dd74a98d9ad360b409d9d481a950ca41f0d115de394559176a24) scratch_transition_probe "$1" t03 ;;
+    66a0cb145bebfbb97eb044cf2496d2785d183a975854b6ebca1a299c2475132a) scratch_transition_probe "$1" t04 ;;
+    02c6fdc421f86ba69259065a757a1bebe0032036dbf7033687832b5d1df69fa4) scratch_transition_probe "$1" t05 ;;
+    e0f3d140c7c052636351dd0c4431e04514a5c6873d981dfe7185aa3959733fea) scratch_transition_probe "$1" t06 ;;
     fd135252e3e0338845d7d55a02821b6eb4e6b541ef9b6da75b08e8ef9f44ea7d) unix_broker_probe ;;
     4c62d4f882a663888dbbc63eafcda776e18c82d226fcf7b9d22573ff3363d379) unix_broker_probe ;;
-    790119fc0382f4845b00c6e21562a837828d75295904d758905afa09a1f4639d) scratch_transition_probe "$1" ;;
-    ca99c9a626c3af17175bcd6efff7054d26bcb50ca20c69066ad3af8809da0edd) scratch_transition_probe "$1" ;;
-    1d6cbc144a30a877de24e6d6af9a9283b09e85e41b5b23a732db01c8cb1b6f0d) scratch_transition_probe "$1" ;;
-    beffd260dcd0a2749bd8b7569aca4f745fdaae0a39d070441f16c8a50969f356) scratch_transition_probe "$1" ;;
+    790119fc0382f4845b00c6e21562a837828d75295904d758905afa09a1f4639d) scratch_transition_probe "$1" t07 ;;
+    ca99c9a626c3af17175bcd6efff7054d26bcb50ca20c69066ad3af8809da0edd) scratch_transition_probe "$1" t08 ;;
+    1d6cbc144a30a877de24e6d6af9a9283b09e85e41b5b23a732db01c8cb1b6f0d) scratch_transition_probe "$1" t09 ;;
+    beffd260dcd0a2749bd8b7569aca4f745fdaae0a39d070441f16c8a50969f356) scratch_transition_probe "$1" t10 ;;
     *) exit 64 ;;
 esac

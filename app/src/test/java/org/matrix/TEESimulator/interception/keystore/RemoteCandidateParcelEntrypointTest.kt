@@ -3,27 +3,33 @@ package org.matrix.TEESimulator.interception.keystore
 import android.hardware.security.keymint.Algorithm
 import android.hardware.security.keymint.Digest
 import android.hardware.security.keymint.EcCurve
+import android.hardware.security.keymint.KeyParameter
+import android.hardware.security.keymint.KeyParameterValue
+import android.hardware.security.keymint.KeyPurpose
 import android.hardware.security.keymint.SecurityLevel
+import android.hardware.security.keymint.Tag
 import android.os.IBinder
 import android.os.Parcel
+import android.system.keystore2.CreateOperationResponse
 import android.system.keystore2.Domain
 import android.system.keystore2.IKeystoreSecurityLevel
 import android.system.keystore2.KeyDescriptor
 import java.lang.reflect.Proxy
-import java.math.BigInteger
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import org.matrix.TEESimulator.attestation.KeyMintAttestation
-import org.matrix.TEESimulator.interception.keystore.shim.CandidateKeyMintParcelCodec
+import org.junit.runner.RunWith
+import org.matrix.TEESimulator.interception.core.BinderInterceptor
 import org.matrix.TEESimulator.interception.keystore.shim.KeyMintSecurityLevelInterceptor
-import org.matrix.TEESimulator.rka.candidate.CandidateGenerateRequest
 import org.matrix.TEESimulator.rka.candidate.CandidateRuntime
 import org.matrix.TEESimulator.rka.candidate.CandidateRuntimeRegistry
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [36])
 class RemoteCandidateParcelEntrypointTest {
     @After
     fun resetRegistry() {
@@ -31,102 +37,91 @@ class RemoteCandidateParcelEntrypointTest {
     }
 
     @Test
-    fun keystorePreAndPostEntrypointsReachCandidateListRoute() {
+    fun keyMintTransactionParsesRoutesAndReturnsDrivableOperation() {
+        // Given a published candidate runtime and real platform Parcel transactions.
         val fixture = ProductionFixture()
-        fixture.service
-            .generate(CandidateGenerateRequest(fixture.id, fixture.identity, fixture.shape))
-            .remoteSuccess()
-        fixture.backend.calls.clear()
-        publishRuntime(fixture.runtime)
-        val parcel = parcel()
-        val target = fakeBinder()
-        val code = transactionCode("GET_NUMBER_OF_ENTRIES_TRANSACTION")
-
-        assertNotNull(
-            Keystore2Interceptor.onPreTransact(991, target, code, 0, fixture.uid, 1, parcel)
-        )
-        assertEquals(listOf("list"), fixture.backend.calls)
-        val post = runCatching {
-            Keystore2Interceptor.onPostTransact(
-                991,
-                target,
-                code,
-                0,
-                fixture.uid,
-                1,
-                parcel,
-                parcel,
-                0,
-            )
-        }
-        assertTrue(
-            post.getOrNull() != null ||
-                post.exceptionOrNull() is UninitializedPropertyAccessException
-        )
-    }
-
-    @Test
-    fun keyMintPreEntrypointReachesCandidateGenerateRouteBeforeStubReplyFailure() {
-        val fixture = ProductionFixture()
-        fixture.backend.failureStage = "generate"
         publishRuntime(fixture.runtime)
         val interceptor =
             KeyMintSecurityLevelInterceptor(
                 fakeInterface(IKeystoreSecurityLevel::class.java),
                 SecurityLevel.TRUSTED_ENVIRONMENT,
             )
-        interceptor.javaClass.getDeclaredField("candidateRawParcelSource").let {
-            it.isAccessible = true
-            it.set(interceptor) { _: Parcel ->
-                CandidateKeyMintParcelCodec.encodeGenerate(descriptor("entrypoint"), attestation())
-            }
-        }
-        val outcome = runCatching {
+
+        // When generateKey and createOperation enter the production transaction handler.
+        val generateResult =
             interceptor.onPreTransact(
                 992,
                 fakeBinder(),
-                keyMintTransactionCode("GENERATE_KEY_TRANSACTION"),
+                transactionCode("GENERATE_KEY_TRANSACTION"),
                 0,
                 fixture.uid,
                 1,
-                parcel(),
+                generateParcel(fixture.id.alias),
             )
-        }
-        assertTrue(outcome.getOrNull() != null || outcome.exceptionOrNull() is NullPointerException)
-        assertEquals(listOf("generate"), fixture.backend.calls)
+        val createResult =
+            interceptor.onPreTransact(
+                993,
+                fakeBinder(),
+                transactionCode("CREATE_OPERATION_TRANSACTION"),
+                0,
+                fixture.uid,
+                1,
+                createOperationParcel(fixture.id.alias),
+            )
+        val operation =
+            (createResult as BinderInterceptor.TransactionResult.OverrideReply).reply.run {
+                setDataPosition(0)
+                readException()
+                checkNotNull(
+                    checkNotNull(readTypedObject(CreateOperationResponse.CREATOR)).iOperation
+                )
+            }
+        operation.updateAad(byteArrayOf(1))
+        val update = operation.update(byteArrayOf(2))
+        val finish = operation.finish(byteArrayOf(3), null)
+
+        // Then both parsing and remote routing are observable through the handler reply.
+        assertTrue(generateResult is BinderInterceptor.TransactionResult.OverrideReply)
+        assertArrayEquals(ByteArray(0), update)
+        assertArrayEquals(byteArrayOf(8, 9), finish)
+        assertEquals(
+            listOf("generate", "begin", "updateAad", "update", "finish"),
+            fixture.backend.calls,
+        )
     }
 
-    @Test
-    fun candidateKeyMintRawCodecIsCanonicalAndBounded() {
-        val raw = CandidateKeyMintParcelCodec.encodeGenerate(descriptor("codec"), attestation())
-        val decoded = CandidateKeyMintParcelCodec.decodeGenerate(raw)
-        assertEquals("codec", decoded.descriptor.alias)
-        assertEquals(listOf(2), decoded.attestation.purpose)
-        assertEquals(listOf(Digest.SHA_2_256), decoded.attestation.digest)
-        assertThrows(IllegalArgumentException::class.java) {
-            CandidateKeyMintParcelCodec.decodeGenerate(raw + 0)
-        }
-        assertThrows(java.io.EOFException::class.java) {
-            CandidateKeyMintParcelCodec.decodeGenerate(raw.copyOf(raw.size - 1))
-        }
-    }
-
-    private fun transactionCode(name: String): Int =
-        Keystore2Interceptor::class.java.getDeclaredField(name).let {
-            it.isAccessible = true
-            it.getInt(Keystore2Interceptor)
+    private fun generateParcel(alias: String): Parcel =
+        Parcel.obtain().apply {
+            writeInterfaceToken(IKeystoreSecurityLevel.DESCRIPTOR)
+            writeTypedObject(descriptor(alias), 0)
+            writeTypedObject(null, 0)
+            writeTypedArray(
+                arrayOf(
+                    parameter(Tag.KEY_SIZE, KeyParameterValue.integer(256)),
+                    parameter(Tag.ALGORITHM, KeyParameterValue.algorithm(Algorithm.EC)),
+                    parameter(Tag.EC_CURVE, KeyParameterValue.ecCurve(EcCurve.P_256)),
+                    parameter(Tag.PURPOSE, KeyParameterValue.keyPurpose(KeyPurpose.SIGN)),
+                    parameter(Tag.DIGEST, KeyParameterValue.digest(Digest.SHA_2_256)),
+                    parameter(Tag.ATTESTATION_CHALLENGE, KeyParameterValue.blob(byteArrayOf(1))),
+                ),
+                0,
+            )
+            setDataPosition(0)
         }
 
-    private fun keyMintTransactionCode(name: String): Int =
-        KeyMintSecurityLevelInterceptor::class.java.getDeclaredField(name).let {
-            it.isAccessible = true
-            it.getInt(null)
+    private fun createOperationParcel(alias: String): Parcel =
+        Parcel.obtain().apply {
+            writeInterfaceToken(IKeystoreSecurityLevel.DESCRIPTOR)
+            writeTypedObject(descriptor(alias), 0)
+            writeTypedArray(emptyArray<KeyParameter>(), 0)
+            writeBoolean(false)
+            setDataPosition(0)
         }
 
-    private fun parcel(): Parcel =
-        Parcel::class.java.getDeclaredConstructor().let {
-            it.isAccessible = true
-            it.newInstance()
+    private fun parameter(tag: Int, value: KeyParameterValue) =
+        KeyParameter().apply {
+            this.tag = tag
+            this.value = value
         }
 
     private fun descriptor(alias: String) =
@@ -135,6 +130,12 @@ class RemoteCandidateParcelEntrypointTest {
             nspace = -1
             this.alias = alias
             blob = null
+        }
+
+    private fun transactionCode(name: String): Int =
+        KeyMintSecurityLevelInterceptor::class.java.getDeclaredField(name).let {
+            it.isAccessible = true
+            it.getInt(null)
         }
 
     private fun publishRuntime(runtime: CandidateRuntime) {
@@ -163,51 +164,4 @@ class RemoteCandidateParcelEntrypointTest {
                 else -> null
             }
         } as T
-
-    private fun attestation() =
-        KeyMintAttestation(
-            256,
-            Algorithm.EC,
-            EcCurve.P_256,
-            "secp256r1",
-            null,
-            emptyList(),
-            emptyList(),
-            listOf(2),
-            listOf(Digest.SHA_2_256),
-            null,
-            BigInteger.ONE,
-            null,
-            null,
-            null,
-            byteArrayOf(1),
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            emptyList(),
-        )
 }

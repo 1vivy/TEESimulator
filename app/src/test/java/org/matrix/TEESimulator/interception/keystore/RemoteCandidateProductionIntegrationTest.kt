@@ -1,8 +1,6 @@
 package org.matrix.TEESimulator.interception.keystore
 
 import org.junit.After
-import org.junit.Assert.assertArrayEquals
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 import org.matrix.TEESimulator.rka.candidate.CandidateCharacteristics
@@ -34,27 +32,6 @@ class RemoteCandidateProductionIntegrationTest {
         CandidateRuntimeRegistry.initializeLifecycle()
 
         assertNull(CandidateRuntimeRegistry.current())
-    }
-
-    @Test
-    fun operationBinderRoutesCompleteSequenceToRemoteRuntime() {
-        val fixture = ProductionFixture()
-        val key =
-            fixture.service
-                .generate(CandidateGenerateRequest(fixture.id, fixture.identity, fixture.shape))
-                .remoteSuccess()
-        val handle = fixture.service.begin(fixture.uid, key.id).remoteSuccess()
-        val binder =
-            checkNotNull(CandidateBinderAdapter.operation(fixture.runtime, handle).iOperation)
-
-        binder.updateAad(byteArrayOf(1))
-        assertArrayEquals(ByteArray(0), binder.update(byteArrayOf(2)))
-        assertArrayEquals(byteArrayOf(8, 9), binder.finish(byteArrayOf(3), null))
-
-        assertEquals(
-            listOf("generate", "begin", "updateAad", "update", "finish"),
-            fixture.backend.calls,
-        )
     }
 }
 

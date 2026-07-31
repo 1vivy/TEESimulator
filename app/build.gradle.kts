@@ -82,6 +82,7 @@ dependencies {
     implementation(libs.bcpkix)
     testImplementation(project(":stub"))
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
 }
 
 // --- Rust native cert gen build task ---

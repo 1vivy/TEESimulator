@@ -9,6 +9,9 @@ import org.matrix.TEESimulator.rka.broker.BrokerDeadline
 import org.matrix.TEESimulator.rka.broker.BrokerOutcome
 import org.matrix.TEESimulator.rka.broker.IrpcClient
 import org.matrix.TEESimulator.rka.broker.RkpKeyCount
+import org.matrix.TEESimulator.rka.donor.AndroidDonorKeyMintDevice
+import org.matrix.TEESimulator.rka.donor.DonorBridgeDispatcher
+import org.matrix.TEESimulator.rka.donor.DonorKeyMintBackend
 import org.matrix.TEESimulator.rka.journal.DurableIrpcKeyBatchGenerator
 import org.matrix.TEESimulator.rka.journal.FileHalCsrJournal
 import org.matrix.TEESimulator.rka.journal.FileRkpJournalStore
@@ -24,6 +27,13 @@ object DonorProvisioningRuntime {
     private val client by lazy(IrpcClient::android)
     private val journal by lazy { RkpJournal(FileRkpJournalStore.production(root)) }
     private val csrJournal by lazy { FileHalCsrJournal(root) }
+    private val donorBackend = lazy {
+        val device = AndroidDonorKeyMintDevice.resolve()
+        DonorKeyMintBackend(device, journal).also {
+            device.onDeath(it::binderDied)
+            it.reconcile()
+        }
+    }
     private var activeRequestId: RequestId? = null
 
     fun initializeLifecycle() {
@@ -33,8 +43,12 @@ object DonorProvisioningRuntime {
                     while (!Thread.currentThread().isInterrupted) {
                         when (val accepted = BrokerBridgeFactory.acceptDonor(::dispatch)) {
                             is BridgeResult.Success -> accepted.value.close()
-                            is BridgeResult.Failure ->
-                                SystemLogger.warning("RKA donor bridge exchange failed: ${accepted.error}")
+                            is BridgeResult.Failure -> {
+                                if (donorBackend.isInitialized()) donorBackend.value.peerDied()
+                                SystemLogger.warning(
+                                    "RKA donor bridge exchange failed: ${accepted.error}"
+                                )
+                            }
                         }
                     }
                 },
@@ -49,6 +63,8 @@ object DonorProvisioningRuntime {
         when (message) {
             is BridgeMessage.PublicKeyRequest -> provision(message)
             is BridgeMessage.CertificationRequest -> certify(message)
+            is BridgeMessage.CandidateCommand ->
+                DonorBridgeDispatcher.dispatch(message, donorBackend.value)
             is BridgeMessage.Cancel -> {
                 activeRequestId = null
                 val handles = message.brokerHandles()

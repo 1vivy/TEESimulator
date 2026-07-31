@@ -189,6 +189,7 @@ interface RkpJournalStore {
 class RkpJournal(private val store: RkpJournalStore) {
     private var clearBrokerBlobs: (() -> Unit)? = null
     private var resolveBrokerBlob: ((ByteArray) -> Boolean)? = null
+    private var withBrokerBlob: ((ByteArray, (ByteArray) -> Unit) -> Boolean)? = null
 
     fun begin(
         count: RkpKeyCount,
@@ -232,6 +233,7 @@ class RkpJournal(private val store: RkpJournalStore) {
         generating: RkpJournalRecord,
         entries: List<RkpJournalEntry>,
         resolveBlob: (ByteArray) -> Boolean = { false },
+        withBlob: (ByteArray, (ByteArray) -> Unit) -> Boolean = { _, _ -> false },
         clearBlobs: () -> Unit,
     ): RkpJournalRecord {
         requireCurrent(generating)
@@ -242,6 +244,7 @@ class RkpJournal(private val store: RkpJournalStore) {
             persist(recorded)
             clearBrokerBlobs = clearBlobs
             resolveBrokerBlob = resolveBlob
+            withBrokerBlob = withBlob
             return recorded
         } catch (failure: RuntimeException) {
             clearBlobs()
@@ -322,6 +325,14 @@ class RkpJournal(private val store: RkpJournalStore) {
         return true
     }
 
+    internal fun withCertifiedBlob(handle: RkpOpaqueHandle, action: (ByteArray) -> Unit): Boolean {
+        val current = store.read()?.let(RkpJournalCodec::decode) ?: return false
+        val certified = current.certification ?: return false
+        if (current.state != RkpJournalState.APP_KEY_GENERATING) return false
+        if (certified.keys.none { it.handle.matches(handle) }) return false
+        return withBrokerBlob?.invoke(handle.copyBytes(), action) == true
+    }
+
     private fun task14Binding(certification: RkpCertification): ByteArray {
         val batch = MessageDigest.getInstance("SHA-256")
         certification.keys.forEach { key ->
@@ -387,6 +398,7 @@ class RkpJournal(private val store: RkpJournalStore) {
         clearBrokerBlobs?.invoke()
         clearBrokerBlobs = null
         resolveBrokerBlob = null
+        withBrokerBlob = null
     }
 
     private fun successor(state: RkpJournalState): RkpJournalState =

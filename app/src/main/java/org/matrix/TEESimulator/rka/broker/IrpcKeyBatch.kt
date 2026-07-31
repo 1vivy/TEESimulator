@@ -70,6 +70,12 @@ private class BrokerKeyBlobOwner(private val onWipe: (ByteArray) -> Unit) : Auto
 
     fun contains(handle: ByteArray): Boolean = blobs.containsKey(handle.hex())
 
+    fun withBlob(handle: ByteArray, action: (ByteArray) -> Unit): Boolean {
+        val blob = blobs[handle.hex()] ?: return false
+        action(blob)
+        return true
+    }
+
     override fun close() = clear()
 }
 
@@ -106,7 +112,7 @@ internal constructor(
         require(entries.size == keys.size)
         try {
             entries.zip(keys).forEach { (entry, key) -> owner.retain(entry.handle.copyBytes(), key) }
-            journal.record(intent, entries, owner::contains, owner::clear)
+            journal.record(intent, entries, owner::contains, owner::withBlob, owner::clear)
         } catch (failure: RuntimeException) {
             wipe()
             throw failure

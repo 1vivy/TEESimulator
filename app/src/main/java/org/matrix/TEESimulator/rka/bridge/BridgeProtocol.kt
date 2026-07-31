@@ -62,6 +62,7 @@ enum class BridgeExchangeRole(val direction: BridgeDirection, internal val tags:
             BridgeTag.UPDATE_REQUEST,
             BridgeTag.CANCEL,
             BridgeTag.CERTIFICATION_REQUEST,
+            BridgeTag.CANDIDATE_COMMAND,
         ),
     ),
     DONOR_RESPONSE(
@@ -72,6 +73,7 @@ enum class BridgeExchangeRole(val direction: BridgeDirection, internal val tags:
             BridgeTag.CANCEL,
             BridgeTag.ERROR,
             BridgeTag.CERTIFICATION_ACK,
+            BridgeTag.CANDIDATE_REPLY,
         ),
     ),
     CANDIDATE_REQUEST(

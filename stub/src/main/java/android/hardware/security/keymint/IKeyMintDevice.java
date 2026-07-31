@@ -9,6 +9,14 @@ public interface IKeyMintDevice extends IInterface {
 
     KeyMintHardwareInfo getHardwareInfo() throws RemoteException;
 
+    KeyCreationResult generateKey(KeyParameter[] keyParams, AttestationKey attestationKey)
+            throws RemoteException;
+
+    BeginResult begin(int purpose, byte[] keyBlob, KeyParameter[] params, HardwareAuthToken authToken)
+            throws RemoteException;
+
+    void deleteKey(byte[] keyBlob) throws RemoteException;
+
     class Stub {
         public static IKeyMintDevice asInterface(IBinder binder) {
             throw new UnsupportedOperationException("STUB!");

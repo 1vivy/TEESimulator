@@ -1,6 +1,6 @@
 (() => { "use strict";
 const control = "/data/adb/modules/tricky_store/rka-control.sh";
-const actions = Object.freeze({ status:"status", "role-donor":"role-donor", "role-candidate":"role-candidate", "pair-direct":"pair-direct", "rotate-pairing":"rotate-pairing", start:"start", stop:"stop", "recover-keystore2":"recover-keystore2", "export-audit":"export-audit", cleanup:"cleanup", quarantine:"quarantine" });
+const actions = Object.freeze({ status:"status", "role-donor":"role-donor", "role-candidate":"role-candidate", "pair-direct":"pair-direct", "rotate-pairing":"rotate-pairing", start:"start", stop:"stop", "recover-keystore2":"recover-keystore2", "export-audit":"export-audit", "export-evidence":"export-evidence", cleanup:"cleanup", quarantine:"quarantine" });
 const displayedFields = Object.freeze(["role","phone_role","profile_epoch","direct_profile","direct_readiness","pairing","diagnostic","sentinel","quarantine_count"]); let nonce = ""; const status = document.querySelector("#rka-status"); const commandState = document.querySelector("#command-state");
 function parseFields(stdout) { const fields = new Map(); for (const line of String(stdout).split("\n")) { const separator = line.indexOf("="); if (separator > 0) fields.set(line.slice(0, separator), line.slice(separator + 1)); } return fields; }
 function setState(message) { commandState.textContent = message; }

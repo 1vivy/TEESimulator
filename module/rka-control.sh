@@ -150,14 +150,42 @@ webui_nonce_matches() {
     [ "$webui_supplied_nonce" = "$webui_stored_nonce" ]
 }
 
-webui_rotate_nonce() {
-    webui_role=$(read_role) || return 1
-    rka_layout_is_valid || rka_initialize_layout "$webui_role" || return 1
-    webui_nonce=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n') || return 1
-    webui_nonce_is_valid "$webui_nonce" || return 1
-    rka_atomic_replace "$rka_state_root/run" "$rka_state_root/run/webui.nonce" "$webui_nonce
-" || return 1
-    printf 'next_nonce=%s\n' "$webui_nonce"
+webui_next_nonce() {
+    webui_generated_nonce=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n') || return 1
+    webui_nonce_is_valid "$webui_generated_nonce" || return 1
+    printf '%s\n' "$webui_generated_nonce"
+}
+
+webui_release_mutation_lock() {
+    [ "${webui_mutation_lock_held:-false}" = true ] || return 0
+    rmdir "$rka_state_root/run/webui.mutation.lock" || return 1
+    webui_mutation_lock_held=false
+}
+
+webui_consume_nonce() {
+    webui_supplied_nonce=$1
+    webui_nonce_is_valid "$webui_supplied_nonce" || return 1
+    rka_layout_is_valid || return 1
+    umask 077
+    mkdir "$rka_state_root/run/webui.mutation.lock" || return 1
+    chmod 700 "$rka_state_root/run/webui.mutation.lock" || {
+        rmdir "$rka_state_root/run/webui.mutation.lock"
+        return 1
+    }
+    webui_mutation_lock_held=true
+    webui_nonce_matches "$webui_supplied_nonce" || {
+        webui_release_mutation_lock
+        return 1
+    }
+    webui_new_nonce=$(webui_next_nonce) || {
+        webui_release_mutation_lock
+        return 1
+    }
+    rka_atomic_replace "$rka_state_root/run" "$rka_state_root/run/webui.nonce" "$webui_new_nonce
+" || {
+        webui_release_mutation_lock
+        return 1
+    }
 }
 
 webui_phone_role() {
@@ -169,12 +197,18 @@ webui_phone_role() {
     esac
 }
 
-webui_profile_epoch() {
-    if rka_layout_is_valid && rka_profile_is_valid; then
-        printf '%s\n' "$rka_profile_value"
-    else
-        printf '%s\n' 0
-    fi
+webui_read_active_profile() {
+    rka_layout_is_valid && rka_profile_is_valid || return 1
+    webui_profile_role=
+    webui_profile_epoch=
+    while IFS= read -r webui_profile_line || [ -n "$webui_profile_line" ]; do
+        case $webui_profile_line in
+            role=*) webui_profile_role=${webui_profile_line#role=} ;;
+            profile_epoch=*) webui_profile_epoch=${webui_profile_line#profile_epoch=} ;;
+        esac
+    done < "$rka_state_root/profiles/$RKA_PROFILE_NAME"
+    role_is_valid "$webui_profile_role" || return 1
+    case $webui_profile_epoch in '' | *[!0-9]*) return 1 ;; esac
 }
 
 webui_sentinel_status() {
@@ -194,15 +228,67 @@ webui_quarantine_count() {
     fi
 }
 
+webui_pair_request_is_valid() {
+    webui_request_path=$rka_state_root/profiles/pair.request
+    rka_private_file_is_valid "$webui_request_path" || return 1
+    [ "$(wc -c < "$webui_request_path")" -le 64 ] || return 1
+    [ "$(cat "$webui_request_path")" = "version=1
+action=PAIR_DIRECT" ]
+}
+
+webui_status_state() {
+    webui_status_path=$rka_state_root/profiles/webui-status.conf
+    webui_pairing=UNPAIRED
+    webui_direct_profile=UNAVAILABLE
+    webui_direct_readiness=NOT_READY
+    webui_diagnostic=DIAGNOSTIC_ONLY
+    if [ ! -e "$webui_status_path" ] && [ ! -L "$webui_status_path" ]; then
+        if [ -e "$rka_state_root/profiles/pair.request" ] || [ -L "$rka_state_root/profiles/pair.request" ]; then
+            webui_pair_request_is_valid || return 1
+            webui_pairing=PENDING
+            webui_direct_profile=DIRECT_NETWORK
+        fi
+        return 0
+    fi
+    rka_private_file_is_valid "$webui_status_path" || return 1
+    [ "$(wc -c < "$webui_status_path")" -le 256 ] || return 1
+    webui_status_version=false
+    webui_status_pairing=false
+    webui_status_profile=false
+    webui_status_readiness=false
+    webui_status_diagnostic=false
+    while IFS= read -r webui_status_line || [ -n "$webui_status_line" ]; do
+        webui_status_key=${webui_status_line%%=*}
+        webui_status_value=${webui_status_line#*=}
+        [ "$webui_status_key" != "$webui_status_line" ] || return 1
+        case $webui_status_key in
+            version) [ "$webui_status_version" = false ] && [ "$webui_status_value" = 1 ] || return 1; webui_status_version=true ;;
+            pairing) [ "$webui_status_pairing" = false ] || return 1; case $webui_status_value in UNPAIRED|PENDING|PAIRED) webui_pairing=$webui_status_value ;; *) return 1 ;; esac; webui_status_pairing=true ;;
+            direct_profile) [ "$webui_status_profile" = false ] || return 1; case $webui_status_value in UNAVAILABLE|DIRECT_NETWORK) webui_direct_profile=$webui_status_value ;; *) return 1 ;; esac; webui_status_profile=true ;;
+            direct_readiness) [ "$webui_status_readiness" = false ] || return 1; case $webui_status_value in NOT_READY|READY) webui_direct_readiness=$webui_status_value ;; *) return 1 ;; esac; webui_status_readiness=true ;;
+            diagnostic) [ "$webui_status_diagnostic" = false ] && [ "$webui_status_value" = DIAGNOSTIC_ONLY ] || return 1; webui_status_diagnostic=true ;;
+            *) return 1 ;;
+        esac
+    done < "$webui_status_path"
+    [ "$webui_status_version" = true ] && [ "$webui_status_pairing" = true ] && [ "$webui_status_profile" = true ] && [ "$webui_status_readiness" = true ] && [ "$webui_status_diagnostic" = true ] || return 1
+    case $webui_pairing:$webui_direct_profile:$webui_direct_readiness in
+        PAIRED:DIRECT_NETWORK:READY | PENDING:DIRECT_NETWORK:NOT_READY | UNPAIRED:UNAVAILABLE:NOT_READY) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 webui_status() {
     webui_role=$(read_role) || return 1
+    webui_read_active_profile || return 1
+    [ "$webui_role" = "$webui_profile_role" ] || return 1
+    webui_status_state || return 1
     printf 'role=%s\n' "$webui_role"
     printf 'phone_role=%s\n' "$(webui_phone_role "$webui_role")"
-    printf 'profile_epoch=%s\n' "$(webui_profile_epoch)"
-    printf '%s\n' 'direct_profile=DIRECT_NETWORK'
-    printf '%s\n' 'direct_readiness=NOT_READY'
-    printf '%s\n' 'pairing=UNPAIRED'
-    printf '%s\n' 'diagnostic=DIAGNOSTIC_ONLY'
+    printf 'profile_epoch=%s\n' "$webui_profile_epoch"
+    printf 'direct_profile=%s\n' "$webui_direct_profile"
+    printf 'direct_readiness=%s\n' "$webui_direct_readiness"
+    printf 'pairing=%s\n' "$webui_pairing"
+    printf 'diagnostic=%s\n' "$webui_diagnostic"
     printf 'sentinel=%s\n' "$(webui_sentinel_status)"
     printf 'quarantine_count=%s\n' "$(webui_quarantine_count)"
 }
@@ -214,37 +300,93 @@ webui_record_request() {
     rka_atomic_replace "$(dirname "$webui_request_path")" "$webui_request_path" "$webui_request_body"
 }
 
+webui_set_role() {
+    webui_requested_role=$1
+    role_is_valid "$webui_requested_role" || return 1
+    [ "$webui_requested_role" != DISABLED ] || return 1
+    webui_read_active_profile || return 1
+    webui_previous_role=$(read_role) || return 1
+    webui_previous_profile=$(cat "$rka_state_root/profiles/$RKA_PROFILE_NAME") || return 1
+    rka_atomic_replace "$rka_state_root/profiles" "$rka_state_root/profiles/$RKA_PROFILE_NAME" "version=1
+role=$webui_requested_role
+profile_epoch=$webui_profile_epoch
+" || return 1
+    set_role "$webui_requested_role" || {
+        rka_atomic_replace "$rka_state_root/profiles" "$rka_state_root/profiles/$RKA_PROFILE_NAME" "$webui_previous_profile
+"
+        return 1
+    }
+    if webui_read_active_profile && [ "$webui_profile_role" = "$webui_requested_role" ] && [ "$(read_role)" = "$webui_requested_role" ]; then
+        return 0
+    fi
+    set_role "$webui_previous_role" || return 1
+    rka_atomic_replace "$rka_state_root/profiles" "$rka_state_root/profiles/$RKA_PROFILE_NAME" "$webui_previous_profile
+"
+}
+
+webui_export_redacted() {
+    webui_export_kind=$1
+    case $webui_export_kind in audit|evidence) ;; *) return 1 ;; esac
+    webui_export_snapshot=$(webui_status) || return 1
+    [ "$(printf '%s' "$webui_export_snapshot" | wc -c)" -le 448 ] || return 1
+    webui_export_path=$rka_state_root/sidecar/audit/$webui_export_kind-export.txt
+    rka_atomic_replace "$rka_state_root/sidecar/audit" "$webui_export_path" "version=1
+kind=$webui_export_kind
+$webui_export_snapshot
+" || return 1
+    case $webui_export_kind in
+        audit) printf '%s\n' audit_export=REDACTED_READY ;;
+        evidence) printf '%s\n' evidence_export=REDACTED_READY ;;
+    esac
+}
+
 webui_mutation_complete() {
     webui_status || return 1
-    webui_rotate_nonce
+    printf 'next_nonce=%s\n' "$webui_new_nonce"
+}
+
+webui_action_is_valid() {
+    case $1 in
+        status|role-donor|role-candidate|pair-direct|rotate-pairing|start|stop|recover-keystore2|export-audit|export-evidence|cleanup|quarantine) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 webui_request() {
     webui_action=$1
     webui_nonce=$2
-    webui_nonce_matches "$webui_nonce" || return 1
+    webui_action_is_valid "$webui_action" || return 1
     case $webui_action in
-        status) webui_status ;;
-        role-donor) set_role DONOR && webui_mutation_complete ;;
-        role-candidate) set_role CANDIDATE && webui_mutation_complete ;;
+        status|quarantine) webui_nonce_matches "$webui_nonce" && webui_status; return $? ;;
+    esac
+    webui_consume_nonce "$webui_nonce" || return 1
+    webui_request_ok=false
+    case $webui_action in
+        role-donor) webui_set_role DONOR && webui_request_ok=true ;;
+        role-candidate) webui_set_role CANDIDATE && webui_request_ok=true ;;
         pair-direct) webui_record_request "$rka_state_root/profiles/pair.request" "version=1
 action=PAIR_DIRECT
-" && webui_mutation_complete ;;
+" && webui_request_ok=true ;;
         rotate-pairing) webui_record_request "$rka_state_root/trust/rotate.request" "version=1
 action=ROTATE_PAIRING
-" && webui_mutation_complete ;;
-        start) "$script_directory/rka-supervisor.sh" --root "$root" --state-root "$rka_state_root" start && webui_mutation_complete ;;
-        stop) "$script_directory/rka-supervisor.sh" --root "$root" --state-root "$rka_state_root" stop && webui_mutation_complete ;;
+" && webui_request_ok=true ;;
+        start) sh "$script_directory/rka-supervisor.sh" --root "$root" --state-root "$rka_state_root" start && webui_request_ok=true ;;
+        stop) sh "$script_directory/rka-supervisor.sh" --root "$root" --state-root "$rka_state_root" stop && webui_request_ok=true ;;
         recover-keystore2) webui_record_request "$rka_state_root/journal/recovery.request" "version=1
 target=KEYSTORE2
-" && printf '%s\n' recovery_target=KEYSTORE2 && webui_mutation_complete ;;
-        export-audit) webui_record_request "$rka_state_root/sidecar/audit/export.request" "version=1
-action=EXPORT_AUDIT
-" && webui_mutation_complete ;;
-        cleanup) rka_wipe_runtime && webui_mutation_complete ;;
-        quarantine) webui_status ;;
-        *) return 1 ;;
+" && printf '%s\n' recovery_target=KEYSTORE2 && webui_request_ok=true ;;
+        export-audit) webui_export_redacted audit && webui_request_ok=true ;;
+        export-evidence) webui_export_redacted evidence && webui_request_ok=true ;;
+        cleanup) rka_wipe_runtime && webui_request_ok=true ;;
     esac
+    if [ "$webui_request_ok" = true ]; then
+        webui_mutation_complete
+        webui_result=$?
+    else
+        webui_result=1
+    fi
+    webui_release_mutation_lock || webui_result=1
+    return "$webui_result"
 }
 
 while [ $# -gt 0 ]; do

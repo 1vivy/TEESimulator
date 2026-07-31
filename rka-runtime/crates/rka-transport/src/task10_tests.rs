@@ -370,6 +370,7 @@ fn retained_session_id_is_skipped_after_restart() -> Result<(), Box<dyn std::err
             (
                 SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
                 SessionLifecycle::new(),
+                0,
             ),
         )?;
         let _session = manager.open_candidate(0)?;
@@ -380,6 +381,7 @@ fn retained_session_id_is_skipped_after_restart() -> Result<(), Box<dyn std::err
         (
             SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
             SessionLifecycle::new(),
+            1,
         ),
     )?;
     assert_eq!(restarted.open_candidate(1)?.id().bytes(), [3; 32]);
@@ -398,6 +400,7 @@ fn retained_request_id_rejects_cross_kind_after_restart() -> Result<(), Box<dyn 
             (
                 SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
                 SessionLifecycle::new(),
+                0,
             ),
         )?;
         let session = manager.open_candidate(0)?;
@@ -412,6 +415,7 @@ fn retained_request_id_rejects_cross_kind_after_restart() -> Result<(), Box<dyn 
         (
             SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
             SessionLifecycle::new(),
+            2,
         ),
     )?;
     let session = restarted.open_candidate(2)?;
@@ -436,6 +440,7 @@ fn generated_request_id_skips_retained_value_after_restart()
             (
                 SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
                 SessionLifecycle::new(),
+                0,
             ),
         )?;
         let session = manager.open_candidate(0)?;
@@ -450,6 +455,7 @@ fn generated_request_id_skips_retained_value_after_restart()
         (
             SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
             SessionLifecycle::new(),
+            2,
         ),
     )?;
     let session = restarted.open_candidate(2)?;
@@ -469,6 +475,7 @@ fn repeated_retained_rng_values_exhaust_finite_budget() -> Result<(), Box<dyn st
             (
                 SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
                 SessionLifecycle::new(),
+                0,
             ),
         )?;
         let _session = manager.open_candidate(0)?;
@@ -480,6 +487,7 @@ fn repeated_retained_rng_values_exhaust_finite_budget() -> Result<(), Box<dyn st
         (
             SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
             SessionLifecycle::new(),
+            1,
         ),
     )?;
     assert!(matches!(
@@ -499,6 +507,7 @@ fn duplicate_persisted_namespace_record_fails_closed() -> Result<(), Box<dyn std
             (
                 SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
                 SessionLifecycle::new(),
+                0,
             ),
         )?;
         let _session = manager.open_candidate(0)?;
@@ -530,6 +539,7 @@ fn pending_response_accepts_error_and_rejects_correlation_mutations()
         (
             SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
             SessionLifecycle::new(),
+            0,
         ),
     )?;
     let session = manager.open_candidate(0)?;
@@ -594,6 +604,7 @@ fn live_sessions_advance_sequences_independently() -> Result<(), Box<dyn std::er
         (
             SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
             SessionLifecycle::new(),
+            0,
         ),
     )?;
     let first = manager.open_candidate(0)?;
@@ -625,6 +636,7 @@ fn closed_session_sequence_state_is_destroyed() -> Result<(), Box<dyn std::error
         (
             SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
             SessionLifecycle::new(),
+            0,
         ),
     )?;
     let first = manager.open_candidate(0)?;
@@ -653,6 +665,7 @@ fn sequence_overflow_fails_before_persistence() -> Result<(), Box<dyn std::error
         (
             SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
             lifecycle.clone(),
+            0,
         ),
     )?;
     let session = manager.open_candidate(0)?;
@@ -753,23 +766,28 @@ fn session_persistence_failure_releases_unexposed_lease() -> Result<(), Box<dyn 
         records: Mutex::new(BTreeMap::new()),
         fail_replace: true,
     };
-    let mut rejected = SessionManager::load(
+    let rejected = SessionManager::load(
         &failing,
         SequenceRng::new(vec![vec![1; 32], vec![2; 32]]),
         (
             SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
             lifecycle.clone(),
+            0,
         ),
-    )?;
+    );
     assert!(matches!(
-        rejected.open_candidate(0),
+        rejected,
         Err(SessionError::State(StateError::Storage))
     ));
     let durable = MemoryStore::new();
     let mut admitted = SessionManager::load(
         &durable,
         SequenceRng::new(vec![vec![1; 32], vec![3; 32]]),
-        (SessionScope::new(PeerSpkiHash::new([5; 32]), 9), lifecycle),
+        (
+            SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+            lifecycle,
+            1,
+        ),
     )?;
     assert_eq!(admitted.open_candidate(1)?.id().bytes(), [1; 32]);
     Ok(())
@@ -817,6 +835,7 @@ fn session_bounds_and_correlation_are_exact() -> Result<(), Box<dyn std::error::
         (
             SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
             SessionLifecycle::new(),
+            0,
         ),
     )?;
     let first = manager.open_candidate(0)?;
@@ -830,6 +849,34 @@ fn session_bounds_and_correlation_are_exact() -> Result<(), Box<dyn std::error::
         Err(SessionError::Capacity)
     ));
     assert_eq!(leases.len(), 4);
+    Ok(())
+}
+
+#[test]
+fn restart_before_expiry_does_not_restore_failure_capacity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = MemoryStore::new();
+    let scope = SessionScope::new(PeerSpkiHash::new([0x81; 32]), 9);
+    let manager = SessionManager::load(
+        &store,
+        SequenceRng::new(Vec::new()),
+        (scope, SessionLifecycle::new(), 10),
+    )?;
+    for _ in 0..8 {
+        manager.record_failure(10)?;
+    }
+    assert_eq!(manager.record_failure(10), Err(SessionError::RateLimited));
+
+    let restarted = SessionManager::load(
+        &store,
+        SequenceRng::new(Vec::new()),
+        (scope, SessionLifecycle::new(), 11),
+    )?;
+    assert_eq!(
+        restarted.record_failure(11),
+        Err(SessionError::RateLimited),
+        "restart restored failure capacity before the configured window expired"
+    );
     Ok(())
 }
 
@@ -871,7 +918,11 @@ fn profile_roles_hash_the_same_public_map() -> Result<(), Box<dyn std::error::Er
     let mut manager = SessionManager::load(
         &store,
         SequenceRng::new(vec![vec![7; 32], vec![8; 32]]),
-        (SessionScope::new(PeerSpkiHash::new([5; 32]), 3), lifecycle),
+        (
+            SessionScope::new(PeerSpkiHash::new([5; 32]), 3),
+            lifecycle,
+            0,
+        ),
     )?;
     let live = manager.open_candidate(0)?;
     let rotated = test_pki()?;

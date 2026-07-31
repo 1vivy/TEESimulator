@@ -100,17 +100,17 @@ pub fn decode(bytes: &[u8], maximum: usize) -> Result<Vec<Tombstone>, StateError
     }
 }
 
-struct Decoder<'a> {
+pub(crate) struct Decoder<'a> {
     bytes: &'a [u8],
     offset: usize,
 }
 
 impl<'a> Decoder<'a> {
-    const fn new(bytes: &'a [u8]) -> Self {
+    pub(crate) const fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, offset: 0 }
     }
 
-    fn array(&mut self) -> Result<usize, StateError> {
+    pub(crate) fn array(&mut self) -> Result<usize, StateError> {
         let (major, length) = self.header()?;
         if major != 4 {
             return Err(StateError::Corrupt);
@@ -118,7 +118,7 @@ impl<'a> Decoder<'a> {
         usize::try_from(length).map_err(|_| StateError::Corrupt)
     }
 
-    fn unsigned(&mut self) -> Result<u64, StateError> {
+    pub(crate) fn unsigned(&mut self) -> Result<u64, StateError> {
         let (major, value) = self.header()?;
         if major == 0 {
             Ok(value)
@@ -127,7 +127,7 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn bytes(&mut self) -> Result<&'a [u8], StateError> {
+    pub(crate) fn bytes(&mut self) -> Result<&'a [u8], StateError> {
         let (major, length) = self.header()?;
         if major != 2 {
             return Err(StateError::Corrupt);
@@ -135,7 +135,7 @@ impl<'a> Decoder<'a> {
         self.take(usize::try_from(length).map_err(|_| StateError::Corrupt)?)
     }
 
-    const fn complete(&self) -> bool {
+    pub(crate) const fn complete(&self) -> bool {
         self.offset == self.bytes.len()
     }
 

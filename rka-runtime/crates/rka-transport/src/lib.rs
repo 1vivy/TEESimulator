@@ -72,3 +72,5 @@ mod second_gate_audit_harness;
 mod second_gate_tls_harness;
 #[cfg(test)]
 mod task10_tests;
+#[cfg(test)]
+mod third_gate_failure_budget;

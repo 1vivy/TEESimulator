@@ -1,8 +1,9 @@
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    os::fd::AsRawFd,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicUsize, Ordering},
     },
     thread::JoinHandle,
@@ -31,6 +32,7 @@ use super::{
 const BUDGET: Duration = Duration::from_millis(35);
 const TOLERANCE: Duration = Duration::from_millis(180);
 const PEER_BUDGET: Duration = Duration::from_secs(2);
+static TLS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 struct TestCertificate {
     chain: Vec<CertificateDer<'static>>,
@@ -61,6 +63,13 @@ enum Validity {
 }
 
 fn test_pki(server_validity: Validity) -> Result<TestPki, Box<dyn std::error::Error>> {
+    test_pki_validity(server_validity, Validity::Current)
+}
+
+fn test_pki_validity(
+    server_validity: Validity,
+    client_validity: Validity,
+) -> Result<TestPki, Box<dyn std::error::Error>> {
     let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_params.key_usages = vec![
@@ -73,7 +82,37 @@ fn test_pki(server_validity: Validity) -> Result<TestPki, Box<dyn std::error::Er
     Ok(TestPki {
         root: ca.der().clone(),
         server: leaf(&issuer, true, server_validity)?,
-        client: leaf(&issuer, false, Validity::Current)?,
+        client: leaf(&issuer, false, client_validity)?,
+    })
+}
+
+fn test_pki_client_intermediate() -> Result<TestPki, Box<dyn std::error::Error>> {
+    let mut root_params = CertificateParams::new(Vec::<String>::new())?;
+    root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    root_params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyCertSign,
+    ];
+    let root_key = RcgenKeyPair::generate()?;
+    let root = root_params.self_signed(&root_key)?;
+    let root_issuer = Issuer::new(root_params, root_key);
+    let server = leaf(&root_issuer, true, Validity::Current)?;
+
+    let mut intermediate_params = CertificateParams::new(Vec::<String>::new())?;
+    intermediate_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    intermediate_params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyCertSign,
+    ];
+    let intermediate_key = RcgenKeyPair::generate()?;
+    let intermediate = intermediate_params.signed_by(&intermediate_key, &root_issuer)?;
+    let intermediate_issuer = Issuer::new(intermediate_params, intermediate_key);
+    let mut client = leaf(&intermediate_issuer, false, Validity::Current)?;
+    client.chain.push(intermediate.der().clone());
+    Ok(TestPki {
+        root: root.der().clone(),
+        server,
+        client,
     })
 }
 
@@ -420,6 +459,7 @@ fn response_backpressure(pki: &TestPki) -> Result<(), Box<dyn std::error::Error>
 #[test]
 fn aggregate_tls_deadline_boundaries_are_independently_driven()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _serial = serial_tls_tests();
     let before = std::fs::read_dir("/proc/self/fd")?.count();
     let pki = test_pki(Validity::Current)?;
     handshake_drip(&pki)?;
@@ -441,9 +481,12 @@ fn mutation_pair(
     peer: (&str, [u8; 32], [u8; 32]),
 ) -> Result<MutationResult, Box<dyn std::error::Error>> {
     let (client_name, server_pin, client_pin) = peer;
+    let started = Instant::now();
     let client = production_client(pki, (client_name, server_pin, PEER_BUDGET))?;
     let server = production_server(pki, client_pin, PEER_BUDGET)?;
     let (client_socket, server_socket) = connected_pair()?;
+    let client_link = std::fs::read_link(format!("/proc/self/fd/{}", client_socket.as_raw_fd()))?;
+    let server_link = std::fs::read_link(format!("/proc/self/fd/{}", server_socket.as_raw_fd()))?;
     let handled = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&handled);
     let worker = std::thread::spawn(move || {
@@ -454,11 +497,62 @@ fn mutation_pair(
     });
     let client_result = client.exchange(client_socket, b"must-not-dispatch");
     let server_result = worker.join().map_err(|_| "TLS mutation thread failed")?;
+    assert!(started.elapsed() < PEER_BUDGET);
+    assert!(!fd_target_is_open(&client_link)?);
+    assert!(!fd_target_is_open(&server_link)?);
     Ok((client_result, server_result, handled.load(Ordering::SeqCst)))
 }
 
 #[test]
+fn reciprocal_client_certificate_mutations_reject_before_admission()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _serial = serial_tls_tests();
+    for validity in [Validity::Expired, Validity::Future] {
+        let invalid = test_pki_validity(Validity::Current, validity)?;
+        let (client, server, handled) = mutation_pair(
+            &invalid,
+            ("localhost", invalid.server.pin, invalid.client.pin),
+        )?;
+        assert!(client.is_err());
+        assert!(server.is_err());
+        assert_eq!(handled, 0);
+    }
+
+    let mut malformed = test_pki_client_intermediate()?;
+    let intermediate = malformed
+        .client
+        .chain
+        .get_mut(1)
+        .ok_or("client intermediate certificate is missing")?;
+    *intermediate = CertificateDer::from(vec![0x30, 1, 0]);
+    let (client, server, handled) = mutation_pair(
+        &malformed,
+        ("localhost", malformed.server.pin, malformed.client.pin),
+    )?;
+    assert!(client.is_err());
+    assert!(server.is_err());
+    assert_eq!(handled, 0);
+
+    let trusted = test_pki(Validity::Current)?;
+    let foreign = test_pki(Validity::Current)?;
+    let untrusted = TestPki {
+        root: trusted.root,
+        server: trusted.server,
+        client: foreign.client,
+    };
+    let (client, server, handled) = mutation_pair(
+        &untrusted,
+        ("localhost", untrusted.server.pin, untrusted.client.pin),
+    )?;
+    assert!(client.is_err());
+    assert!(server.is_err());
+    assert_eq!(handled, 0);
+    Ok(())
+}
+
+#[test]
 fn webpki_mutations_reject_before_reciprocal_admission() -> Result<(), Box<dyn std::error::Error>> {
+    let _serial = serial_tls_tests();
     let current = test_pki(Validity::Current)?;
     let client_pin = current.client.pin;
     let (client, _server, handled) =
@@ -531,4 +625,21 @@ fn webpki_mutations_reject_before_reciprocal_admission() -> Result<(), Box<dyn s
         Err(_) => return Err("TLS downgrade thread failed".into()),
     }
     Ok(())
+}
+
+fn serial_tls_tests() -> MutexGuard<'static, ()> {
+    match TLS_TEST_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn fd_target_is_open(target: &std::path::Path) -> Result<bool, std::io::Error> {
+    for entry in std::fs::read_dir("/proc/self/fd")? {
+        let path = entry?.path();
+        if std::fs::read_link(path).is_ok_and(|open| open == target) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

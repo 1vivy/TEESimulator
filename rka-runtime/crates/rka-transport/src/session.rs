@@ -1,9 +1,12 @@
-use rka_protocol::{
-    MessageKind, PeerSpkiHash, RequestId, SessionId, request_tombstone, session_tombstone,
-};
-use rka_state::{ReplayManager, StateError, StateStore, TombstoneTime};
+use core::fmt;
 
-const MAX_ADMISSION_FAILURES: u8 = 8;
+use rka_protocol::{
+    MessageKind, PeerSpkiHash, RequestId, SessionId, request_tombstone, session_tombstone, sha256,
+};
+use rka_state::{
+    FailureBudget, FailureBudgetError, ReplayManager, StateError, StateStore, TombstoneTime,
+};
+
 use crate::{
     LiveSessionLease, SessionLifecycle,
     session_lifecycle::LifecycleError,
@@ -17,7 +20,7 @@ pub struct SessionManager<'a, S: StateStore, R: CsRng> {
     replay: ReplayManager<'a, S>,
     rng: R,
     lifecycle: SessionLifecycle,
-    failures: u8,
+    budget: FailureBudget<'a, S>,
 }
 
 impl<S: StateStore, R: CsRng> fmt::Debug for SessionManager<'_, S, R> {
@@ -31,9 +34,9 @@ impl<'a, S: StateStore, R: CsRng> SessionManager<'a, S, R> {
     pub fn load(
         store: &'a S,
         rng: R,
-        authority: (SessionScope, SessionLifecycle),
+        authority: (SessionScope, SessionLifecycle, u64),
     ) -> Result<Self, SessionError> {
-        let (scope, lifecycle) = authority;
+        let (scope, lifecycle, now) = authority;
         if scope.epoch == 0 {
             return Err(SessionError::Profile);
         }
@@ -43,12 +46,14 @@ impl<'a, S: StateStore, R: CsRng> SessionManager<'a, S, R> {
             replay: ReplayManager::load(store)?,
             rng,
             lifecycle,
-            failures: 0,
+            budget: FailureBudget::load(store, peer_namespace(scope.peer), now)
+                .map_err(map_budget)?,
         })
     }
 
     /// Opens one candidate-owned session and persists its replay tombstone.
     pub fn open_candidate(&mut self, now: u64) -> Result<LiveSessionLease, SessionError> {
+        let _budget = self.budget.admit(now).map_err(map_budget)?;
         self.lifecycle.check_admission().map_err(map_lifecycle)?;
         for _ in 0..8 {
             let session_id = SessionId::new(self.random_array()?);
@@ -130,12 +135,8 @@ impl<'a, S: StateStore, R: CsRng> SessionManager<'a, S, R> {
     }
 
     /// Consumes one local admission-error budget unit.
-    pub const fn record_failure(&mut self) -> Result<(), SessionError> {
-        if self.failures >= MAX_ADMISSION_FAILURES {
-            return Err(SessionError::RateLimited);
-        }
-        self.failures = self.failures.saturating_add(1);
-        Ok(())
+    pub fn record_failure(&self, now: u64) -> Result<(), SessionError> {
+        self.budget.record(now).map_err(map_budget)
     }
 
     fn require_live(&self, id: SessionId, now: u64) -> Result<(), SessionError> {
@@ -189,4 +190,15 @@ const fn map_lifecycle(error: LifecycleError) -> SessionError {
         LifecycleError::TimeRegression => SessionError::TimeRegression,
     }
 }
-use core::fmt;
+
+const fn map_budget(error: FailureBudgetError) -> SessionError {
+    match error {
+        FailureBudgetError::RateLimited => SessionError::RateLimited,
+        FailureBudgetError::State(error) => SessionError::State(error),
+        _ => SessionError::State(StateError::Corrupt),
+    }
+}
+
+fn peer_namespace(peer: PeerSpkiHash) -> [u8; 32] {
+    sha256(&session_tombstone(peer, 0, SessionId::new([0; 32])))
+}

@@ -71,9 +71,12 @@ object HostCli {
         )
         val artifactDigest = digest(values.getValue("--artifact"))
         val baseline = BaselineStore.read(Path.of(values.getValue("--baseline")))
+        val currentBinding = PairBinding.from(NativePairDescriptor.readOnce())
+        if (baseline.binding != currentBinding) throw HostCliException("PAIR_BINDING_MISMATCH")
         PhysicalReceipt.verify(
-            Files.readString(Path.of(values.getValue("--manifest"))),
+            EvidenceStore.read(Path.of(values.getValue("--manifest"))),
             baseline,
+            currentBinding,
             values.getValue("--source-sha"),
             artifactDigest,
             values.getValue("--nonce"),

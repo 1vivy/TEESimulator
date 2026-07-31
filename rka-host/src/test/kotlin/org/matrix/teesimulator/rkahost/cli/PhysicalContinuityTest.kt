@@ -9,10 +9,13 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class PhysicalContinuityTest {
+    private val binding =
+        PairBinding("a".repeat(64), "b".repeat(64), "c".repeat(64), "d".repeat(64))
+
     @Test
     fun rejectsChangedBootIdAndFabricatedTraceHash() {
         val baseline =
-            SentinelBaseline("sentinel", "nonce", "pair", "donor-boot", "candidate-boot", 100, 100)
+            SentinelBaseline("sentinel", "nonce", binding, "donor-boot", "candidate-boot", 100, 100)
         val manifest =
             PhysicalReceipt.create(
                 baseline,
@@ -25,7 +28,14 @@ class PhysicalContinuityTest {
                 listOf(listOf("adb", "-s", "DONOR_A", "shell", "getprop")),
             )
         assertThrows(HostCliException::class.java) {
-            PhysicalReceipt.verify(manifest, baseline, "a".repeat(40), "b".repeat(64), "nonce")
+            PhysicalReceipt.verify(
+                manifest,
+                baseline,
+                binding,
+                "a".repeat(40),
+                "b".repeat(64),
+                "nonce",
+            )
         }
         val changedHash =
             manifest.replace(
@@ -33,8 +43,28 @@ class PhysicalContinuityTest {
                 """"command_trace_sha256":"${"f".repeat(64)}"""",
             )
         assertThrows(HostCliException::class.java) {
-            PhysicalReceipt.verify(changedHash, baseline, "a".repeat(40), "b".repeat(64), "nonce")
+            PhysicalReceipt.verify(
+                changedHash,
+                baseline,
+                binding,
+                "a".repeat(40),
+                "b".repeat(64),
+                "nonce",
+            )
         }
+        val otherBinding = binding.copy(profileSha256 = "e".repeat(64))
+        val error =
+            assertThrows(HostCliException::class.java) {
+                PhysicalReceipt.verify(
+                    manifest.replace("other-boot", "donor-boot"),
+                    baseline,
+                    otherBinding,
+                    "a".repeat(40),
+                    "b".repeat(64),
+                    "nonce",
+                )
+            }
+        assertEquals("PAIR_BINDING_MISMATCH", error.message)
     }
 
     @Test
@@ -45,7 +75,7 @@ class PhysicalContinuityTest {
         path.toFile().delete()
         Files.createSymbolicLink(path, target)
         assertThrows(HostCliException::class.java) {
-            BaselineStore.create(path, SentinelBaseline("s", "n", "p", "d", "c", 1, 1))
+            BaselineStore.create(path, SentinelBaseline("s", "n", binding, "d", "c", 1, 1))
         }
         assertEquals("x", Files.readString(target))
     }
@@ -53,7 +83,7 @@ class PhysicalContinuityTest {
     @Test
     fun concurrentBaselineWritersHaveExactlyOneWinner() {
         val path = Files.createTempDirectory("baseline-race-").resolve("baseline.json")
-        val baseline = SentinelBaseline("s", "n", "p", "d", "c", 1, 1)
+        val baseline = SentinelBaseline("s", "n", binding, "d", "c", 1, 1)
         val ready = CountDownLatch(2)
         val start = CountDownLatch(1)
         val pool = Executors.newFixedThreadPool(2)

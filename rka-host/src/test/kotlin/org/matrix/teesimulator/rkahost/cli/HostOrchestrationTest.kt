@@ -3,6 +3,7 @@ package org.matrix.teesimulator.rkahost.cli
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -53,17 +54,130 @@ class HostOrchestrationTest {
         assertEquals("BASELINE_ALREADY_EXISTS", error.message)
     }
 
-    private class RecordingRunner : HostCommandRunner {
+    @Test
+    fun oldBaselineRejectsDifferentCurrentRolePair() {
+        val path = Files.createTempDirectory("sentinel-rebind-").resolve("baseline.json")
+        val runner = RecordingRunner()
+        HostOrchestrator(pair, runner).sentinelStart(path, "nonce-A")
+        val rebound =
+            DevicePairSnapshot(
+                BoundSerial.parse("DONOR_C"),
+                BoundSerial.parse("CANDIDATE_D"),
+                "b".repeat(64),
+            )
+
+        val failure =
+            assertThrows(HostCliException::class.java) {
+                HostOrchestrator(rebound, runner).sentinelSample(path)
+            }
+
+        assertEquals("PAIR_BINDING_MISMATCH", failure.message)
+    }
+
+    @Test
+    fun firstSentinelStartFailureLeavesNoReadyBaselineAndCleansUp() {
+        assertFailedStartLeavesNoBaseline(1)
+    }
+
+    @Test
+    fun secondSentinelStartFailureLeavesNoReadyBaselineAndCleansUp() {
+        assertFailedStartLeavesNoBaseline(2)
+    }
+
+    @Test
+    fun pendingStartIsCleanedBeforeDeterministicRetry() {
+        val path = Files.createTempDirectory("sentinel-pending-").resolve("baseline.json")
+        val pending =
+            SentinelBaseline(
+                "old-sentinel",
+                "old-nonce",
+                PairBinding.from(pair),
+                "donor-boot",
+                "candidate-boot",
+                100,
+                100,
+            )
+        BaselineStore.createPending(path, pending)
+        val runner = RecordingRunner()
+
+        assertThrows(HostCliException::class.java) { BaselineStore.read(path) }
+        HostOrchestrator(pair, runner).sentinelStart(path, "nonce-A")
+
+        assertFalse(BaselineStore.hasPending(path))
+        val cleanupIndex = runner.calls.indexOfFirst { "cleanup" in it }
+        val startIndex = runner.calls.indexOfFirst { "start" in it }
+        assertTrue(cleanupIndex >= 0)
+        assertTrue(startIndex > cleanupIndex)
+    }
+
+    @Test
+    fun readyLinkWithPendingMarkerFinalizesWithoutStoppingSentinel() {
+        val path = Files.createTempDirectory("sentinel-commit-recovery-").resolve("baseline.json")
+        val baseline =
+            SentinelBaseline(
+                "sentinel",
+                "nonce-A",
+                PairBinding.from(pair),
+                "donor-boot",
+                "candidate-boot",
+                100,
+                100,
+            )
+        BaselineStore.createPending(path, baseline)
+        Files.createLink(path, path.resolveSibling(".${path.fileName}.pending"))
+        val runner = RecordingRunner()
+
+        val failure =
+            assertThrows(HostCliException::class.java) {
+                HostOrchestrator(pair, runner).sentinelStart(path, "nonce-A")
+            }
+
+        assertEquals("BASELINE_ALREADY_EXISTS", failure.message)
+        assertFalse(BaselineStore.hasPending(path))
+        assertFalse(runner.calls.any { "cleanup" in it })
+    }
+
+    private fun assertFailedStartLeavesNoBaseline(failingStart: Int) {
+        val path = Files.createTempDirectory("sentinel-failure-").resolve("baseline.json")
+        val runner = RecordingRunner(failingStart)
+
+        assertThrows(HostCliException::class.java) {
+            HostOrchestrator(pair, runner).sentinelStart(path, "nonce-A")
+        }
+
+        assertFalse(Files.exists(path))
+        assertFalse(BaselineStore.hasPending(path))
+        assertTrue(runner.calls.any { "cleanup" in it })
+    }
+
+    private class RecordingRunner(private val failingStart: Int? = null) : HostCommandRunner {
         val calls = mutableListOf<List<String>>()
+        private var starts = 0
+        private var uptimeSamples = 0
 
         override fun run(argv: List<String>): HostCommandResult {
             calls += argv
+            if ("sentinel" in argv && "start" in argv && ++starts == failingStart) {
+                return HostCommandResult(1, "", "injected")
+            }
             val output =
                 when (argv.last()) {
                     "/proc/sys/kernel/random/boot_id" ->
                         if (argv[2] == "DONOR_A") "donor-boot\n" else "candidate-boot\n"
-                    "/proc/uptime" -> "123.45 1.0\n"
-                    else -> "ok\n"
+                    "/proc/uptime" -> "123.${45 + uptimeSamples++} 1.0\n"
+                    else ->
+                        if (
+                            "sentinel" in argv &&
+                                argv.any { it in setOf("start", "sample", "finish", "verify") }
+                        ) {
+                            val action =
+                                argv.first { it in setOf("start", "sample", "finish", "verify") }
+                            val id = argv[argv.indexOf("--id") + 1]
+                            val nonce = argv[argv.indexOf("--nonce") + 1]
+                            "sentinel_id=$id nonce=$nonce action=$action\n"
+                        } else {
+                            "ok\n"
+                        }
                 }
             return HostCommandResult(0, output, "")
         }

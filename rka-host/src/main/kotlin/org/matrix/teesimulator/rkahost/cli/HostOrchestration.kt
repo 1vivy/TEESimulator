@@ -1,40 +1,13 @@
 package org.matrix.teesimulator.rkahost.cli
 
 import java.nio.file.Path
-import java.time.Duration
-import java.util.concurrent.TimeUnit
-
-data class HostCommandResult(val exitCode: Int, val stdout: String, val stderr: String)
-
-fun interface HostCommandRunner {
-    fun run(argv: List<String>): HostCommandResult
-}
-
-class ProcessHostCommandRunner : HostCommandRunner {
-    override fun run(argv: List<String>): HostCommandResult {
-        val process =
-            try {
-                ProcessBuilder(argv).start()
-            } catch (_: Exception) {
-                throw HostCliException("ADB_START_FAILED")
-            }
-        if (!process.waitFor(Duration.ofSeconds(30).toMillis(), TimeUnit.MILLISECONDS)) {
-            process.destroyForcibly()
-            throw HostCliException("ADB_TIMEOUT")
-        }
-        return HostCommandResult(
-            process.exitValue(),
-            process.inputStream.bufferedReader().readText(),
-            process.errorStream.bufferedReader().readText(),
-        )
-    }
-}
 
 class HostOrchestrator(
     private val pair: DevicePairSnapshot,
     private val runner: HostCommandRunner,
 ) {
     private val calls = mutableListOf<List<String>>()
+    private val binding = PairBinding.from(pair)
 
     fun profilePair() {
         control(pair.donor, "profile-pair", "DONOR")
@@ -44,8 +17,8 @@ class HostOrchestrator(
     fun deployNoReboot(releaseZip: String) {
         if (releaseZip.isBlank()) throw HostCliException("RELEASE_PATH_INVALID")
         for (serial in serials()) {
-            invoke(listOf("adb", "-s", serial.value, "push", releaseZip, RELEASE_REMOTE))
-            control(serial, "deploy-no-reboot", RELEASE_REMOTE)
+            invoke(listOf("adb", "-s", serial.value, "push", releaseZip, RKA_RELEASE_REMOTE))
+            control(serial, "deploy-no-reboot", RKA_RELEASE_REMOTE)
         }
     }
 
@@ -53,7 +26,7 @@ class HostOrchestrator(
         val command =
             when (kind) {
                 "capability" -> listOf("shell", "getprop", "ro.build.version.release")
-                "config" -> listOf("shell", "sh", CONTROL, "snapshot-config")
+                "config" -> listOf("shell", "sh", RKA_CONTROL_PATH, "snapshot-config")
                 else -> throw HostCliException("SNAPSHOT_KIND_INVALID")
             }
         return serials().associate { it.value to invoke(adb(it, command)).stdout.trim() }
@@ -78,38 +51,48 @@ class HostOrchestrator(
     }
 
     fun sentinelStart(path: Path, nonce: String): SentinelBaseline {
+        recoverPending(path)
+        BaselineStore.requireReadyAbsent(path)
         val baseline =
             SentinelBaseline(
-                sentinelId =
-                    Hashes.sha256(
-                        "${Hashes.sha256(pair.canonical().toByteArray())}:$nonce".toByteArray()
-                    ),
+                sentinelId = Hashes.sha256("${binding.pairHash}:$nonce".toByteArray()),
                 nonce = nonce,
-                pairHash = Hashes.sha256(pair.canonical().toByteArray()),
+                binding = binding,
                 donorBootId = bootId(pair.donor),
                 candidateBootId = bootId(pair.candidate),
                 donorStartMillis = monotonicMillis(pair.donor),
                 candidateStartMillis = monotonicMillis(pair.candidate),
             )
-        BaselineStore.create(path, baseline)
-        sentinelAction(baseline, "start")
-        return baseline
+        BaselineStore.createPending(path, baseline)
+        try {
+            sentinelOne(pair.donor, baseline, "start")
+            sentinelOne(pair.candidate, baseline, "start")
+            validateStarted(baseline)
+            BaselineStore.commitPending(path, baseline)
+            return baseline
+        } catch (failure: HostCliException) {
+            if (cleanupSentinel(baseline)) BaselineStore.abortPending(path)
+            throw failure
+        }
     }
 
     fun sentinelSample(path: Path): SentinelSample {
         val baseline = BaselineStore.read(path)
+        requirePair(baseline)
         sentinelAction(baseline, "sample")
         return sample(baseline)
     }
 
     fun sentinelFinish(path: Path): SentinelSample {
         val baseline = BaselineStore.read(path)
+        requirePair(baseline)
         sentinelAction(baseline, "finish")
         return sample(baseline)
     }
 
     fun sentinelVerify(path: Path) {
         val baseline = BaselineStore.read(path)
+        requirePair(baseline)
         sentinelAction(baseline, "verify")
         val current = sample(baseline)
         if (
@@ -138,9 +121,77 @@ class HostOrchestrator(
         )
 
     private fun sentinelAction(baseline: SentinelBaseline, action: String) {
-        serials().forEach {
-            control(it, "sentinel", action, "--id", baseline.sentinelId, "--nonce", baseline.nonce)
+        serials().forEach { sentinelOne(it, baseline, action) }
+    }
+
+    private fun sentinelOne(serial: BoundSerial, baseline: SentinelBaseline, action: String) {
+        val result =
+            invoke(
+                adb(
+                    serial,
+                    listOf(
+                        "shell",
+                        "sh",
+                        RKA_CONTROL_PATH,
+                        "sentinel",
+                        action,
+                        "--id",
+                        baseline.sentinelId,
+                        "--nonce",
+                        baseline.nonce,
+                    ),
+                )
+            )
+        val expected = "sentinel_id=${baseline.sentinelId} nonce=${baseline.nonce} action=$action"
+        if (result.stdout.trim() != expected) throw HostCliException("SENTINEL_RESPONSE_INVALID")
+    }
+
+    private fun validateStarted(baseline: SentinelBaseline) {
+        if (
+            bootId(pair.donor) != baseline.donorBootId ||
+                bootId(pair.candidate) != baseline.candidateBootId
+        ) {
+            throw HostCliException("BOOT_ID_DRIFT")
         }
+        if (
+            monotonicMillis(pair.donor) < baseline.donorStartMillis ||
+                monotonicMillis(pair.candidate) < baseline.candidateStartMillis
+        ) {
+            throw HostCliException("SENTINEL_MONOTONIC_INVALID")
+        }
+    }
+
+    private fun recoverPending(path: Path) {
+        if (!BaselineStore.hasPending(path)) return
+        if (BaselineStore.finalizeCommittedPending(path)) return
+        val baseline = BaselineStore.readPending(path)
+        requirePair(baseline)
+        if (!cleanupSentinel(baseline)) throw HostCliException("SENTINEL_RECOVERY_FAILED")
+        BaselineStore.abortPending(path)
+    }
+
+    private fun cleanupSentinel(baseline: SentinelBaseline): Boolean {
+        var succeeded = true
+        for (serial in serials()) {
+            try {
+                control(
+                    serial,
+                    "sentinel",
+                    "cleanup",
+                    "--id",
+                    baseline.sentinelId,
+                    "--nonce",
+                    baseline.nonce,
+                )
+            } catch (_: HostCliException) {
+                succeeded = false
+            }
+        }
+        return succeeded
+    }
+
+    private fun requirePair(baseline: SentinelBaseline) {
+        if (baseline.binding != binding) throw HostCliException("PAIR_BINDING_MISMATCH")
     }
 
     private fun bootId(serial: BoundSerial): String =
@@ -164,7 +215,7 @@ class HostOrchestrator(
     }
 
     private fun control(serial: BoundSerial, vararg arguments: String) {
-        invoke(adb(serial, listOf("shell", "sh", CONTROL) + arguments))
+        invoke(adb(serial, listOf("shell", "sh", RKA_CONTROL_PATH) + arguments))
     }
 
     private fun adb(serial: BoundSerial, arguments: List<String>): List<String> =
@@ -191,17 +242,4 @@ class HostOrchestrator(
     private fun serials(): List<BoundSerial> = listOf(pair.donor, pair.candidate)
 
     private fun serialValues(): Set<String> = serials().mapTo(mutableSetOf()) { it.value }
-
-    companion object {
-        private const val CONTROL = "/data/adb/modules/tricky_store/rka-control.sh"
-        private const val RELEASE_REMOTE = "/data/local/tmp/teesimulator-rka.zip"
-    }
 }
-
-data class SentinelSample(
-    val sentinelId: String,
-    val donorBootId: String,
-    val candidateBootId: String,
-    val donorMillis: Long,
-    val candidateMillis: Long,
-)

@@ -6,8 +6,10 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class PhysicalVerifierTest {
+    private val binding =
+        PairBinding("a".repeat(64), "b".repeat(64), "c".repeat(64), "d".repeat(64))
     private val baseline =
-        SentinelBaseline("sentinel", "n", "pair", "donor-boot", "candidate-boot", 100, 100)
+        SentinelBaseline("sentinel", "n", binding, "donor-boot", "candidate-boot", 100, 100)
 
     @Test
     fun rejectsProbeOnlyReceipt() {
@@ -16,7 +18,14 @@ class PhysicalVerifierTest {
 """
         val error =
             assertThrows(HostCliException::class.java) {
-                PhysicalReceipt.verify(manifest, baseline, "d".repeat(40), "a".repeat(64), "n")
+                PhysicalReceipt.verify(
+                    manifest,
+                    baseline,
+                    binding,
+                    "d".repeat(40),
+                    "a".repeat(64),
+                    "n",
+                )
             }
         assertEquals("PROBE_ONLY_EVIDENCE", error.message)
     }
@@ -27,7 +36,7 @@ class PhysicalVerifierTest {
             """{"artifact_sha256":"${"a".repeat(64)}","command_trace_sha256":"${"b".repeat(64)}","contains_reboot":true,"kind":"physical-release","nonce":"n","sample_chain_sha256":"${"c".repeat(64)}","sample_count":2,"source_sha":"${"d".repeat(40)}","transport":"DIAGNOSTIC_USB","version":1}
 """
         assertThrows(HostCliException::class.java) {
-            PhysicalReceipt.verify(base, baseline, "d".repeat(40), "a".repeat(64), "n")
+            PhysicalReceipt.verify(base, baseline, binding, "d".repeat(40), "a".repeat(64), "n")
         }
     }
 
@@ -49,7 +58,7 @@ class PhysicalVerifierTest {
             )
         assertEquals(
             digest,
-            PhysicalReceipt.verify(manifest, baseline, "d".repeat(40), digest, "n"),
+            PhysicalReceipt.verify(manifest, baseline, binding, "d".repeat(40), digest, "n"),
         )
     }
 }

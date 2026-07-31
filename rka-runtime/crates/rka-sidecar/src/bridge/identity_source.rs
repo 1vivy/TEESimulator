@@ -123,6 +123,7 @@ fn open_absolute_executable(deadline: &Deadline) -> Result<OwnedFd, BridgeError>
 pub(super) struct TestIdentitySource {
     record: Option<OpenRecord>,
     process: Option<ProcessDescriptors>,
+    cleanup_root: Option<std::path::PathBuf>,
 }
 
 #[cfg(test)]
@@ -131,7 +132,13 @@ impl TestIdentitySource {
         Self {
             record: Some(record),
             process: Some(process),
+            cleanup_root: None,
         }
+    }
+
+    pub(super) fn with_cleanup_root(mut self, root: std::path::PathBuf) -> Self {
+        self.cleanup_root = Some(root);
+        self
     }
 
     pub(super) fn set_record_restore_hook(
@@ -143,6 +150,15 @@ impl TestIdentitySource {
             .ok_or(BridgeError::TrustedState)?
             .restore_after_read = Some(hook);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestIdentitySource {
+    fn drop(&mut self) {
+        if let Some(root) = self.cleanup_root.take() {
+            let _removed = std::fs::remove_dir_all(root);
+        }
     }
 }
 

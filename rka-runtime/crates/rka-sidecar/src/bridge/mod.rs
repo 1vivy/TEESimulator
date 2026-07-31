@@ -26,6 +26,8 @@ mod runtime;
 mod socket;
 #[cfg(test)]
 mod socket_tests;
+#[cfg(test)]
+mod test_identity;
 mod trusted_record;
 
 pub use codec::{EncodedFrame, decode_frame, encode_frame, read_frame};

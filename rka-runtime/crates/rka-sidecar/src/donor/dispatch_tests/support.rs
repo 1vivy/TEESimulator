@@ -1,17 +1,14 @@
 use std::{
     fs,
-    io::{Read, Write},
     os::unix::{fs::MetadataExt, net::UnixListener},
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use crate::bridge::{
-    BridgeMessage, CandidateBridgeOperation, ExchangeRole, PublicBytes, RequestId, decode_frame,
-    encode_frame,
-};
 use rka_protocol::{CborWriter, HashDomain, hash_bytes, hash_cbor, transcript_hash};
 
+mod broker;
+mod result;
 mod state;
 
 const EPOCH: u64 = 9;
@@ -65,56 +62,8 @@ impl Fixture {
         self.frame(request_id, sequence, ordinal, Some(current))
     }
 
-    fn broker_reply(ordinal: u8) -> Result<BridgeMessage, Box<dyn std::error::Error>> {
-        let mut payload = vec![0xd0 | ordinal; 16];
-        put_bytes(&mut payload, b"leaf-spki");
-        payload.push(2);
-        put_bytes(&mut payload, b"leaf");
-        put_bytes(&mut payload, b"root");
-        put_bytes(&mut payload, b"transcript-signature");
-        Ok(BridgeMessage::CandidateReply(
-            RequestId::new(u64::from(ordinal)),
-            CandidateBridgeOperation::Generate,
-            PublicBytes::bounded(&payload, 1, 1_048_571)?,
-        ))
-    }
-
-    fn generate_payload(message: BridgeMessage) -> Result<Vec<u8>, String> {
-        match message {
-            BridgeMessage::CandidateCommand(_, CandidateBridgeOperation::Generate, payload) => {
-                Ok(payload.as_slice().to_vec())
-            }
-            _ => Err("broker did not receive CandidateCommand Generate".to_owned()),
-        }
-    }
-
     pub(crate) fn serve_broker(listener: &UnixListener, ordinal: u8) -> Result<Vec<u8>, String> {
-        let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
-        let mut header = [0; 24];
-        stream
-            .read_exact(&mut header)
-            .map_err(|error| error.to_string())?;
-        let body_length = u32::from_be_bytes(
-            header[16..20]
-                .try_into()
-                .map_err(|_| "invalid bridge header")?,
-        ) as usize;
-        let mut request = header.to_vec();
-        request.resize(24_usize.saturating_add(body_length), 0);
-        stream
-            .read_exact(request.get_mut(24..).ok_or("invalid bridge body")?)
-            .map_err(|error| error.to_string())?;
-        let command = decode_frame(&request, ExchangeRole::DonorRequest)
-            .map_err(|error| error.to_string())?;
-        let response = encode_frame(
-            &Self::broker_reply(ordinal).map_err(|error| error.to_string())?,
-            ExchangeRole::DonorResponse,
-        )
-        .map_err(|error| error.to_string())?;
-        stream
-            .write_all(response.as_slice())
-            .map_err(|error| error.to_string())?;
-        Self::generate_payload(command)
+        broker::serve(listener, ordinal)
     }
 
     pub(crate) fn expected_broker_payload(ordinal: u8, prior: [u8; 32]) -> Vec<u8> {
@@ -127,6 +76,10 @@ impl Fixture {
         put_bytes(&mut payload, &CHAIN[..3]);
         put_bytes(&mut payload, &CHAIN[3..]);
         payload
+    }
+
+    pub(crate) fn expected_result_body(&self, ordinal: u8) -> Vec<u8> {
+        result::expected_body(ordinal, self.identity_hash, self.started_ms)
     }
 
     pub(crate) fn cleanup(self) -> std::io::Result<()> {

@@ -18,8 +18,6 @@ pub struct BridgeDonorBroker {
     socket: PathBuf,
     executor: RoleExecutor,
     next_request: u64,
-    #[cfg(test)]
-    pub(super) local_codec: bool,
 }
 
 impl BridgeDonorBroker {
@@ -30,9 +28,24 @@ impl BridgeDonorBroker {
             socket: socket.to_path_buf(),
             executor: RoleExecutor::new(SidecarRole::Donor),
             next_request: 1,
-            #[cfg(test)]
-            local_codec: false,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_authenticated_test(
+        socket: &Path,
+        exchanges: usize,
+    ) -> Result<Self, crate::bridge::BridgeError> {
+        Ok(Self {
+            socket: socket.to_path_buf(),
+            executor: RoleExecutor::new_with_test_identities(SidecarRole::Donor, exchanges)?,
+            next_request: 1,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn authenticated_test_exchanges(&self) -> usize {
+        self.executor.successful_test_authentications()
     }
 
     fn exchange(
@@ -50,18 +63,6 @@ impl BridgeDonorBroker {
             operation,
             PublicBytes::bounded(payload, 0, 1_048_571).map_err(|_| BrokerFailure::Rejected)?,
         );
-        #[cfg(test)]
-        let response = if self.local_codec {
-            super::broker_bridge_test::local_exchange(&self.socket, &request)?
-        } else {
-            self.executor
-                .dispatch(BrokerOperation::Donor {
-                    socket_path: &self.socket,
-                    request: &request,
-                })
-                .map_err(|_| BrokerFailure::Unavailable)?
-        };
-        #[cfg(not(test))]
         let response = self
             .executor
             .dispatch(BrokerOperation::Donor {

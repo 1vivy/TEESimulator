@@ -1,5 +1,14 @@
 use std::{os::unix::net::UnixListener, path::Path, sync::Arc, time::Duration};
 
+#[cfg(test)]
+use std::{
+    collections::VecDeque,
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+
 use super::{
     BridgeError, BridgeMessage, BrokerRole, Correlation, ExchangeRole,
     deadline::{Control, Deadline},
@@ -46,6 +55,10 @@ pub enum BrokerOperation<'a> {
 pub struct RoleExecutor {
     role: SidecarRole,
     shared: Arc<Shared>,
+    #[cfg(test)]
+    identity_sources: Mutex<VecDeque<super::identity_source::TestIdentitySource>>,
+    #[cfg(test)]
+    successful_test_authentications: AtomicUsize,
 }
 
 impl RoleExecutor {
@@ -54,7 +67,40 @@ impl RoleExecutor {
         Self {
             role,
             shared: Shared::new(),
+            #[cfg(test)]
+            identity_sources: Mutex::new(VecDeque::new()),
+            #[cfg(test)]
+            successful_test_authentications: AtomicUsize::new(0),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_test_identities(
+        role: SidecarRole,
+        count: usize,
+    ) -> Result<Self, BridgeError> {
+        let broker_role = match role {
+            SidecarRole::Donor => BrokerRole::Donor,
+            SidecarRole::Candidate => BrokerRole::Candidate,
+        };
+        let mut sources = VecDeque::new();
+        sources
+            .try_reserve(count)
+            .map_err(|_| BridgeError::Allocation)?;
+        for _ in 0..count {
+            sources.push_back(super::test_identity::ready_source(broker_role)?);
+        }
+        Ok(Self {
+            role,
+            shared: Shared::new(),
+            identity_sources: Mutex::new(sources),
+            successful_test_authentications: AtomicUsize::new(0),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn successful_test_authentications(&self) -> usize {
+        self.successful_test_authentications.load(Ordering::Acquire)
     }
 
     /// Returns the fixed topology role.
@@ -87,6 +133,14 @@ impl RoleExecutor {
                 let stream = connect_path(socket_path, &deadline)?;
                 permit.attach(&stream)?;
                 deadline.remaining()?;
+                #[cfg(test)]
+                let (authenticated, _identity_source) =
+                    self.authenticate(super::identity::AuthenticationRequest {
+                        stream: &stream,
+                        role: BrokerRole::Donor,
+                        deadline: &deadline,
+                    })?;
+                #[cfg(not(test))]
                 let authenticated =
                     authenticate_broker_peer(&stream, BrokerRole::Donor, &deadline)?;
                 let correlation = Correlation::new(request, permit.generation)?;
@@ -104,6 +158,14 @@ impl RoleExecutor {
                 let stream = accept_peer(listener, &deadline)?;
                 permit.attach(&stream)?;
                 deadline.remaining()?;
+                #[cfg(test)]
+                let (authenticated, _identity_source) =
+                    self.authenticate(super::identity::AuthenticationRequest {
+                        stream: &stream,
+                        role: BrokerRole::Candidate,
+                        deadline: &deadline,
+                    })?;
+                #[cfg(not(test))]
                 let authenticated =
                     authenticate_broker_peer(&stream, BrokerRole::Candidate, &deadline)?;
                 let request = read_message(&stream, ExchangeRole::CandidateRequest, &deadline)?;
@@ -133,5 +195,34 @@ impl RoleExecutor {
     /// Captures cleanup counters without handler material.
     pub fn snapshot(&self) -> Result<RuntimeSnapshot, BridgeError> {
         self.shared.snapshot()
+    }
+
+    #[cfg(test)]
+    fn authenticate(
+        &self,
+        request: super::identity::AuthenticationRequest<'_>,
+    ) -> Result<
+        (
+            super::peer_authorization::PeerAuthorization,
+            Option<super::identity_source::TestIdentitySource>,
+        ),
+        BridgeError,
+    > {
+        use super::identity::authenticate_with_source;
+
+        let source = self
+            .identity_sources
+            .lock()
+            .map_err(|_| BridgeError::Io)?
+            .pop_front();
+        if let Some(mut source) = source {
+            let authorization = authenticate_with_source(&mut source, request)?;
+            self.successful_test_authentications
+                .fetch_add(1, Ordering::AcqRel);
+            Ok((authorization, Some(source)))
+        } else {
+            authenticate_broker_peer(request.stream, request.role, request.deadline)
+                .map(|authorization| (authorization, None))
+        }
     }
 }

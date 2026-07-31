@@ -88,7 +88,7 @@ fn canonical_generate_crosses_live_ingress_and_advances_through_each_result()
     let ingress =
         super::DonorIngress::bind_for_owner_policy(&fixture.root, fixture.uid, fixture.gid)?;
     let mut runtime = DonorRuntime::open(&fixture.root, &fixture.broker_socket);
-    runtime.broker = BridgeDonorBroker::new_local_test(&fixture.broker_socket);
+    runtime.broker = BridgeDonorBroker::new_authenticated_test(&fixture.broker_socket, 2)?;
     assert!(runtime.is_active());
     let mut prior = fixture.initial_transcript;
     let mut first_result_head = None;
@@ -109,6 +109,10 @@ fn canonical_generate_crosses_live_ingress_and_advances_through_each_result()
         client.read_exact(&mut response)?;
         let public = decode_frame(&response)?;
         assert_eq!(public.kind, MessageKind::Result);
+        assert_eq!(
+            public.body,
+            rka_protocol::FrameBody::Response(&fixture.expected_result_body(ordinal))
+        );
         prior = public.transcript_hash;
         if ordinal == 1 {
             first_result_head = Some(prior);
@@ -117,6 +121,7 @@ fn canonical_generate_crosses_live_ingress_and_advances_through_each_result()
 
     // Then: lease-derived authority, and no envelope/caller/empty substitute, reached the broker.
     let captured = broker.join().map_err(|_| "broker thread panicked")??;
+    assert_eq!(runtime.broker.authenticated_test_exchanges(), 2);
     assert_eq!(
         captured,
         vec![

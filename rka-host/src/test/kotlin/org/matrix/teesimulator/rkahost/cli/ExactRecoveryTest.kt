@@ -53,7 +53,9 @@ class ExactRecoveryTest {
             listOf(
                 FakeRecoveryTransport(ready = false),
                 FakeRecoveryTransport(bootAfter = "boot-B"),
-                FakeRecoveryTransport(quarantineAfter = false),
+                FakeRecoveryTransport(quarantineCountAfter = 0),
+                FakeRecoveryTransport(sentinelAfter = "b".repeat(64)),
+                FakeRecoveryTransport(quarantineHashAfter = "c".repeat(64)),
             )) {
             assertThrows(ExactRecoveryException::class.java) {
                 ExactRecoveryCli(transport).recover(RecoveryRole.DONOR, RecoveryTarget.KEYSTORE2)
@@ -64,6 +66,29 @@ class ExactRecoveryTest {
                 .recover(RecoveryRole.DONOR, RecoveryTarget.RKPD)
         }
     }
+
+    @Test
+    fun sentinelAndQuarantineContinuityFailuresAreTyped() {
+        fun failure(transport: FakeRecoveryTransport): ExactRecoveryFailure =
+            assertThrows(ExactRecoveryException::class.java) {
+                    ExactRecoveryCli(transport)
+                        .recover(RecoveryRole.DONOR, RecoveryTarget.KEYSTORE2)
+                }
+                .failure
+
+        assertEquals(
+            ExactRecoveryFailure.SENTINEL_DRIFT,
+            failure(FakeRecoveryTransport(sentinelAfter = "b".repeat(64))),
+        )
+        assertEquals(
+            ExactRecoveryFailure.QUARANTINE_LOST,
+            failure(FakeRecoveryTransport(quarantineCountAfter = 0)),
+        )
+        assertEquals(
+            ExactRecoveryFailure.QUARANTINE_DRIFT,
+            failure(FakeRecoveryTransport(quarantineHashAfter = "c".repeat(64))),
+        )
+    }
 }
 
 private class FakeRecoveryTransport(
@@ -71,7 +96,9 @@ private class FakeRecoveryTransport(
     private val ready: Boolean = true,
     private val bootAfter: String = "boot-A",
     private val propertyDrift: Boolean = false,
-    private val quarantineAfter: Boolean = true,
+    private val quarantineCountAfter: Int = 1,
+    private val sentinelAfter: String = "a".repeat(64),
+    private val quarantineHashAfter: String = "b".repeat(64),
     private val dropPropertiesOnRestart: Boolean = false,
 ) : ExactRecoveryTransport {
     var mutations = false
@@ -89,7 +116,9 @@ private class FakeRecoveryTransport(
                     RecoveryService(target, 100 + it, 500 + it.toLong(), target.executable)
                 },
             properties = if (target == RecoveryTarget.RKPD) properties.toMap() else emptyMap(),
-            quarantineRetained = true,
+            sentinelHash = "a".repeat(64),
+            quarantineCount = 1,
+            quarantineHash = "b".repeat(64),
         )
 
     override fun restartExact(
@@ -127,7 +156,9 @@ private class FakeRecoveryTransport(
                 bootId = bootAfter,
                 uptimeMillis = 1_100,
                 properties = values,
-                quarantineRetained = quarantineAfter,
+                sentinelHash = sentinelAfter,
+                quarantineCount = quarantineCountAfter,
+                quarantineHash = quarantineHashAfter,
             )
     }
 }

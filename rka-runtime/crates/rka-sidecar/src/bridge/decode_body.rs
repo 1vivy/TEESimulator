@@ -28,7 +28,28 @@ pub(super) fn decode_body(
             for _ in 0..count {
                 handles.push(Hash32::new(cursor.take_array()?));
             }
-            BridgeMessage::Cancel(request_id, handles)
+            let cleanup = match cursor.take_u8()? {
+                0 => None,
+                1 => {
+                    let batch_id = BrokerBatchId::new(cursor.take_array()?);
+                    let action_count = usize::from(cursor.take_u8()?);
+                    if action_count
+                        != count
+                            .checked_mul(2)
+                            .and_then(|value| value.checked_add(1))
+                            .ok_or(BridgeError::NonCanonical)?
+                    {
+                        return Err(BridgeError::NonCanonical);
+                    }
+                    let mut action_ids = Vec::with_capacity(action_count);
+                    for _ in 0..action_count {
+                        action_ids.push(Hash32::new(cursor.take_array()?));
+                    }
+                    Some((batch_id, action_ids))
+                }
+                _ => return Err(BridgeError::NonCanonical),
+            };
+            BridgeMessage::Cancel(request_id, handles, cleanup)
         }
         6 => {
             let code = cursor.take_u8()?;

@@ -1,4 +1,8 @@
-use std::{io::Read, time::Duration};
+use std::{
+    io::{self, Read},
+    net::{TcpStream, ToSocketAddrs},
+    time::Duration,
+};
 
 use reqwest::{
     Method,
@@ -48,6 +52,10 @@ impl BoundedHttpsTransport {
         if !url.starts_with("https://") {
             return Err(ClientError::Transport);
         }
+        let posting = body.is_some();
+        if posting {
+            connect_before_upload(url)?;
+        }
         let mut request = self.client.request(method, url);
         for (name, value) in headers {
             request = request.header(*name, *value);
@@ -55,18 +63,50 @@ impl BoundedHttpsTransport {
         if let Some(value) = body {
             request = request.body(value.to_vec());
         }
-        let posting = body.is_some();
-        let response = request.send().map_err(|error| {
-            if posting && error.is_connect() {
-                ClientError::ConnectBeforeUpload
-            } else if posting {
-                ClientError::PostAmbiguous
-            } else {
-                ClientError::Transport
-            }
-        })?;
+        let response = request.send().map_err(|_| after_handoff_failure(posting))?;
         bounded_response(response, posting)
     }
+}
+
+const fn after_handoff_failure(posting: bool) -> ClientError {
+    if posting {
+        ClientError::PostAmbiguous
+    } else {
+        ClientError::Transport
+    }
+}
+
+fn connect_before_upload(url: &str) -> Result<(), ClientError> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| ClientError::Transport)?;
+    let host = parsed.host_str().ok_or(ClientError::Transport)?;
+    let port = parsed
+        .port_or_known_default()
+        .ok_or(ClientError::Transport)?;
+    let addresses = resolved_addresses((host, port).to_socket_addrs())?;
+    let mut saw_refusal = false;
+    for address in addresses.take(8) {
+        match TcpStream::connect_timeout(&address, NETWORK_TIMEOUT) {
+            Ok(stream) => {
+                drop(stream);
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                saw_refusal = true;
+            }
+            Err(_) => return Err(ClientError::PostAmbiguous),
+        }
+    }
+    if saw_refusal {
+        Err(ClientError::ConnectBeforeUpload)
+    } else {
+        Err(ClientError::PostAmbiguous)
+    }
+}
+
+fn resolved_addresses(
+    result: io::Result<impl Iterator<Item = std::net::SocketAddr>>,
+) -> Result<impl Iterator<Item = std::net::SocketAddr>, ClientError> {
+    result.map_err(|_| ClientError::PostAmbiguous)
 }
 
 impl HttpTransport for BoundedHttpsTransport {
@@ -115,12 +155,62 @@ fn bounded_response(response: Response, posting: bool) -> Result<HttpResponse, C
     response
         .take(maximum.saturating_add(1))
         .read_to_end(&mut body)
-        .map_err(|_| {
-            if posting {
-                ClientError::PostAmbiguous
-            } else {
-                ClientError::Transport
-            }
-        })?;
+        .map_err(|_| after_handoff_failure(posting))?;
     HttpResponse::new(status, headers, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::TcpListener;
+
+    use super::*;
+
+    #[test]
+    fn tls_handshake_failure_after_tcp_connect_is_never_retryable() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            drop(socket);
+        });
+        let mut transport = BoundedHttpsTransport::new().unwrap();
+        let url = format!("https://{address}/");
+
+        let result = transport.post(HttpRequest {
+            url: &url,
+            headers: &[],
+            body: b"body",
+        });
+
+        server.join().unwrap();
+        assert_eq!(result, Err(ClientError::PostAmbiguous));
+    }
+
+    #[test]
+    fn exact_tcp_refusal_before_request_handoff_is_retryable() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let mut transport = BoundedHttpsTransport::new().unwrap();
+        let url = format!("https://{address}/");
+
+        let result = transport.post(HttpRequest {
+            url: &url,
+            headers: &[],
+            body: b"body",
+        });
+
+        assert_eq!(result, Err(ClientError::ConnectBeforeUpload));
+    }
+
+    #[test]
+    fn dns_and_post_handoff_failures_are_never_retryable() {
+        let dns = resolved_addresses(Err::<std::vec::IntoIter<std::net::SocketAddr>, _>(
+            io::Error::new(io::ErrorKind::NotFound, "injected DNS failure"),
+        ));
+
+        assert!(matches!(dns, Err(ClientError::PostAmbiguous)));
+        assert_eq!(after_handoff_failure(true), ClientError::PostAmbiguous);
+        assert_eq!(after_handoff_failure(false), ClientError::Transport);
+    }
 }

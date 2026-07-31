@@ -15,7 +15,7 @@ use rka_rkp::{
     returned_serials, validate_response,
 };
 use rka_state::{
-    AmbiguousMaterial, CrashRecovery, MutationCrashState, QuarantineAction, QuarantineActions,
+    AmbiguousMaterial, CleanupIntent, CrashRecovery, MutationCrashState, QuarantineActions,
     QuarantineLedger,
 };
 use thiserror::Error;
@@ -136,6 +136,7 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
                 .into_iter()
                 .map(crate::bridge::Hash32::new)
                 .collect(),
+            None,
         );
         let _ = executor.dispatch(BrokerOperation::Donor {
             socket_path: &config.socket,
@@ -256,6 +257,7 @@ fn quarantine(
         executor,
         socket: &config.socket,
         material: &material,
+        acknowledged: false,
     };
     ledger
         .recover_crash(
@@ -269,12 +271,34 @@ struct BrokerQuarantineActions<'a> {
     executor: &'a RoleExecutor,
     socket: &'a std::path::Path,
     material: &'a AmbiguousMaterial,
+    acknowledged: bool,
 }
 
 impl QuarantineActions for BrokerQuarantineActions<'_> {
-    fn cancel(&mut self) -> bool {
+    fn execute(&mut self, intent: CleanupIntent) -> bool {
+        if self.acknowledged {
+            return self
+                .material
+                .cleanup_intents()
+                .iter()
+                .any(|expected| expected == &intent);
+        }
+        if !self
+            .material
+            .cleanup_intents()
+            .iter()
+            .any(|expected| expected == &intent)
+        {
+            return false;
+        }
         let mut request_bytes = [0_u8; 8];
         request_bytes.copy_from_slice(&self.material.request_id()[8..]);
+        let action_ids = self
+            .material
+            .cleanup_intents()
+            .iter()
+            .map(|action| Hash32::new(*action.action_id()))
+            .collect();
         let request = BridgeMessage::Cancel(
             RequestId::new(u64::from_be_bytes(request_bytes)),
             self.material
@@ -283,17 +307,19 @@ impl QuarantineActions for BrokerQuarantineActions<'_> {
                 .copied()
                 .map(Hash32::new)
                 .collect(),
+            Some((
+                crate::bridge::BrokerBatchId::new(*self.material.batch_id()),
+                action_ids,
+            )),
         );
-        self.executor
+        self.acknowledged = self
+            .executor
             .dispatch(BrokerOperation::Donor {
                 socket_path: self.socket,
                 request: &request,
             })
-            .is_ok()
-    }
-
-    fn apply(&mut self, _handle: [u8; 32], _action: QuarantineAction) -> bool {
-        true
+            .is_ok();
+        self.acknowledged
     }
 }
 

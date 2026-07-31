@@ -12,8 +12,14 @@ fixture_proc=$fixture/proc
 
 initialize_fixture() {
     mkdir -p "$fixture_proc"
+    printf '%s\n' boot-A > "$fixture/boot-id"
+    printf '%s\n' '1.000 0.000' > "$fixture/uptime"
     sh "$control" --root "$fixture_root" --state-root "$fixture_state" set-role DONOR >/dev/null
-    sh "$control" --root "$fixture_root" --state-root "$fixture_state" initialize >/dev/null
+    RKA_RECOVERY_BOOT_ID_PATH=$fixture/boot-id \
+    RKA_RECOVERY_UPTIME_PATH=$fixture/uptime \
+        sh "$control" --root "$fixture_root" --state-root "$fixture_state" initialize >/dev/null
+    printf '%s\n' retained-material > "$fixture_state/quarantine/batch-1"
+    chmod 600 "$fixture_state/quarantine/batch-1"
     printf '%s\n' \
         version=1 \
         keystore2_name=keystore2 \
@@ -25,8 +31,6 @@ initialize_fixture() {
         rkpd_property_one=remote_provisioning.hostname \
         rkpd_property_two=remote_provisioning.hostname_2 > "$fixture_state/profiles/recovery.conf"
     chmod 600 "$fixture_state/profiles/recovery.conf"
-    printf '%s\n' boot-A > "$fixture/boot-id"
-    printf '%s\n' '1.000 0.000' > "$fixture/uptime"
     printf '%s\n' 100 > "$fixture/pid"
     printf '%s\n' a > "$fixture/property-one"
     printf '%s\n' b > "$fixture/property-two"

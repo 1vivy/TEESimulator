@@ -157,11 +157,21 @@ fn body_length(message: &BridgeMessage) -> Result<usize, BridgeError> {
                 |sum, certificate| checked(checked(sum, 4)?, certificate.as_slice().len()),
             )
         }
-        BridgeMessage::Cancel(_, handles) => handles
-            .len()
-            .checked_mul(32)
-            .and_then(|length| length.checked_add(1))
-            .ok_or(BridgeError::ValueTooLarge),
+        BridgeMessage::Cancel(_, handles, cleanup) => {
+            let base = handles
+                .len()
+                .checked_mul(32)
+                .and_then(|length| length.checked_add(2))
+                .ok_or(BridgeError::ValueTooLarge)?;
+            cleanup.as_ref().map_or(Ok(base), |(_, action_ids)| {
+                action_ids
+                    .len()
+                    .checked_mul(32)
+                    .and_then(|length| length.checked_add(17))
+                    .and_then(|length| length.checked_add(base))
+                    .ok_or(BridgeError::ValueTooLarge)
+            })
+        }
         BridgeMessage::Error(..) => Ok(33),
         BridgeMessage::CertificationRequest(_, _, keys, _, _) => keys
             .len()
@@ -207,10 +217,32 @@ fn encode_body(message: &BridgeMessage, output: &mut Vec<u8>) -> Result<(), Brid
                 put_bytes(output, certificate.as_slice())?;
             }
         }
-        BridgeMessage::Cancel(_, handles) => {
+        BridgeMessage::Cancel(_, handles, cleanup) => {
             output.push(u8::try_from(handles.len()).map_err(|_| BridgeError::ValueTooLarge)?);
             for handle in handles {
                 output.extend_from_slice(handle.as_array());
+            }
+            match cleanup {
+                None => output.push(0),
+                Some((batch_id, action_ids)) => {
+                    if action_ids.len()
+                        != handles
+                            .len()
+                            .checked_mul(2)
+                            .and_then(|count| count.checked_add(1))
+                            .ok_or(BridgeError::ValueTooLarge)?
+                    {
+                        return Err(BridgeError::NonCanonical);
+                    }
+                    output.push(1);
+                    output.extend_from_slice(batch_id.as_array());
+                    output.push(
+                        u8::try_from(action_ids.len()).map_err(|_| BridgeError::ValueTooLarge)?,
+                    );
+                    for action_id in action_ids {
+                        output.extend_from_slice(action_id.as_array());
+                    }
+                }
             }
         }
         BridgeMessage::Error(_, code, detail_hash) => {

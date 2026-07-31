@@ -10,6 +10,7 @@ import org.matrix.TEESimulator.rka.broker.BrokerDeadline
 import org.matrix.TEESimulator.rka.broker.BrokerOutcome
 import org.matrix.TEESimulator.rka.broker.IrpcClient
 import org.matrix.TEESimulator.rka.broker.QuarantineController
+import org.matrix.TEESimulator.rka.broker.QuarantineReceiptStore
 import org.matrix.TEESimulator.rka.broker.QuarantineResult
 import org.matrix.TEESimulator.rka.broker.RkpKeyCount
 import org.matrix.TEESimulator.rka.donor.AndroidDonorKeyMintDevice
@@ -30,6 +31,14 @@ object DonorProvisioningRuntime {
     private val client by lazy(IrpcClient::android)
     private val journal by lazy { RkpJournal(FileRkpJournalStore.production(root)) }
     private val csrJournal by lazy { FileHalCsrJournal(root) }
+    private val quarantineReceiptStore by lazy {
+        val durable = FileRkpJournalStore(root.resolve("rka/journal/quarantine.receipt"))
+        object : QuarantineReceiptStore {
+            override fun read(): ByteArray? = durable.read()
+
+            override fun replace(receipt: ByteArray) = durable.replace(receipt)
+        }
+    }
     private val donorBackend = lazy {
         val device = AndroidDonorKeyMintDevice.resolve()
         DonorKeyMintBackend(device, journal).also {
@@ -42,6 +51,8 @@ object DonorProvisioningRuntime {
         QuarantineController(
             exactQuarantine = journal::quarantineHandles,
             cancel = { activeRequestId = null },
+            receipts = quarantineReceiptStore,
+            expectedBatch = { journal.recover()?.batchId?.copyBytes() },
         )
     }
 
@@ -76,16 +87,23 @@ object DonorProvisioningRuntime {
                 DonorBridgeDispatcher.dispatch(message, donorBackend.value)
             is BridgeMessage.Cancel -> {
                 val handles = message.brokerHandles()
+                val batchId = message.cleanupBatchId()
+                val actionIds = message.cleanupActionIds()
                 val result =
                     try {
+                        requireNotNull(batchId)
                         quarantineController.quarantine(
                             AuthenticatedQuarantineRequest.fromTrustedBridge(
                                 message.requestId,
                                 handles.map(Hash32::copyBytes),
+                                batchId,
+                                actionIds,
                             )
                         )
                     } finally {
                         handles.forEach(Hash32::close)
+                        batchId?.close()
+                        actionIds.forEach(Hash32::close)
                     }
                 if (result == QuarantineResult.QUARANTINED) {
                     BridgeMessage.Cancel(message.requestId)
@@ -108,8 +126,8 @@ object DonorProvisioningRuntime {
             RkpKeyCount.parse(request.keyCount) as? BrokerOutcome.Success
                 ?: return failure(request.requestId)
         val generated =
-            generator.generate(count.value, deadline, cancellation)
-                as? BrokerOutcome.Success ?: return failure(request.requestId)
+            generator.generate(count.value, deadline, cancellation) as? BrokerOutcome.Success
+                ?: return failure(request.requestId)
         val batch = generated.value
         val csr =
             client.generateCertificateRequest(batch, challenge.value, deadline, cancellation)
@@ -187,9 +205,5 @@ object DonorProvisioningRuntime {
     }
 
     private fun failure(requestId: RequestId): BridgeMessage.Error =
-        BridgeMessage.Error(
-            requestId,
-            BridgeErrorCode.POLICY_REJECTED,
-            Hash32.of(ByteArray(32)),
-        )
+        BridgeMessage.Error(requestId, BridgeErrorCode.POLICY_REJECTED, Hash32.of(ByteArray(32)))
 }

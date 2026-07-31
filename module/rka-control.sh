@@ -203,8 +203,61 @@ recovery_emit_snapshot() {
         printf 'property=%s|%s\n' "$recovery_property_one" "$(printf '%s' "$recovery_hash_one" | base64 | tr -d '\n')"
         printf 'property=%s|%s\n' "$recovery_property_two" "$(printf '%s' "$recovery_hash_two" | base64 | tr -d '\n')"
     fi
-    rka_path_is_private_directory "$rka_state_root/quarantine" || return 1
-    printf '%s\n' quarantine=RETAINED
+    recovery_sentinel=$rka_state_root/run/boot-continuity.state
+    rka_private_file_is_valid "$recovery_sentinel" || return 1
+    [ "$(wc -l < "$recovery_sentinel")" -eq 4 ] || return 1
+    [ "$(sed -n '1p' "$recovery_sentinel")" = version=1 ] || return 1
+    recovery_sentinel_id=$(sed -n '2s/^sentinel_id=//p' "$recovery_sentinel")
+    recovery_sentinel_boot=$(sed -n '3s/^boot_id=//p' "$recovery_sentinel")
+    recovery_sentinel_sample=$(sed -n '4s/^sample_ms=//p' "$recovery_sentinel")
+    case $recovery_sentinel_id in ????????????????????????????????) ;; *) return 1 ;; esac
+    case $recovery_sentinel_id in *[!0123456789abcdef]*) return 1 ;; esac
+    [ "$recovery_sentinel_boot" = "$recovery_boot" ] || return 1
+    case $recovery_sentinel_sample in ''|*[!0-9]*) return 1 ;; esac
+    [ "$recovery_sentinel_sample" -le "$recovery_uptime" ] || return 1
+    recovery_sentinel_hash=$(sha256sum "$recovery_sentinel" | awk '{print $1}') || return 1
+    printf 'sentinel_hash=%s\n' "$recovery_sentinel_hash"
+
+    recovery_quarantine=$rka_state_root/quarantine
+    rka_path_is_private_directory "$recovery_quarantine" || return 1
+    recovery_manifest=
+    recovery_count=0
+    recovery_entries=$(find "$recovery_quarantine" -mindepth 1 -maxdepth 1 -print | LC_ALL=C sort) || return 1
+    while IFS= read -r recovery_entry; do
+        [ -n "$recovery_entry" ] || continue
+        recovery_name=${recovery_entry##*/}
+        case $recovery_name in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+        rka_private_file_is_valid "$recovery_entry" || return 1
+        recovery_size=$(wc -c < "$recovery_entry") || return 1
+        [ "$recovery_size" -gt 0 ] && [ "$recovery_size" -le 131072 ] || return 1
+        recovery_count=$((recovery_count + 1))
+        [ "$recovery_count" -le 20 ] || return 1
+        recovery_digest=$(sha256sum "$recovery_entry" | awk '{print $1}') || return 1
+        recovery_manifest=$recovery_manifest$recovery_name'|'$recovery_size'|'$recovery_digest'
+'
+    done <<EOF
+$recovery_entries
+EOF
+    [ "$recovery_count" -gt 0 ] || return 1
+    recovery_quarantine_hash=$(printf '%s' "$recovery_manifest" | sha256sum | awk '{print $1}')
+    printf 'quarantine_count=%s\nquarantine_hash=%s\n' \
+        "$recovery_count" "$recovery_quarantine_hash"
+}
+
+ensure_boot_sentinel() {
+    recovery_boot=$(cat "${RKA_RECOVERY_BOOT_ID_PATH:-/proc/sys/kernel/random/boot_id}") || return 1
+    recovery_uptime=$(awk '{printf "%d", $1 * 1000}' "${RKA_RECOVERY_UPTIME_PATH:-/proc/uptime}") || return 1
+    recovery_sentinel=$rka_state_root/run/boot-continuity.state
+    if rka_private_file_is_valid "$recovery_sentinel" &&
+        [ "$(sed -n '3p' "$recovery_sentinel")" = "boot_id=$recovery_boot" ]; then
+        return 0
+    fi
+    recovery_sentinel_id=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n') || return 1
+    rka_atomic_replace "$rka_state_root/run" "$recovery_sentinel" "version=1
+sentinel_id=$recovery_sentinel_id
+boot_id=$recovery_boot
+sample_ms=$recovery_uptime
+"
 }
 
 recovery_snapshot() {
@@ -385,9 +438,18 @@ webui_read_active_profile() {
 webui_sentinel_status() {
     webui_sentinel_path=$rka_state_root/run/boot-continuity.state
     webui_sentinel=NOT_READY
-    if rka_private_file_is_valid "$webui_sentinel_path" && [ "$(wc -c < "$webui_sentinel_path")" -le 16 ] && [ "$(cat "$webui_sentinel_path")" = LIVE ]; then
-        webui_sentinel=LIVE
-    fi
+    rka_private_file_is_valid "$webui_sentinel_path" || return 0
+    [ "$(wc -l < "$webui_sentinel_path")" -eq 4 ] || return 0
+    [ "$(sed -n '1p' "$webui_sentinel_path")" = version=1 ] || return 0
+    webui_sentinel_id=$(sed -n '2s/^sentinel_id=//p' "$webui_sentinel_path")
+    webui_sentinel_boot=$(sed -n '3s/^boot_id=//p' "$webui_sentinel_path")
+    webui_sentinel_sample=$(sed -n '4s/^sample_ms=//p' "$webui_sentinel_path")
+    case $webui_sentinel_id in ????????????????????????????????) ;; *) return 0 ;; esac
+    case $webui_sentinel_id in *[!0123456789abcdef]*) return 0 ;; esac
+    case $webui_sentinel_sample in '' | *[!0-9]*) return 0 ;; esac
+    webui_current_boot=$(cat "${RKA_RECOVERY_BOOT_ID_PATH:-/proc/sys/kernel/random/boot_id}") || return 0
+    [ "$webui_sentinel_boot" = "$webui_current_boot" ] || return 0
+    webui_sentinel=LIVE
 }
 
 webui_quarantine_count() {
@@ -628,6 +690,10 @@ while [ $# -gt 0 ]; do
                 exit 1
             }
             rka_initialize_layout "$role" || {
+                print_inert
+                exit 1
+            }
+            ensure_boot_sentinel || {
                 print_inert
                 exit 1
             }

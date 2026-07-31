@@ -429,22 +429,44 @@ sealed class BridgeMessage : AutoCloseable {
     class Cancel(
         override val requestId: RequestId,
         handles: List<Hash32> = emptyList(),
+        batchId: BrokerBatchId? = null,
+        actionIds: List<Hash32> = emptyList(),
     ) : BridgeMessage() {
         private val values = handles.map { Hash32.of(it.copyBytes()) }
+        private val cleanupBatch = batchId?.copy()
+        private val cleanupActions = actionIds.map { Hash32.of(it.copyBytes()) }
 
         init {
             require(values.size <= BridgeLimits.MAX_PUBLIC_KEYS)
+            require(
+                (cleanupBatch == null && cleanupActions.isEmpty()) ||
+                    (cleanupBatch != null && cleanupActions.size == 1 + values.size * 2)
+            )
         }
 
         fun brokerHandles(): List<Hash32> = values.map { Hash32.of(it.copyBytes()) }
 
-        override fun equals(other: Any?): Boolean = other is Cancel && requestId == other.requestId
+        fun cleanupBatchId(): BrokerBatchId? = cleanupBatch?.copy()
 
-        override fun hashCode(): Int = requestId.hashCode()
+        fun cleanupActionIds(): List<Hash32> = cleanupActions.map { Hash32.of(it.copyBytes()) }
+
+        override fun equals(other: Any?): Boolean =
+            other is Cancel &&
+                requestId == other.requestId &&
+                values == other.values &&
+                cleanupBatch == other.cleanupBatch &&
+                cleanupActions == other.cleanupActions
+
+        override fun hashCode(): Int =
+            arrayOf(requestId, values, cleanupBatch, cleanupActions).contentHashCode()
 
         override fun toString(): String = "Cancel(requestId=$requestId)"
 
-        override fun close() = values.forEach(Hash32::close)
+        override fun close() {
+            values.forEach(Hash32::close)
+            cleanupBatch?.close()
+            cleanupActions.forEach(Hash32::close)
+        }
     }
 
     class Error(

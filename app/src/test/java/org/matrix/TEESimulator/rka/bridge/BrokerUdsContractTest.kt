@@ -92,8 +92,8 @@ class BrokerUdsContractTest {
                 .failure(),
         )
         val one =
-            BridgeCodec.headerForTest(BridgeDirection.SIDECAR_TO_BROKER, BridgeTag.CANCEL, 1, 1) +
-                byteArrayOf(0)
+            BridgeCodec.headerForTest(BridgeDirection.SIDECAR_TO_BROKER, BridgeTag.CANCEL, 1, 2) +
+                byteArrayOf(0, 0)
         assertTrue(
             BridgeCodec.decode(ByteArrayInputStream(one), BridgeDirection.SIDECAR_TO_BROKER)
                 is BridgeResult.Success

@@ -8,11 +8,11 @@
 )]
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rka_state::{
-    AmbiguousMaterial, CrashRecovery, MutationCrashState, QuarantineAction, QuarantineActions,
-    QuarantineLedger, QuarantineReason, StateError, StateStore,
+    AmbiguousMaterial, CleanupIntent, CrashRecovery, MutationCrashState, QuarantineAction,
+    QuarantineActions, QuarantineLedger, QuarantineReason, StateError, StateStore,
 };
 
 #[derive(Default)]
@@ -43,16 +43,19 @@ impl StateStore for MemoryStore {
 struct Actions {
     events: Vec<([u8; 32], QuarantineAction)>,
     cancels: usize,
+    receipts: BTreeSet<[u8; 32]>,
 }
 
 impl QuarantineActions for Actions {
-    fn cancel(&mut self) -> bool {
-        self.cancels = self.cancels.saturating_add(1);
-        true
-    }
-
-    fn apply(&mut self, handle: [u8; 32], action: QuarantineAction) -> bool {
-        self.events.push((handle, action));
+    fn execute(&mut self, intent: CleanupIntent) -> bool {
+        if !self.receipts.insert(*intent.action_id()) {
+            return true;
+        }
+        match (intent.handle(), intent.action()) {
+            (None, None) => self.cancels = self.cancels.saturating_add(1),
+            (Some(handle), Some(action)) => self.events.push((*handle, action)),
+            _ => return false,
+        }
         true
     }
 }
@@ -142,6 +145,66 @@ fn cleanup_resumes_after_every_persisted_step_boundary() {
     }
 }
 
+#[test]
+fn crash_after_receiver_effect_before_caller_cursor_never_repeats_effect() {
+    let store = FailCursorStore::default();
+    let material = AmbiguousMaterial::new([31; 16], [32; 16], vec![[33; 32]]).unwrap();
+    let mut actions = Actions::default();
+
+    assert!(
+        QuarantineLedger::new(&store)
+            .recover_crash(
+                CrashRecovery::new(MutationCrashState::PostAmbiguous, &material),
+                &mut actions,
+            )
+            .is_err()
+    );
+    store.fail.set(false);
+    QuarantineLedger::new(&store)
+        .recover_crash(
+            CrashRecovery::new(MutationCrashState::PostAmbiguous, &material),
+            &mut actions,
+        )
+        .unwrap();
+
+    assert_eq!(actions.cancels, 1);
+}
+
+#[derive(Default)]
+struct FailCursorStore {
+    values: RefCell<BTreeMap<Vec<u8>, Vec<u8>>>,
+    writes: RefCell<usize>,
+    fail: std::cell::Cell<bool>,
+}
+
+impl StateStore for FailCursorStore {
+    fn read(&self, key: &[u8], output: &mut [u8]) -> Result<usize, StateError> {
+        let value = self
+            .values
+            .borrow()
+            .get(key)
+            .cloned()
+            .ok_or(StateError::Missing)?;
+        output
+            .get_mut(..value.len())
+            .ok_or(StateError::Storage)?
+            .copy_from_slice(&value);
+        Ok(value.len())
+    }
+
+    fn replace(&self, key: &[u8], value: &[u8]) -> Result<(), StateError> {
+        let next = self.writes.borrow().saturating_add(1);
+        *self.writes.borrow_mut() = next;
+        if next == 2 && !self.fail.replace(true) {
+            return Err(StateError::Storage);
+        }
+        self.values
+            .borrow_mut()
+            .insert(key.to_vec(), value.to_vec());
+        Ok(())
+    }
+}
+
 struct FailingActions {
     fail_at: usize,
     calls: usize,
@@ -149,11 +212,7 @@ struct FailingActions {
 }
 
 impl QuarantineActions for FailingActions {
-    fn cancel(&mut self) -> bool {
-        self.step()
-    }
-
-    fn apply(&mut self, _handle: [u8; 32], _action: QuarantineAction) -> bool {
+    fn execute(&mut self, _intent: CleanupIntent) -> bool {
         self.step()
     }
 }

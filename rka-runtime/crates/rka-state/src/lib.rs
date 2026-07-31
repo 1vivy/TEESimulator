@@ -24,8 +24,8 @@ pub use failure_budget::{
     FAILURE_THRESHOLD, FAILURE_WINDOW_SECONDS, FailureAdmission, FailureBudget, FailureBudgetError,
 };
 pub use quarantine::{
-    AmbiguousMaterial, CrashRecovery, MutationCrashState, QuarantineAction, QuarantineActions,
-    QuarantineError, QuarantineLedger, QuarantineReason,
+    AmbiguousMaterial, CleanupIntent, CrashRecovery, MutationCrashState, QuarantineAction,
+    QuarantineActions, QuarantineError, QuarantineLedger, QuarantineReason,
 };
 pub use replay::{PersistedTombstone, ReplayManager, TombstoneTime};
 pub use rkp_lease::{

@@ -150,11 +150,23 @@ object BridgeCodec {
                     }
                     is BridgeMessage.Cancel -> {
                         val handles = message.brokerHandles()
+                        val batchId = message.cleanupBatchId()
+                        val actionIds = message.cleanupActionIds()
                         try {
                             out.writeByte(handles.size)
                             handles.forEach { writeFixed(out, it) }
+                            if (batchId == null) {
+                                out.writeByte(0)
+                            } else {
+                                out.writeByte(1)
+                                writeFixed(out, batchId)
+                                out.writeByte(actionIds.size)
+                                actionIds.forEach { writeFixed(out, it) }
+                            }
                         } finally {
                             handles.forEach(Hash32::close)
+                            batchId?.close()
+                            actionIds.forEach(Hash32::close)
                         }
                     }
                     is BridgeMessage.Error -> {
@@ -292,7 +304,23 @@ object BridgeCodec {
                         val handles = mutableListOf<Hash32>()
                         try {
                             repeat(count) { handles += readHash(input) }
-                            BridgeMessage.Cancel(requestId, handles)
+                            val cleanup = input.readUnsignedByte()
+                            require(cleanup in 0..1)
+                            if (cleanup == 0) {
+                                BridgeMessage.Cancel(requestId, handles)
+                            } else {
+                                val batchId = BrokerBatchId.of(input.readNBytes(16))
+                                val actionIds = mutableListOf<Hash32>()
+                                try {
+                                    val actionCount = input.readUnsignedByte()
+                                    require(actionCount == 1 + count * 2)
+                                    repeat(actionCount) { actionIds += readHash(input) }
+                                    BridgeMessage.Cancel(requestId, handles, batchId, actionIds)
+                                } finally {
+                                    batchId.close()
+                                    actionIds.forEach(Hash32::close)
+                                }
+                            }
                         } finally {
                             handles.forEach(Hash32::close)
                         }

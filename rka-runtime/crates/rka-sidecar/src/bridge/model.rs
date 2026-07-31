@@ -240,7 +240,7 @@ pub enum BridgeMessage {
     #[doc = "Returns a public SPKI and DER chain."]
     PublicResult(RequestId, NetworkHandle, PublicBytes, Vec<PublicBytes>),
     #[doc = "Cancels one correlated request."]
-    Cancel(RequestId, Vec<Hash32>),
+    Cancel(RequestId, Vec<Hash32>, Option<(BrokerBatchId, Vec<Hash32>)>),
     #[doc = "Returns one redacted typed failure."]
     Error(RequestId, u8, Hash32),
     #[doc = "Commits exact validated activation metadata to the broker journal."]

@@ -56,6 +56,31 @@ impl AmbiguousMaterial {
     pub fn handles(&self) -> &[[u8; 32]] {
         &self.handles
     }
+
+    /// Returns the canonical cancel, discard, and wipe command sequence.
+    pub fn cleanup_intents(&self) -> Vec<CleanupIntent> {
+        let capacity = self
+            .handles
+            .len()
+            .checked_mul(2)
+            .and_then(|count| count.checked_add(1))
+            .unwrap_or(0);
+        let mut intents = Vec::with_capacity(capacity);
+        intents.push(CleanupIntent::new(self, None, None));
+        for handle in &self.handles {
+            intents.push(CleanupIntent::new(
+                self,
+                Some(QuarantineAction::Discard),
+                Some(*handle),
+            ));
+            intents.push(CleanupIntent::new(
+                self,
+                Some(QuarantineAction::Wipe),
+                Some(*handle),
+            ));
+        }
+        intents
+    }
 }
 
 /// Crash/restart point requiring quarantine rather than replay.
@@ -92,6 +117,76 @@ pub enum QuarantineAction {
     Wipe,
 }
 
+/// One deterministic receiver-side cleanup command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CleanupIntent {
+    request_id: [u8; 16],
+    batch_id: [u8; 16],
+    action: Option<QuarantineAction>,
+    handle: Option<[u8; 32]>,
+    action_id: [u8; 32],
+}
+
+impl CleanupIntent {
+    fn new(
+        material: &AmbiguousMaterial,
+        action: Option<QuarantineAction>,
+        handle: Option<[u8; 32]>,
+    ) -> Self {
+        let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+        context.update(b"TEESimulator-RS quarantine action v1\0");
+        context.update(&material.request_id[8..]);
+        context.update(&material.batch_id);
+        context.update(&[match action {
+            None => 0,
+            Some(QuarantineAction::Discard) => 1,
+            Some(QuarantineAction::Wipe) => 2,
+        }]);
+        if let Some(value) = handle {
+            context.update(&value);
+        }
+        let mut action_id = [0_u8; 32];
+        action_id.copy_from_slice(context.finish().as_ref());
+        Self {
+            request_id: material.request_id,
+            batch_id: material.batch_id,
+            action,
+            handle,
+            action_id,
+        }
+    }
+
+    /// Returns the request identifier bound into the command.
+    #[must_use]
+    pub const fn request_id(&self) -> &[u8; 16] {
+        &self.request_id
+    }
+
+    /// Returns the batch identifier bound into the command.
+    #[must_use]
+    pub const fn batch_id(&self) -> &[u8; 16] {
+        &self.batch_id
+    }
+
+    /// Returns the cleanup kind, or `None` for cancellation.
+    #[must_use]
+    pub const fn action(&self) -> Option<QuarantineAction> {
+        self.action
+    }
+
+    /// Returns the bound handle for discard/wipe.
+    #[must_use]
+    pub const fn handle(&self) -> Option<&[u8; 32]> {
+        self.handle.as_ref()
+    }
+
+    /// Returns the deterministic receiver receipt identifier.
+    #[must_use]
+    pub const fn action_id(&self) -> &[u8; 32] {
+        &self.action_id
+    }
+}
+
 /// Exact crash state and material processed as one recovery input.
 #[derive(Clone, Copy, Debug)]
 pub struct CrashRecovery<'a> {
@@ -109,11 +204,8 @@ impl<'a> CrashRecovery<'a> {
 
 /// One-call broker cleanup boundary used only after quarantine is durable.
 pub trait QuarantineActions {
-    /// Cancels the authenticated broker request.
-    fn cancel(&mut self) -> bool;
-
-    /// Applies one exact action to one exact mapped handle.
-    fn apply(&mut self, handle: [u8; 32], action: QuarantineAction) -> bool;
+    /// Executes or replays one command and returns its durable completion receipt.
+    fn execute(&mut self, intent: CleanupIntent) -> bool;
 }
 
 /// Durable fail-closed quarantine ledger.
@@ -165,10 +257,8 @@ impl<'a> QuarantineLedger<'a> {
             )
             .ok_or(QuarantineError::Material)?;
         while completed < total {
-            if completed == 0 {
-                if !actions.cancel() {
-                    return Err(QuarantineError::Action);
-                }
+            let intent = if completed == 0 {
+                CleanupIntent::new(recovery.material, None, None)
             } else {
                 let action_index = completed.checked_sub(1).ok_or(QuarantineError::Corrupt)?;
                 let handle = *recovery
@@ -181,9 +271,10 @@ impl<'a> QuarantineLedger<'a> {
                 } else {
                     QuarantineAction::Wipe
                 };
-                if !actions.apply(handle, action) {
-                    return Err(QuarantineError::Action);
-                }
+                CleanupIntent::new(recovery.material, Some(action), Some(handle))
+            };
+            if !actions.execute(intent) {
+                return Err(QuarantineError::Action);
             }
             completed = completed.checked_add(1).ok_or(QuarantineError::Corrupt)?;
             self.persist((reason, recovery.material, completed))?;

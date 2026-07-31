@@ -29,7 +29,9 @@ data class RecoverySnapshot(
     val uptimeMillis: Long,
     val services: List<RecoveryService>,
     val properties: Map<String, String>,
-    val quarantineRetained: Boolean,
+    val sentinelHash: String,
+    val quarantineCount: Int,
+    val quarantineHash: String,
 )
 
 data class ExactRecoveryReceipt(
@@ -60,7 +62,9 @@ enum class ExactRecoveryFailure {
     BOOT_ID_DRIFT,
     UPTIME_DRIFT,
     PROPERTY_DRIFT,
+    SENTINEL_DRIFT,
     QUARANTINE_LOST,
+    QUARANTINE_DRIFT,
     SNAPSHOT_INVALID,
 }
 
@@ -85,14 +89,21 @@ class ExactRecoveryCli(private val transport: ExactRecoveryTransport) {
             reapplyLostRkpdProperties(role, before.properties, after.properties)
             after = transport.verify(role, target)
         }
-        validateSnapshot(after, role, target)
-        select(after.services, target)
         if (after.bootId != before.bootId) fail(ExactRecoveryFailure.BOOT_ID_DRIFT)
         if (after.uptimeMillis <= before.uptimeMillis) fail(ExactRecoveryFailure.UPTIME_DRIFT)
         if (propertyHash(after.properties) != propertyHash) {
             fail(ExactRecoveryFailure.PROPERTY_DRIFT)
         }
-        if (!after.quarantineRetained) fail(ExactRecoveryFailure.QUARANTINE_LOST)
+        if (after.sentinelHash != before.sentinelHash) fail(ExactRecoveryFailure.SENTINEL_DRIFT)
+        if (after.quarantineCount <= 0) fail(ExactRecoveryFailure.QUARANTINE_LOST)
+        if (
+            after.quarantineCount != before.quarantineCount ||
+                after.quarantineHash != before.quarantineHash
+        ) {
+            fail(ExactRecoveryFailure.QUARANTINE_DRIFT)
+        }
+        validateSnapshot(after, role, target)
+        select(after.services, target)
         return ExactRecoveryReceipt(before.bootId, propertyHash, true)
     }
 
@@ -104,7 +115,9 @@ class ExactRecoveryCli(private val transport: ExactRecoveryTransport) {
         if (
             !snapshot.bootId.matches(Regex("[A-Za-z0-9._-]{1,128}")) ||
                 snapshot.uptimeMillis < 0 ||
-                !snapshot.quarantineRetained ||
+                !snapshot.sentinelHash.matches(Regex("[0-9a-f]{64}")) ||
+                snapshot.quarantineCount !in 1..20 ||
+                !snapshot.quarantineHash.matches(Regex("[0-9a-f]{64}")) ||
                 snapshot.properties.keys.any { !it.matches(Regex("[a-zA-Z0-9_.-]{1,128}")) } ||
                 snapshot.properties.values.any { it.contains('\n') || it.contains('\u0000') }
         ) {
@@ -247,7 +260,9 @@ internal class ControlScriptRecoveryTransport(
             fields.getValue("uptime_ms").single().toLong(),
             services,
             properties,
-            fields.getValue("quarantine").single() == "RETAINED",
+            fields.getValue("sentinel_hash").single(),
+            fields.getValue("quarantine_count").single().toInt(),
+            fields.getValue("quarantine_hash").single(),
         )
     }
 

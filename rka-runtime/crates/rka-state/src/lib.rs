@@ -16,6 +16,7 @@ mod rkp_lease;
     reason = "typed validated receipt names and fields are self-describing"
 )]
 mod rkp_receipt;
+mod rkp_receipt_registry;
 mod sensitive;
 
 pub use failure_budget::{
@@ -29,8 +30,9 @@ pub use rkp_lease::{
 };
 pub use rkp_receipt::{
     ValidatedCertificationToken, ValidatedChainClaims, ValidatedChainReceipt,
-    ValidatedReceiptRegistry, verify_validated_chain_receipts,
+    verify_validated_chain_receipts,
 };
+pub use rkp_receipt_registry::ValidatedReceiptRegistry;
 pub use sensitive::SensitiveStateStore;
 
 /// Maximum serialized state record size.

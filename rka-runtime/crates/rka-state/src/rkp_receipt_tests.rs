@@ -6,6 +6,8 @@ use crate::rkp_lease::{
 };
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use std::{
+    fs::Permissions,
+    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
         Arc, Barrier,
@@ -63,13 +65,20 @@ fn receipt(order: u8, lease_id: u8, seed: u8) -> ValidatedChainReceipt {
 
 fn registry() -> (PathBuf, ValidatedReceiptRegistry) {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let root = std::env::temp_dir().join(format!(
+    let anchor = std::env::temp_dir().join(format!(
         "rka-receipt-registry-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    let registry = ValidatedReceiptRegistry::for_test(&root).unwrap();
-    (root, registry)
+    let journal = anchor.join("data/adb/teesimulator-rka/journal");
+    std::fs::create_dir_all(&journal).unwrap();
+    let mut current = anchor.clone();
+    for component in ["data", "adb", "teesimulator-rka", "journal"] {
+        current.push(component);
+        std::fs::set_permissions(&current, Permissions::from_mode(0o700)).unwrap();
+    }
+    let registry = ValidatedReceiptRegistry::for_test(&anchor).unwrap();
+    (anchor, registry)
 }
 
 fn race_worker(

@@ -6,6 +6,8 @@ use crate::{
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use std::{
     cell::RefCell,
+    fs::Permissions,
+    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -93,6 +95,13 @@ fn registry() -> (PathBuf, ValidatedReceiptRegistry) {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
+    let journal = root.join("data/adb/teesimulator-rka/journal");
+    std::fs::create_dir_all(&journal).unwrap();
+    let mut current = root.clone();
+    for component in ["data", "adb", "teesimulator-rka", "journal"] {
+        current.push(component);
+        std::fs::set_permissions(&current, Permissions::from_mode(0o700)).unwrap();
+    }
     let registry = ValidatedReceiptRegistry::for_test(&root).unwrap();
     (root, registry)
 }

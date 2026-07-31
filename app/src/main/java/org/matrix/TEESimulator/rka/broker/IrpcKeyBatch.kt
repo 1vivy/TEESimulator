@@ -3,6 +3,9 @@ package org.matrix.TEESimulator.rka.broker
 import java.security.KeyFactory
 import java.security.MessageDigest
 import java.security.spec.X509EncodedKeySpec
+import org.matrix.TEESimulator.rka.journal.RkpJournal
+import org.matrix.TEESimulator.rka.journal.RkpJournalEntry
+import org.matrix.TEESimulator.rka.journal.RkpJournalRecord
 
 internal class IrpcGeneratedKey(macedPublicKey: ByteArray, spkiDer: ByteArray, keyBlob: ByteArray) {
     private val macedPublicKey = macedPublicKey.copyOf()
@@ -93,11 +96,15 @@ internal constructor(
 
     fun publicKeyHashes(): List<ByteArray> = publicKeys().map(::sha256)
 
-    internal fun retainForJournal(handles: List<ByteArray>, record: (clear: () -> Unit) -> Unit) {
-        require(handles.size == keys.size)
+    internal fun recordInJournal(
+        journal: RkpJournal,
+        intent: RkpJournalRecord,
+        entries: List<RkpJournalEntry>,
+    ) {
+        require(entries.size == keys.size)
         try {
-            handles.zip(keys).forEach { (handle, key) -> owner.retain(handle, key) }
-            record(owner::clear)
+            entries.zip(keys).forEach { (entry, key) -> owner.retain(entry.handle.copyBytes(), key) }
+            journal.record(intent, entries, owner::clear)
         } catch (failure: RuntimeException) {
             wipe()
             throw failure

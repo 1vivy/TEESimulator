@@ -30,9 +30,7 @@ class DurableIrpcKeyBatchGenerator(
                     intent,
                     outcome.value.publicKeys().zip(outcome.value.spkiPublicKeys()),
                 )
-            outcome.value.retainForJournal(entries.map { it.handle.copyBytes() }) { clear ->
-                journal.record(intent, entries, clear)
-            }
+            outcome.value.recordInJournal(journal, intent, entries)
         } else {
             journal.quarantine(intent)
         }

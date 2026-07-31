@@ -2,7 +2,6 @@ package org.matrix.TEESimulator.rka.journal
 
 import java.security.MessageDigest
 import java.security.SecureRandom
-import org.matrix.TEESimulator.rka.broker.IrpcClient
 import org.matrix.TEESimulator.rka.broker.RkpKeyCount
 
 enum class RkpJournalState {
@@ -50,12 +49,14 @@ class RkpOpaqueHandle private constructor(private val value: ByteArray) {
             batchId: RkpBatchId,
             order: Int,
             publicHash: ByteArray,
+            spkiHash: ByteArray,
         ): RkpOpaqueHandle {
             val digest = MessageDigest.getInstance("SHA-256")
             digest.update("RKA-RKP-HANDLE-v1\u0000".toByteArray())
             digest.update(batchId.copyBytes())
             digest.update(order.toString().toByteArray())
             digest.update(publicHash)
+            digest.update(spkiHash)
             return RkpOpaqueHandle(digest.digest())
         }
 
@@ -69,12 +70,18 @@ class RkpOpaqueHandle private constructor(private val value: ByteArray) {
 data class RkpJournalEntry(
     val order: Int,
     private val publicKey: ByteArray,
+    private val spkiDer: ByteArray,
     private val publicHash: ByteArray,
+    private val spkiHash: ByteArray,
     val handle: RkpOpaqueHandle,
 ) {
     fun copyPublicKey(): ByteArray = publicKey.copyOf()
 
+    fun copySpkiDer(): ByteArray = spkiDer.copyOf()
+
     fun copyPublicHash(): ByteArray = publicHash.copyOf()
+
+    fun copySpkiHash(): ByteArray = spkiHash.copyOf()
 
     override fun toString(): String = "RkpJournalEntry(order=$order, redacted)"
 }
@@ -83,16 +90,11 @@ data class RkpJournalRecord(
     val batchId: RkpBatchId,
     val state: RkpJournalState,
     val count: Int,
-    val irpcVersion: Int,
-    val securityLevel: String,
-    val curve: String,
+    val identity: RkpIrpcIdentity,
     val entries: List<RkpJournalEntry>,
 ) {
     init {
         require(count in 1..RkpKeyCount.MAX)
-        require(irpcVersion == IrpcClient.REQUIRED_VERSION)
-        require(securityLevel == "TEE")
-        require(curve == "P256")
         require(entries.isEmpty() || entries.size == count)
         require(
             state == RkpJournalState.RKP_KEY_GENERATING ||
@@ -101,6 +103,7 @@ data class RkpJournalRecord(
         )
         require(entries.map { it.order } == entries.indices.toList())
         require(entries.map { it.copyPublicHash().hex() }.distinct().size == entries.size)
+        require(entries.map { it.copySpkiHash().hex() }.distinct().size == entries.size)
         require(entries.map { it.handle.copyBytes().hex() }.distinct().size == entries.size)
     }
 }
@@ -114,16 +117,18 @@ interface RkpJournalStore {
 class RkpJournal(private val store: RkpJournalStore) {
     private var clearBrokerBlobs: (() -> Unit)? = null
 
-    fun begin(count: RkpKeyCount, batchId: RkpBatchId = RkpBatchId.fresh()): RkpJournalRecord {
+    fun begin(
+        count: RkpKeyCount,
+        identity: RkpIrpcIdentity,
+        batchId: RkpBatchId = RkpBatchId.fresh(),
+    ): RkpJournalRecord {
         check(store.read() == null) { "active batch exists" }
         return persist(
             RkpJournalRecord(
                 batchId,
                 RkpJournalState.RKP_KEY_GENERATING,
                 count.value,
-                3,
-                "TEE",
-                "P256",
+                identity,
                 emptyList(),
             )
         )
@@ -131,18 +136,21 @@ class RkpJournal(private val store: RkpJournalStore) {
 
     internal fun deriveEntries(
         generating: RkpJournalRecord,
-        publicKeys: List<ByteArray>,
+        publicKeys: List<Pair<ByteArray, ByteArray>>,
     ): List<RkpJournalEntry> {
         require(generating.state == RkpJournalState.RKP_KEY_GENERATING)
         requireCurrent(generating)
         require(publicKeys.size == generating.count)
-        return publicKeys.mapIndexed { order, publicKey ->
-            val hash = sha256(publicKey)
+        return publicKeys.mapIndexed { order, (macedPublicKey, spkiDer) ->
+            val hash = sha256(macedPublicKey)
+            val spkiHash = sha256(spkiDer)
             RkpJournalEntry(
                 order,
-                publicKey,
+                macedPublicKey,
+                spkiDer,
                 hash,
-                RkpOpaqueHandle.derive(generating.batchId, order, hash),
+                spkiHash,
+                RkpOpaqueHandle.derive(generating.batchId, order, hash, spkiHash),
             )
         }
     }
@@ -214,7 +222,8 @@ class RkpJournal(private val store: RkpJournalStore) {
             current != null &&
                 current.batchId.matches(expected.batchId) &&
                 current.state == expected.state &&
-                current.count == expected.count
+                current.count == expected.count &&
+                current.identity == expected.identity
         ) {
             "stale or wrong batch"
         }

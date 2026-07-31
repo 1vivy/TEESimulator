@@ -1,4 +1,6 @@
 use super::*;
+use crate::{ValidatedChainClaims, ValidatedChainReceipt, verify_validated_chain_receipts};
+use ring::signature::{Ed25519KeyPair, KeyPair};
 use std::cell::RefCell;
 
 struct MemoryStore {
@@ -43,31 +45,49 @@ fn lease(order: u8) -> RkpLease {
             chain_hash: ChainHash::new([9; 32]),
             certificate_count: 2,
         },
+        validator_public_key: validator_public_key(42),
+        profile_epoch: 17,
     })
     .unwrap()
 }
 
-fn evidence(order: u8) -> CertifiedKeyEvidence {
+fn claims(order: u8) -> ValidatedChainClaims {
     let lease = lease(order);
-    CertifiedKeyEvidence {
+    ValidatedChainClaims {
+        lease_id: lease.metadata.lease_id,
         batch_id: lease.metadata.batch_id,
         order,
         public_key_hash: lease.metadata.public_key_hash,
         leaf_spki_hash: lease.metadata.spki_hash,
         certificate_count: lease.metadata.chain.certificate_count,
         chain_hash: lease.metadata.chain.chain_hash,
+        profile_epoch: lease.metadata.profile_epoch,
     }
+}
+
+fn validator(seed: u8) -> Ed25519KeyPair {
+    Ed25519KeyPair::from_seed_unchecked(&[seed; 32]).unwrap()
+}
+
+fn validator_public_key(seed: u8) -> ValidatorPublicKey {
+    ValidatorPublicKey::new(validator(seed).public_key().as_ref().try_into().unwrap())
+}
+
+fn receipt(order: u8, seed: u8) -> ValidatedChainReceipt {
+    let claims = claims(order);
+    let signature = validator(seed).sign(&claims.canonical_bytes());
+    ValidatedChainReceipt::new(claims, signature.as_ref().try_into().unwrap())
 }
 
 #[test]
 fn activation_is_ordered_and_persisted() {
     let batch = RkpLeaseBatch::new(vec![lease(0), lease(1)]).unwrap();
-    let token = verify_certified_evidence(&batch, &[evidence(0), evidence(1)]).unwrap();
+    let token = verify_validated_chain_receipts(&batch, &[receipt(0, 42), receipt(1, 42)]).unwrap();
     let store = MemoryStore {
         fail: false,
         value: RefCell::new(Vec::new()),
     };
-    let active = batch.activate(&token, &store).unwrap();
+    let active = batch.activate(token, &store).unwrap();
     assert_eq!(
         active
             .leases()
@@ -100,31 +120,55 @@ fn duplicate_and_reordered_batches_are_rejected() {
 #[test]
 fn storage_failure_prevents_activation_exposure() {
     let batch = RkpLeaseBatch::new(vec![lease(0)]).unwrap();
-    let token = verify_certified_evidence(&batch, &[evidence(0)]).unwrap();
+    let token = verify_validated_chain_receipts(&batch, &[receipt(0, 42)]).unwrap();
     let store = MemoryStore {
         fail: true,
         value: RefCell::new(Vec::new()),
     };
     assert_eq!(
-        batch.activate(&token, &store),
+        batch.activate(token, &store),
         Err(RkpLeaseError::State(StateError::Storage))
     );
 }
 
 #[test]
-fn certification_evidence_mutations_are_rejected() {
+fn signed_receipt_mutations_and_wrong_validator_are_rejected() {
     let batch = RkpLeaseBatch::new(vec![lease(0), lease(1)]).unwrap();
-    let reordered = [evidence(1), evidence(0)];
+    let reordered = [receipt(1, 42), receipt(0, 42)];
     assert!(matches!(
-        verify_certified_evidence(&batch, &reordered),
+        verify_validated_chain_receipts(&batch, &reordered),
         Err(RkpLeaseError::Certification)
     ));
-    let mut wrong_spki = [evidence(0), evidence(1)];
-    wrong_spki[1].leaf_spki_hash = SpkiHash::new([99; 32]);
+    let mut wrong_spki = claims(1);
+    wrong_spki.leaf_spki_hash = SpkiHash::new([99; 32]);
+    let signature = validator(42).sign(&wrong_spki.canonical_bytes());
+    let wrong_spki = ValidatedChainReceipt::new(wrong_spki, signature.as_ref().try_into().unwrap());
     assert!(matches!(
-        verify_certified_evidence(&batch, &wrong_spki),
+        verify_validated_chain_receipts(&batch, &[receipt(0, 42), wrong_spki]),
         Err(RkpLeaseError::Certification)
     ));
+    assert!(matches!(
+        verify_validated_chain_receipts(&batch, &[receipt(0, 43), receipt(1, 43)]),
+        Err(RkpLeaseError::Certification)
+    ));
+}
+
+#[test]
+fn forged_signature_and_cross_lease_replay_are_rejected() {
+    let batch = RkpLeaseBatch::new(vec![lease(0)]).unwrap();
+    let forged = ValidatedChainReceipt::new(claims(0), [0; 64]);
+    assert_eq!(
+        verify_validated_chain_receipts(&batch, &[forged]).unwrap_err(),
+        RkpLeaseError::Certification
+    );
+
+    let mut replay_target = lease(0);
+    replay_target.metadata.lease_id = LeaseId::new([88; 16]);
+    let replay_target = RkpLeaseBatch::new(vec![replay_target]).unwrap();
+    assert_eq!(
+        verify_validated_chain_receipts(&replay_target, &[receipt(0, 42)]).unwrap_err(),
+        RkpLeaseError::Certification
+    );
 }
 
 fn public_boundary_is_safe(source: &str) -> bool {

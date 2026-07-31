@@ -11,6 +11,11 @@ pub mod replay_codec;
     reason = "typed lease names and fields are self-describing"
 )]
 mod rkp_lease;
+#[allow(
+    missing_docs,
+    reason = "typed validated receipt names and fields are self-describing"
+)]
+mod rkp_receipt;
 mod sensitive;
 
 pub use failure_budget::{
@@ -18,10 +23,13 @@ pub use failure_budget::{
 };
 pub use replay::{PersistedTombstone, ReplayManager, TombstoneTime};
 pub use rkp_lease::{
-    BatchId, CertifiedKeyEvidence, CertifiedLeaseMetadata, ChainHash, IrpcIdentityHash, LeaseId,
-    LeaseState, PublicChainMetadata, PublicKeyHash, RemoteKeyHandle, RkpLease, RkpLeaseBatch,
-    RkpLeaseError, SpkiHash, ValidatedCertificationToken, hash_public_key,
-    verify_certified_evidence,
+    BatchId, CertifiedLeaseMetadata, ChainHash, IrpcIdentityHash, LeaseId, LeaseState,
+    PublicChainMetadata, PublicKeyHash, RemoteKeyHandle, RkpLease, RkpLeaseBatch, RkpLeaseError,
+    SpkiHash, ValidatorPublicKey, hash_public_key,
+};
+pub use rkp_receipt::{
+    ValidatedCertificationToken, ValidatedChainClaims, ValidatedChainReceipt,
+    verify_validated_chain_receipts,
 };
 pub use sensitive::SensitiveStateStore;
 

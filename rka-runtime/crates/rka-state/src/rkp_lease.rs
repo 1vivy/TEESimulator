@@ -1,3 +1,4 @@
+use crate::rkp_receipt::ValidatedCertificationToken;
 use crate::{StateError, StateStore, validate_record};
 use ring::digest::{SHA256, digest};
 use thiserror::Error;
@@ -31,6 +32,7 @@ fixed_id!(SpkiHash, 32);
 fixed_id!(IrpcIdentityHash, 32);
 fixed_id!(RemoteKeyHandle, 32);
 fixed_id!(ChainHash, 32);
+fixed_id!(ValidatorPublicKey, 32);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -63,6 +65,8 @@ pub struct CertifiedLeaseMetadata {
     pub irpc_identity_hash: IrpcIdentityHash,
     pub remote_handle: RemoteKeyHandle,
     pub chain: PublicChainMetadata,
+    pub validator_public_key: ValidatorPublicKey,
+    pub profile_epoch: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,69 +101,9 @@ impl RkpLease {
     }
 }
 
-#[derive(Debug)]
-pub struct ValidatedCertificationToken {
-    batch_id: BatchId,
-    chain_hash: ChainHash,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    clippy::exhaustive_structs,
-    reason = "validated certificate evidence has a closed schema"
-)]
-pub struct CertifiedKeyEvidence {
-    pub batch_id: BatchId,
-    pub order: u8,
-    pub public_key_hash: PublicKeyHash,
-    pub leaf_spki_hash: SpkiHash,
-    pub certificate_count: u8,
-    pub chain_hash: ChainHash,
-}
-
-/// Converts already-validated certificate evidence into an opaque activation capability.
-///
-/// This function verifies structural binding only. Certificate parsing and X.509 validation belong
-/// to the caller.
-///
-/// # Errors
-/// Rejects missing, reordered, duplicated, or mismatched evidence.
-pub fn verify_certified_evidence(
-    pending: &RkpLeaseBatch,
-    evidence: &[CertifiedKeyEvidence],
-) -> Result<ValidatedCertificationToken, RkpLeaseError> {
-    if evidence.len() != pending.leases.len() || evidence.is_empty() {
-        return Err(RkpLeaseError::Certification);
-    }
-    let first = evidence.first().ok_or(RkpLeaseError::Certification)?;
-    for (order, (lease, certified)) in pending.leases.iter().zip(evidence).enumerate() {
-        let expected_order = u8::try_from(order).map_err(|_| RkpLeaseError::Count)?;
-        if certified.certificate_count == 0
-            || certified.batch_id != lease.metadata.batch_id
-            || certified.order != expected_order
-            || certified.order != lease.metadata.order
-            || certified.public_key_hash != lease.metadata.public_key_hash
-            || certified.leaf_spki_hash != lease.metadata.spki_hash
-            || certified.certificate_count != lease.metadata.chain.certificate_count
-            || certified.chain_hash != lease.metadata.chain.chain_hash
-            || certified.chain_hash != first.chain_hash
-            || evidence.iter().take(order).any(|prior| {
-                prior.public_key_hash == certified.public_key_hash
-                    || prior.leaf_spki_hash == certified.leaf_spki_hash
-            })
-        {
-            return Err(RkpLeaseError::Certification);
-        }
-    }
-    Ok(ValidatedCertificationToken {
-        batch_id: first.batch_id,
-        chain_hash: first.chain_hash,
-    })
-}
-
 #[derive(Debug, Eq, PartialEq)]
 pub struct RkpLeaseBatch {
-    leases: Vec<RkpLease>,
+    pub(crate) leases: Vec<RkpLease>,
 }
 
 impl RkpLeaseBatch {
@@ -171,11 +115,8 @@ impl RkpLeaseBatch {
         if leases.is_empty() || leases.len() > MAX_LEASES {
             return Err(RkpLeaseError::Count);
         }
-        let batch = leases
-            .first()
-            .ok_or(RkpLeaseError::Count)?
-            .metadata
-            .batch_id;
+        let first_metadata = leases.first().ok_or(RkpLeaseError::Count)?.metadata;
+        let batch = first_metadata.batch_id;
         for (order, lease) in leases.iter().enumerate() {
             let expected = u8::try_from(order).map_err(|_| RkpLeaseError::Count)?;
             if leases.iter().take(order).any(|prior| {
@@ -189,6 +130,8 @@ impl RkpLeaseBatch {
             if lease.metadata.batch_id != batch
                 || lease.metadata.order != expected
                 || lease.state != LeaseState::Certified
+                || lease.metadata.validator_public_key != first_metadata.validator_public_key
+                || lease.metadata.profile_epoch != first_metadata.profile_epoch
             {
                 return Err(RkpLeaseError::Order);
             }
@@ -207,16 +150,10 @@ impl RkpLeaseBatch {
     /// Rejects the wrong validation token or propagates storage failure.
     pub fn activate(
         mut self,
-        token: &ValidatedCertificationToken,
+        token: ValidatedCertificationToken,
         store: &dyn StateStore,
     ) -> Result<Self, RkpLeaseError> {
-        let first = self.leases.first().ok_or(RkpLeaseError::Count)?;
-        if token.batch_id != first.metadata.batch_id
-            || self
-                .leases
-                .iter()
-                .any(|lease| lease.metadata.chain.chain_hash != token.chain_hash)
-        {
+        if !token.consume_matches(&self) {
             return Err(RkpLeaseError::Certification);
         }
         self.leases
@@ -248,6 +185,8 @@ impl RkpLeaseBatch {
             bytes.extend_from_slice(lease.metadata.remote_handle.as_bytes());
             bytes.extend_from_slice(lease.metadata.chain.chain_hash.as_bytes());
             bytes.push(lease.metadata.chain.certificate_count);
+            bytes.extend_from_slice(lease.metadata.validator_public_key.as_bytes());
+            bytes.extend_from_slice(&lease.metadata.profile_epoch.to_be_bytes());
             bytes.push(match lease.state {
                 LeaseState::Certified => 1,
                 LeaseState::Active => 2,

@@ -1,5 +1,7 @@
 package org.matrix.TEESimulator.rka.broker
 
+import java.security.KeyPairGenerator
+import java.security.spec.ECGenParameterSpec
 import java.util.concurrent.atomic.AtomicBoolean
 
 internal object DirectCallRunner : BrokerCallRunner {
@@ -25,6 +27,7 @@ internal class FakeResolver(
     private val keyMint: KeyMintServiceEndpoint = FakeKeyMintEndpoint(),
     private val irpcFailure: Throwable? = null,
     private val keyMintFailure: Throwable? = null,
+    private val irpcProvider: (() -> IrpcServiceEndpoint)? = null,
 ) : BrokerServiceResolver {
     val irpcNames = mutableListOf<String>()
     val keyMintNames = mutableListOf<String>()
@@ -32,7 +35,7 @@ internal class FakeResolver(
     override fun resolveIrpc(name: String): IrpcServiceEndpoint {
         irpcNames += name
         irpcFailure?.let { throw it }
-        return irpc
+        return irpcProvider?.invoke() ?: irpc
     }
 
     override fun resolveKeyMint(name: String): KeyMintServiceEndpoint {
@@ -53,7 +56,7 @@ internal class FakeIrpcEndpoint(
     private val dieOnGenerate: Boolean = false,
     private val onGenerate: (() -> Unit)? = null,
     private val generated: IrpcGeneratedKey =
-        IrpcGeneratedKey(byteArrayOf(1, 2, 3), byteArrayOf(9, 8, 7)),
+        IrpcGeneratedKey(byteArrayOf(1, 2, 3), testSpki(), byteArrayOf(9, 8, 7)),
 ) : IrpcServiceEndpoint {
     override fun generateKey(): IrpcGeneratedKey {
         onGenerate?.invoke()
@@ -77,3 +80,19 @@ internal class FakeKeyMintEndpoint(
 ) : KeyMintServiceEndpoint
 
 internal object MissingBrokerService : NoSuchElementException("missing")
+
+internal fun testSpki(): ByteArray =
+    KeyPairGenerator.getInstance("EC")
+        .apply { initialize(ECGenParameterSpec("secp256r1")) }
+        .generateKeyPair()
+        .public
+        .encoded
+
+internal fun testIrpcIdentity(): IrpcResolvedIdentity =
+    IrpcResolvedIdentity(
+        IrpcClient.IRPC_DESCRIPTOR,
+        IrpcClient.DEFAULT_TEE_SERVICE,
+        "TEE",
+        "fake-irpc",
+        IrpcClient.REQUIRED_VERSION,
+    )

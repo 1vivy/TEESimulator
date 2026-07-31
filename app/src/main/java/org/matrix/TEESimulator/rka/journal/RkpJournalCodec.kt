@@ -16,16 +16,26 @@ internal object RkpJournalCodec {
                 output.writeByte(record.state.ordinal)
                 output.write(record.batchId.copyBytes())
                 output.writeByte(record.count)
-                output.writeByte(record.irpcVersion)
-                output.writeUTF(record.securityLevel)
-                output.writeUTF(record.curve)
+                output.writeUTF(record.identity.descriptor)
+                output.writeUTF(record.identity.serviceName)
+                output.writeUTF(record.identity.componentName)
+                output.writeUTF(record.identity.uniqueId)
+                output.writeByte(record.identity.version)
+                output.writeUTF(record.identity.securityLevel)
+                output.writeUTF(record.identity.algorithm)
+                output.writeUTF(record.identity.curve)
+                output.write(record.identity.hash())
                 output.writeByte(record.entries.size)
                 record.entries.forEach { entry ->
                     val publicKey = entry.copyPublicKey()
+                    val spkiDer = entry.copySpkiDer()
                     output.writeByte(entry.order)
                     output.writeShort(publicKey.size)
                     output.write(publicKey)
+                    output.writeShort(spkiDer.size)
+                    output.write(spkiDer)
                     output.write(entry.copyPublicHash())
+                    output.write(entry.copySpkiHash())
                     output.write(entry.handle.copyBytes())
                 }
             }
@@ -39,25 +49,38 @@ internal object RkpJournalCodec {
             val state = RkpJournalState.entries[input.readUnsignedByte()]
             val batchId = RkpBatchId.from(input.readNBytes(16))
             val count = input.readUnsignedByte()
-            val version = input.readUnsignedByte()
-            val security = input.readUTF()
-            val curve = input.readUTF()
+            val identity =
+                RkpIrpcIdentity(
+                    input.readUTF(),
+                    input.readUTF(),
+                    input.readUTF(),
+                    input.readUTF(),
+                    input.readUnsignedByte(),
+                    input.readUTF(),
+                    input.readUTF(),
+                    input.readUTF(),
+                )
+            require(input.readNBytes(32).contentEquals(identity.hash()))
             val entries =
                 List(input.readUnsignedByte()) {
                     val order = input.readUnsignedByte()
                     val publicKey = input.readNBytes(input.readUnsignedShort())
-                    val hash = input.readNBytes(32)
+                    val spkiDer = input.readNBytes(input.readUnsignedShort())
+                    val publicHash = input.readNBytes(32)
+                    val spkiHash = input.readNBytes(32)
                     val handle = RkpOpaqueHandle.from(input.readNBytes(32))
+                    require(publicHash.contentEquals(sha256(publicKey)))
+                    require(spkiHash.contentEquals(sha256(spkiDer)))
                     require(
-                        hash.contentEquals(
-                            java.security.MessageDigest.getInstance("SHA-256").digest(publicKey)
-                        )
+                        handle.matches(RkpOpaqueHandle.derive(batchId, order, publicHash, spkiHash))
                     )
-                    require(handle.matches(RkpOpaqueHandle.derive(batchId, order, hash)))
-                    RkpJournalEntry(order, publicKey, hash, handle)
+                    RkpJournalEntry(order, publicKey, spkiDer, publicHash, spkiHash, handle)
                 }
             require(input.read() == -1)
-            RkpJournalRecord(batchId, state, count, version, security, curve, entries)
+            RkpJournalRecord(batchId, state, count, identity, entries)
         }
     }
+
+    private fun sha256(bytes: ByteArray): ByteArray =
+        java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
 }

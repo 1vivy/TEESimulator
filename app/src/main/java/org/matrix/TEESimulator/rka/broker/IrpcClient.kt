@@ -77,11 +77,26 @@ internal constructor(
         count: RkpKeyCount,
         deadline: BrokerDeadline,
         cancellation: BrokerCancellation,
+    ): BrokerOutcome<IrpcKeyBatch> = generateKeyBatch(count, null, deadline, cancellation)
+
+    internal fun generateKeyBatch(
+        count: RkpKeyCount,
+        expectedIdentity: IrpcResolvedIdentity?,
+        deadline: BrokerDeadline,
+        cancellation: BrokerCancellation,
     ): BrokerOutcome<IrpcKeyBatch> =
         withV3Endpoint(deadline, cancellation) { endpoint ->
+            val identity = endpoint.resolvedIdentity()
+            require(expectedIdentity == null || identity == expectedIdentity)
             val keys = List(count.value) { endpoint.generateKey() }
-            IrpcKeyBatch(keys)
+            IrpcKeyBatch(identity, keys)
         }
+
+    internal fun resolveIdentity(
+        deadline: BrokerDeadline,
+        cancellation: BrokerCancellation,
+    ): BrokerOutcome<IrpcResolvedIdentity> =
+        withV3Endpoint(deadline, cancellation, IrpcServiceEndpoint::resolvedIdentity)
 
     fun generateCertificateRequest(
         batch: IrpcKeyBatch,
@@ -106,6 +121,7 @@ internal constructor(
             if (endpoint.version != REQUIRED_VERSION) {
                 throw UnsupportedIrpcVersionException(endpoint.version)
             }
+            endpoint.resolvedIdentity()
             val result = operation(endpoint)
             if (!endpoint.alive.get()) throw android.os.DeadObjectException()
             result
@@ -118,6 +134,21 @@ internal constructor(
         const val REQUIRED_VERSION = 3
         private const val EEK_CURVE_P256 = 1
     }
+}
+
+private fun IrpcServiceEndpoint.resolvedIdentity(): IrpcResolvedIdentity {
+    require(
+        descriptor == IrpcClient.IRPC_DESCRIPTOR &&
+            supportedEekCurve == 1 &&
+            supportedNumKeysInCsr >= RkpKeyCount.MAX
+    )
+    return IrpcResolvedIdentity(
+        descriptor,
+        IrpcClient.DEFAULT_TEE_SERVICE,
+        componentName,
+        uniqueId,
+        version,
+    )
 }
 
 internal class AndroidIrpcServiceEndpoint(
@@ -140,7 +171,8 @@ internal class AndroidIrpcServiceEndpoint(
     override fun generateKey(): IrpcGeneratedKey {
         val publicKey = MacedPublicKey()
         val blob = service.generateEcdsaP256KeyPair(false, publicKey)
-        return IrpcGeneratedKey(publicKey.macedKey, blob)
+        val maced = publicKey.macedKey
+        return IrpcGeneratedKey(maced, MacedP256Spki.decode(maced), blob)
     }
 
     override fun generateCertificateRequestV2(

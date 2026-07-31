@@ -14,19 +14,24 @@ import org.matrix.TEESimulator.rka.broker.FakeIrpcEndpoint
 import org.matrix.TEESimulator.rka.broker.FakeResolver
 import org.matrix.TEESimulator.rka.broker.IrpcGeneratedKey
 import org.matrix.TEESimulator.rka.broker.RkpKeyCount
+import org.matrix.TEESimulator.rka.broker.testSpki
 
 class RkpJournalTest {
     @Test
     fun persistsGeneratingBeforeRecordingOrderedResults() {
         val store = MemoryJournalStore()
         val journal = RkpJournal(store)
-        val generating = journal.begin(count(2), RkpBatchId.fresh())
+        val generating = journal.begin(count(2), identity(), RkpBatchId.fresh())
 
         assertEquals(
             RkpJournalState.RKP_KEY_GENERATING,
             RkpJournalCodec.decode(store.writes[0]).state,
         )
-        val entries = journal.deriveEntries(generating, listOf(byteArrayOf(1), byteArrayOf(2)))
+        val entries =
+            journal.deriveEntries(
+                generating,
+                listOf(byteArrayOf(1) to testSpki(), byteArrayOf(2) to testSpki()),
+            )
         val recorded = journal.record(generating, entries) {}
 
         assertEquals(listOf(0, 1), recorded.entries.map { it.order })
@@ -53,7 +58,11 @@ class RkpJournalTest {
                                 order += "hardware"
                             },
                             generated =
-                                IrpcGeneratedKey(byteArrayOf(1), byteArrayOf(81, 82, 83, 84)),
+                                IrpcGeneratedKey(
+                                    byteArrayOf(1),
+                                    testSpki(),
+                                    byteArrayOf(81, 82, 83, 84),
+                                ),
                         )
                 ),
                 DirectCallRunner,
@@ -95,7 +104,7 @@ class RkpJournalTest {
     fun crashRecoveryIsDurableAndIdempotent() {
         val store = MemoryJournalStore()
         val journal = RkpJournal(store)
-        journal.begin(count(1))
+        journal.begin(count(1), identity())
 
         assertEquals(RkpJournalState.QUARANTINED, journal.recover()?.state)
         val writes = store.writes.size
@@ -129,12 +138,12 @@ class RkpJournalTest {
     @Test(expected = IllegalArgumentException::class)
     fun rejectsTransitionSkip() {
         val journal = RkpJournal(MemoryJournalStore())
-        journal.transition(journal.begin(count(1)), RkpJournalState.CSR_PREPARED)
+        journal.transition(journal.begin(count(1), identity()), RkpJournalState.CSR_PREPARED)
     }
 
     @Test(expected = IllegalStateException::class)
     fun writeFailurePreventsNextState() {
-        RkpJournal(MemoryJournalStore(fail = true)).begin(count(1))
+        RkpJournal(MemoryJournalStore(fail = true)).begin(count(1), identity())
     }
 
     @Test
@@ -173,12 +182,58 @@ class RkpJournalTest {
     }
 
     @Test
+    fun rejectsSpkiAndResolvedIdentityMutation() {
+        val recorded = recorded(RkpJournal(MemoryJournalStore()))
+        val encoded = RkpJournalCodec.encode(recorded)
+        val spki = recorded.entries.single().copySpkiDer()
+        val spkiOffset = encoded.indexOfSubsequence(spki)
+        encoded[spkiOffset] = (encoded[spkiOffset].toInt() xor 1).toByte()
+        assertThrows(IllegalArgumentException::class.java) { RkpJournalCodec.decode(encoded) }
+
+        val identityEncoded = RkpJournalCodec.encode(recorded)
+        val identityOffset = identityEncoded.indexOfSubsequence("fake-irpc".toByteArray())
+        identityEncoded[identityOffset] = (identityEncoded[identityOffset].toInt() xor 1).toByte()
+        assertThrows(IllegalArgumentException::class.java) {
+            RkpJournalCodec.decode(identityEncoded)
+        }
+    }
+
+    @Test
+    fun identitySwapIsRejectedBeforeHardwareGeneration() {
+        val calls = intArrayOf(0)
+        val endpoints =
+            ArrayDeque(
+                listOf(
+                    FakeIrpcEndpoint(),
+                    FakeIrpcEndpoint(componentName = "swapped", onGenerate = { calls[0] += 1 }),
+                )
+            )
+        val client =
+            org.matrix.TEESimulator.rka.broker.IrpcClient(
+                FakeResolver(irpcProvider = { endpoints.removeFirst() }),
+                DirectCallRunner,
+            )
+        val store = MemoryJournalStore()
+
+        val outcome =
+            DurableIrpcKeyBatchGenerator(client, RkpJournal(store))
+                .generate(count(1), BrokerDeadline.at(5_000), BrokerCancellation.active())
+
+        assertTrue(outcome is BrokerOutcome.Failure)
+        assertEquals(0, calls[0])
+        assertEquals(RkpJournalState.QUARANTINED, RkpJournalCodec.decode(store.read()!!).state)
+    }
+
+    @Test
     fun terminalDeleteClearsBrokerOwnerBeforeReturn() {
         val journal = RkpJournal(MemoryJournalStore())
-        val generating = journal.begin(count(1))
+        val generating = journal.begin(count(1), identity())
         var clears = 0
         var current =
-            journal.record(generating, journal.deriveEntries(generating, listOf(byteArrayOf(1)))) {
+            journal.record(
+                generating,
+                journal.deriveEntries(generating, listOf(byteArrayOf(1) to testSpki())),
+            ) {
                 clears += 1
             }
         current = journal.transition(current, RkpJournalState.CSR_PREPARED)
@@ -198,12 +253,21 @@ class RkpJournalTest {
         (RkpKeyCount.parse(value) as org.matrix.TEESimulator.rka.broker.BrokerOutcome.Success).value
 
     private fun recorded(journal: RkpJournal): RkpJournalRecord {
-        val generating = journal.begin(count(1))
+        val generating = journal.begin(count(1), identity())
         return journal.record(
             generating,
-            journal.deriveEntries(generating, listOf(byteArrayOf(1))),
+            journal.deriveEntries(generating, listOf(byteArrayOf(1) to testSpki())),
         ) {}
     }
+
+    private fun identity(): RkpIrpcIdentity =
+        RkpIrpcIdentity(
+            org.matrix.TEESimulator.rka.broker.IrpcClient.IRPC_DESCRIPTOR,
+            org.matrix.TEESimulator.rka.broker.IrpcClient.DEFAULT_TEE_SERVICE,
+            "TEE",
+            "fake-irpc",
+            org.matrix.TEESimulator.rka.broker.IrpcClient.REQUIRED_VERSION,
+        )
 }
 
 private class MemoryJournalStore(private val fail: Boolean = false) : RkpJournalStore {
@@ -253,6 +317,12 @@ private class RecordingSyncOps(private val order: MutableList<String>) : Journal
 
 private fun ByteArray.containsSubsequence(candidate: ByteArray): Boolean =
     indices.any { start ->
+        start + candidate.size <= size &&
+            candidate.indices.all { offset -> this[start + offset] == candidate[offset] }
+    }
+
+private fun ByteArray.indexOfSubsequence(candidate: ByteArray): Int =
+    indices.first { start ->
         start + candidate.size <= size &&
             candidate.indices.all { offset -> this[start + offset] == candidate[offset] }
     }

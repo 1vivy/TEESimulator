@@ -75,7 +75,10 @@ class RkaBrokerCapabilityTest {
         val publicKey = byteArrayOf(1, 2, 3)
         val keyBlob = byteArrayOf(9, 8, 7)
         val resolver =
-            FakeResolver(irpc = FakeIrpcEndpoint(generated = IrpcGeneratedKey(publicKey, keyBlob)))
+            FakeResolver(
+                irpc =
+                    FakeIrpcEndpoint(generated = IrpcGeneratedKey(publicKey, testSpki(), keyBlob))
+            )
         val client = IrpcClient(resolver, DirectCallRunner)
 
         val batch =

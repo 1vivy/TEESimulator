@@ -16,10 +16,20 @@ class DurableIrpcKeyBatchGenerator(
         deadline: BrokerDeadline,
         cancellation: BrokerCancellation,
     ): BrokerOutcome<IrpcKeyBatch> {
-        val intent = journal.begin(count)
-        val outcome = client.generateKeyBatch(count, deadline, cancellation)
+        val identity =
+            when (val resolved = client.resolveIdentity(deadline, cancellation)) {
+                is BrokerOutcome.Success -> resolved.value
+                is BrokerOutcome.Failure -> return resolved
+                BrokerOutcome.SelfCallBypass -> return BrokerOutcome.SelfCallBypass
+            }
+        val intent = journal.begin(count, RkpIrpcIdentity.from(identity))
+        val outcome = client.generateKeyBatch(count, identity, deadline, cancellation)
         if (outcome is BrokerOutcome.Success) {
-            val entries = journal.deriveEntries(intent, outcome.value.publicKeys())
+            val entries =
+                journal.deriveEntries(
+                    intent,
+                    outcome.value.publicKeys().zip(outcome.value.spkiPublicKeys()),
+                )
             val owner = outcome.value.retain(entries.map { it.handle.copyBytes() })
             journal.record(intent, entries, owner::clear)
         } else {

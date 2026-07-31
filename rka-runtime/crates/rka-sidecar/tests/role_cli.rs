@@ -9,6 +9,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use ring::digest::{SHA256, digest};
+
 fn runtime_context(role: &str) -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -16,13 +18,28 @@ fn runtime_context(role: &str) -> std::io::Result<(std::path::PathBuf, std::path
         .as_nanos();
     let root =
         std::env::temp_dir().join(format!("rka-sidecar-role-{}-{nonce}", std::process::id()));
-    fs::create_dir_all(&root)?;
-    let profile = root.join("active.conf");
+    fs::create_dir_all(root.join("profiles"))?;
+    let profile = root.join("profiles/direct.conf");
     fs::write(
         &profile,
-        format!("version=1\nrole={role}\nprofile_epoch=0\n"),
+        format!(
+            "version=1\nrole={role}\nprofile_epoch=17\npeer_endpoint=192.0.2.44\npeer_spki_sha256={}\ntransport=DIRECT\n",
+            "ab".repeat(32)
+        ),
     )?;
     Ok((root, profile))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    digest(&SHA256, bytes)
+        .as_ref()
+        .iter()
+        .fold(String::new(), |mut encoded, byte| {
+            let _ = write!(encoded, "{byte:02x}");
+            encoded
+        })
 }
 
 #[test]
@@ -33,6 +50,11 @@ fn donor_and_candidate_remain_live_after_ready() -> Result<(), Box<dyn std::erro
             .arg(role)
             .env("RKA_STATE_ROOT", &root)
             .env("RKA_PROFILE_PATH", &profile)
+            .env("RKA_EXPECTED_PROFILE_EPOCH", "17")
+            .env(
+                "RKA_PROFILE_RECEIPT_PATH",
+                root.join("run/direct-profile.receipt"),
+            )
             .stdout(Stdio::piped())
             .spawn()?;
         let stdout = child
@@ -68,6 +90,70 @@ fn donor_and_candidate_remain_live_after_ready() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
+fn direct_profile_is_consumed_before_readiness() -> Result<(), Box<dyn std::error::Error>> {
+    let (root, profile) = runtime_context("DONOR")?;
+    let receipt = root.join("run/direct-profile.receipt");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rka-sidecar"))
+        .arg("donor")
+        .env("RKA_STATE_ROOT", &root)
+        .env("RKA_PROFILE_PATH", &profile)
+        .env("RKA_EXPECTED_PROFILE_EPOCH", "17")
+        .env("RKA_PROFILE_RECEIPT_PATH", &receipt)
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("missing role stdout"))?;
+    let mut ready = String::new();
+    BufReader::new(stdout).read_line(&mut ready)?;
+
+    let receipt_text = fs::read_to_string(&receipt)?;
+    let expected_profile_hash = sha256_hex(&fs::read(&profile)?);
+    assert_eq!(ready, "role=donor status=READY\n");
+    assert_eq!(
+        receipt_text,
+        format!(
+            "version=1\nprofile_sha256={expected_profile_hash}\nprofile_epoch=17\npeer_pin_sha256={}\ntransport=DIRECT\n",
+            sha256_hex(&[0xab_u8; 32])
+        )
+    );
+
+    child.kill()?;
+    child.wait()?;
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn partial_and_stale_direct_profiles_fail_before_readiness()
+-> Result<(), Box<dyn std::error::Error>> {
+    for profile_text in [
+        "version=1\nrole=DONOR\nprofile_epoch=17\n",
+        "version=1\nrole=DONOR\nprofile_epoch=16\npeer_endpoint=192.0.2.44\npeer_spki_sha256=abababababababababababababababababababababababababababababababab\ntransport=DIRECT\n",
+    ] {
+        let (root, profile) = runtime_context("DONOR")?;
+        let receipt = root.join("run/direct-profile.receipt");
+        fs::write(&profile, profile_text)?;
+
+        let output = Command::new(env!("CARGO_BIN_EXE_rka-sidecar"))
+            .arg("donor")
+            .env("RKA_STATE_ROOT", &root)
+            .env("RKA_PROFILE_PATH", &profile)
+            .env("RKA_EXPECTED_PROFILE_EPOCH", "17")
+            .env("RKA_PROFILE_RECEIPT_PATH", &receipt)
+            .output()?;
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(!receipt.exists());
+        fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+#[test]
 fn cross_role_and_malformed_profiles_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
     for (role, profile_text) in [
         ("donor", "version=1\nrole=CANDIDATE\nprofile_epoch=0\n"),
@@ -85,6 +171,11 @@ fn cross_role_and_malformed_profiles_are_rejected() -> Result<(), Box<dyn std::e
             .arg(role)
             .env("RKA_STATE_ROOT", &root)
             .env("RKA_PROFILE_PATH", &profile)
+            .env("RKA_EXPECTED_PROFILE_EPOCH", "17")
+            .env(
+                "RKA_PROFILE_RECEIPT_PATH",
+                root.join("run/direct-profile.receipt"),
+            )
             .status()?;
         assert!(!status.success());
         fs::remove_dir_all(root)?;
@@ -101,6 +192,11 @@ fn oversized_nonregular_and_symlink_profiles_are_rejected() -> Result<(), Box<dy
         .arg("donor")
         .env("RKA_STATE_ROOT", &root)
         .env("RKA_PROFILE_PATH", &profile)
+        .env("RKA_EXPECTED_PROFILE_EPOCH", "17")
+        .env(
+            "RKA_PROFILE_RECEIPT_PATH",
+            root.join("run/direct-profile.receipt"),
+        )
         .status()?;
     assert!(!oversized.success());
     fs::remove_file(&profile)?;
@@ -109,6 +205,11 @@ fn oversized_nonregular_and_symlink_profiles_are_rejected() -> Result<(), Box<dy
         .arg("donor")
         .env("RKA_STATE_ROOT", &root)
         .env("RKA_PROFILE_PATH", &profile)
+        .env("RKA_EXPECTED_PROFILE_EPOCH", "17")
+        .env(
+            "RKA_PROFILE_RECEIPT_PATH",
+            root.join("run/direct-profile.receipt"),
+        )
         .status()?;
     assert!(!directory.success());
     fs::remove_dir(&profile)?;
@@ -119,6 +220,11 @@ fn oversized_nonregular_and_symlink_profiles_are_rejected() -> Result<(), Box<dy
         .arg("donor")
         .env("RKA_STATE_ROOT", &root)
         .env("RKA_PROFILE_PATH", &profile)
+        .env("RKA_EXPECTED_PROFILE_EPOCH", "17")
+        .env(
+            "RKA_PROFILE_RECEIPT_PATH",
+            root.join("run/direct-profile.receipt"),
+        )
         .status()?;
     assert!(!linked.success());
     fs::remove_dir_all(root)?;

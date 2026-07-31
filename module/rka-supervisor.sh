@@ -47,8 +47,31 @@ profile_valid() {
     [ "$(stat -c '%u:%a' "$profile")" = "$(id -u):600" ] || return 1
     [ "$(sed -n '1p' "$profile")" = version=1 ] || return 1
     [ "$(sed -n '2p' "$profile")" = "role=$1" ] || return 1
-    case $(sed -n '3p' "$profile") in profile_epoch=[0-9]*) ;; *) return 1 ;; esac
+    epoch_line=$(sed -n '3p' "$profile")
+    case $epoch_line in profile_epoch=*) ;; *) return 1 ;; esac
+    active_epoch=${epoch_line#profile_epoch=}
+    case $active_epoch in ''|*[!0-9]*) return 1 ;; esac
     [ "$(wc -l < "$profile")" -eq 3 ]
+}
+
+direct_profile_valid() {
+    profile=$state/profiles/direct.conf
+    [ -f "$profile" ] && [ ! -L "$profile" ] || return 1
+    [ "$(stat -c '%u:%a' "$profile")" = "$(id -u):600" ] || return 1
+    [ "$(sed -n '1p' "$profile")" = version=1 ] || return 1
+    [ "$(sed -n '2p' "$profile")" = "role=$1" ] || return 1
+    [ "$(sed -n '3p' "$profile")" = "profile_epoch=$2" ] || return 1
+    endpoint_line=$(sed -n '4p' "$profile")
+    case $endpoint_line in peer_endpoint=*) ;; *) return 1 ;; esac
+    endpoint=${endpoint_line#peer_endpoint=}
+    case $endpoint in ''|*[!0-9.]*) return 1 ;; esac
+    pin_line=$(sed -n '5p' "$profile")
+    case $pin_line in peer_spki_sha256=*) ;; *) return 1 ;; esac
+    pin=${pin_line#peer_spki_sha256=}
+    case $pin in *[!0-9a-f]*) return 1 ;; esac
+    [ "$(printf %s "$pin" | wc -c)" -eq 64 ] || return 1
+    [ "$(sed -n '6p' "$profile")" = transport=DIRECT ] || return 1
+    [ "$(wc -l < "$profile")" -eq 6 ]
 }
 
 direct_ready() {
@@ -133,12 +156,48 @@ start_one() {
     [ -f "$pids/$name.pid" ]
 }
 
+profile_receipt_valid() {
+    receipt=$state/run/direct-profile.receipt
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+    [ "$(stat -c '%u:%a' "$receipt")" = "$(id -u):600" ] || return 1
+    [ "$(sed -n '1p' "$receipt")" = version=1 ] || return 1
+    [ "$(sed -n '2p' "$receipt")" = "profile_sha256=$1" ] || return 1
+    [ "$(sed -n '3p' "$receipt")" = "profile_epoch=$2" ] || return 1
+    pin_receipt=$(sed -n '4p' "$receipt")
+    case $pin_receipt in peer_pin_sha256=*) ;; *) return 1 ;; esac
+    pin_hash=${pin_receipt#peer_pin_sha256=}
+    case $pin_hash in *[!0-9a-f]*) return 1 ;; esac
+    [ "$(printf %s "$pin_hash" | wc -c)" -eq 64 ] || return 1
+    [ "$(sed -n '5p' "$receipt")" = transport=DIRECT ] || return 1
+    [ "$(wc -l < "$receipt")" -eq 5 ]
+}
+
+start_sidecar() {
+    selected_role=$1
+    selected_epoch=$2
+    profile_hash=$(sha256sum "$state/profiles/direct.conf" | awk '{print $1}') || return 1
+    rm -f "$state/run/direct-profile.receipt"
+    start_one sidecar env RKA_STATE_ROOT="$state" \
+        RKA_PROFILE_PATH="$state/profiles/direct.conf" \
+        RKA_EXPECTED_PROFILE_EPOCH="$selected_epoch" \
+        RKA_PROFILE_RECEIPT_PATH="$state/run/direct-profile.receipt" \
+        "$sidecar" "$selected_role" || return 1
+    attempts=0
+    while ! profile_receipt_valid "$profile_hash" "$selected_epoch" && [ "$attempts" -lt 5 ]; do
+        record_live "$pids/sidecar.pid" || return 1
+        sleep 1
+        attempts=$((attempts + 1))
+    done
+    profile_receipt_valid "$profile_hash" "$selected_epoch"
+}
+
 start() {
     role=$($control --root "$root" --state-root "$state" boot-decision) || return 1
     case $role in
         DISABLED) return 1 ;;
         DONOR|CANDIDATE)
             profile_valid "$role" || return 1
+            direct_profile_valid "$role" "$active_epoch" || return 1
             if [ "${RKA_REQUIRE_DIRECT_READY:-false}" = true ]; then
                 direct_ready || return 1
             fi
@@ -155,11 +214,11 @@ start() {
         LOCAL) start_one legacy "$daemon" legacy ;;
         DONOR)
             start_one broker "$daemon" broker --rka-role DONOR --rka-no-candidate || { stop; return 1; }
-            start_one sidecar env RKA_STATE_ROOT="$state" RKA_PROFILE_PATH="$state/profiles/active.conf" "$sidecar" donor || { stop; return 1; }
+            start_sidecar donor "$active_epoch" || { stop; return 1; }
             ;;
         CANDIDATE)
             start_one broker "$daemon" broker --rka-role CANDIDATE --rka-candidate || { stop; return 1; }
-            start_one sidecar env RKA_STATE_ROOT="$state" RKA_PROFILE_PATH="$state/profiles/active.conf" "$sidecar" candidate || { stop; return 1; }
+            start_sidecar candidate "$active_epoch" || { stop; return 1; }
             ;;
     esac
 }

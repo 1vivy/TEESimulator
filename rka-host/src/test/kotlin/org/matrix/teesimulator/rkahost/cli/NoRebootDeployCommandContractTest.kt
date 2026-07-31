@@ -16,16 +16,16 @@ class NoRebootDeployCommandContractTest {
     @Test
     fun transactionOrdersBothSnapshotsAndOldRuntimeRemovalBeforeSingleInstall() {
         val deploy = script.substringAfter("deploy)\n").substringBefore("    ;;\npair)")
-        val activeSnapshot = deploy.indexOf("tree_hash \"\$active\" > \"\$txn/active.before\"")
         val pendingSnapshot = deploy.indexOf("tree_hash \"\$pending\" > \"\$txn/pending.before\"")
-        val pendingPreserve = deploy.indexOf("mv \"\$pending\" \"\$txn/pending.tree\"")
-        val stop = deploy.indexOf("\"\$active/rka-control.sh\" stop")
+        val pendingPreserve = deploy.indexOf("cp -a \"\$pending\" \"\$txn/pending.tree\"")
+        val stop = deploy.indexOf("\"\$active/rka-supervisor.sh\" stop")
         val unmount = deploy.indexOf("nsenter -t 1 -m -- umount \"\$active\"")
+        val activeSnapshot = deploy.indexOf("tree_hash \"\$active\" > \"\$txn/active.before\"")
         val install = deploy.indexOf("ksud module install \"\$archive\"")
 
-        assertTrue(activeSnapshot >= 0 && pendingSnapshot > activeSnapshot)
-        assertTrue(stop > pendingSnapshot && unmount > stop)
-        assertTrue(pendingPreserve > unmount && install > pendingPreserve)
+        assertTrue(pendingSnapshot >= 0 && pendingPreserve > pendingSnapshot)
+        assertTrue(stop > pendingPreserve && unmount > stop)
+        assertTrue(activeSnapshot > unmount && install > activeSnapshot)
         assertEquals(1, Regex("ksud module install").findAll(deploy).count())
     }
 
@@ -35,9 +35,8 @@ class NoRebootDeployCommandContractTest {
         val check = deploy.indexOf("ksud sepolicy check")
         val apply = deploy.indexOf("ksud sepolicy apply")
         val bind = deploy.indexOf("nsenter -t 1 -m -- mount --bind \"\$pending\" \"\$active\"")
-        val start = deploy.indexOf("\"\$active/rka-supervisor.sh\" start")
 
-        assertTrue(check >= 0 && apply > check && bind > apply && start > bind)
+        assertTrue(check >= 0 && apply > check && bind > apply)
         assertTrue(deploy.contains("sepolicy-logcat.reject"))
         assertTrue(script.contains("cmp -s \"\$active/module.prop\" \"\$pending/module.prop\""))
     }
@@ -60,5 +59,63 @@ class NoRebootDeployCommandContractTest {
         assertTrue(rollback.contains("mv \"\$txn/active.tree\" \"\$active\""))
         assertTrue(rollback.contains("mv \"\$txn/pending.tree\" \"\$pending\""))
         assertTrue(rollback.contains("additive_sepolicy_may_persist=true"))
+    }
+
+    @Test
+    fun liveBindSnapshotsPendingBeforeExposingAndSnapshottingHiddenActive() {
+        val deploy = script.substringAfter("deploy)\n").substringBefore("    ;;\npair)")
+        val pendingSnapshot = deploy.indexOf("cp -a \"\$pending\" \"\$txn/pending.tree\"")
+        val unmount = deploy.indexOf("nsenter -t 1 -m -- umount \"\$active\"")
+        val activeSnapshot = deploy.indexOf("cp -a \"\$active\" \"\$txn/active.tree\"")
+
+        assertTrue(pendingSnapshot >= 0 && unmount > pendingSnapshot && activeSnapshot > unmount)
+        assertTrue(deploy.contains("active.metadata.before"))
+        assertTrue(deploy.contains("pending.metadata.before"))
+    }
+
+    @Test
+    fun attemptIdentityIsUniqueAndBoundToSourceAndArchive() {
+        assertTrue(script.contains("cat /proc/sys/kernel/random/uuid"))
+        assertTrue(script.contains("source_sha=%s\\narchive_sha256=%s"))
+        assertFalse(script.contains("transaction_id=\"\${source_sha:0:12}-\${archive_sha:0:12}\""))
+    }
+
+    @Test
+    fun remoteArchiveAndSourceReceiptAreVerifiedBeforeInstall() {
+        val deploy = script.substringAfter("deploy)\n").substringBefore("    ;;\npair)")
+        val remoteHash = deploy.indexOf("sha256sum \"\$archive\"")
+        val sourceReceipt = deploy.indexOf("source.receipt")
+        val install = deploy.indexOf("ksud module install \"\$archive\"")
+
+        assertTrue(remoteHash >= 0 && sourceReceipt > remoteHash && install > sourceReceipt)
+        assertTrue(script.contains("\"\$expected_source_sha\" \"\$expected_archive_sha\""))
+    }
+
+    @Test
+    fun completeDirectProfileIsPublishedBeforeRuntimeStartAndReloaded() {
+        val pair = script.substringAfter("pair)\n").substringBefore("    ;;\ndirect-probe)")
+        val profile = pair.indexOf("direct.conf")
+        val start = pair.indexOf("\"\$active/rka-supervisor.sh\" start")
+
+        assertTrue(profile >= 0 && start > profile)
+        assertTrue(pair.contains("peer_spki_sha256"))
+        assertTrue(pair.contains("transport=DIRECT"))
+        assertTrue(pair.contains("direct-profile.receipt"))
+        assertTrue(script.contains("-tls1_3"))
+    }
+
+    @Test
+    fun provenanceAndEveryRuntimeConsumerUseTheIntendedMountView() {
+        val preflight = script.substringAfter("preflight)\n").substringBefore("    ;;\nnetwork)")
+        val pair = script.substringAfter("pair)\n").substringBefore("    ;;\ndirect-probe)")
+
+        assertTrue(preflight.contains("ksud.provenance"))
+        assertFalse(preflight.contains("strings \"\$ksud\""))
+        assertTrue(pair.contains("manager_pid"))
+        assertTrue(pair.contains("webui_pid"))
+        assertTrue(pair.contains("for name in broker sidecar"))
+        assertTrue(pair.contains("\$state/run/pids/\$name.pid"))
+        assertTrue(pair.contains("/proc/1/ns/mnt"))
+        assertTrue(pair.contains("stat -c %d:%i"))
     }
 }

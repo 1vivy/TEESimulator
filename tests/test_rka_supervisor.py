@@ -46,6 +46,19 @@ class RkaSupervisorTest(unittest.TestCase):
         path.write_text(f"version=1\nrole={role}\nprofile_epoch=0\n", encoding="utf-8")
         os.chmod(path, 0o600)
 
+    def write_direct_profile(self, state: Path, role: str, epoch: int = 0) -> None:
+        path = state / "profiles" / "direct.conf"
+        path.write_text(
+            "version=1\n"
+            f"role={role}\n"
+            f"profile_epoch={epoch}\n"
+            "peer_endpoint=192.0.2.44\n"
+            f"peer_spki_sha256={'ab' * 32}\n"
+            "transport=DIRECT\n",
+            encoding="utf-8",
+        )
+        os.chmod(path, 0o600)
+
     def fixture(self, role: str | None) -> tuple[TemporaryDirectory[str], Path, Path]:
         temporary = TemporaryDirectory()
         root = Path(temporary.name) / "root"
@@ -53,7 +66,7 @@ class RkaSupervisorTest(unittest.TestCase):
         root.mkdir()
         child = root / "fake-child.sh"
         child.write_text(
-            "#!/bin/sh\nprintf '%s %s\\n' \"$0\" \"$*\" >> \"$RKA_CHILD_LOG\"\n[ \"${RKA_CHILD_MODE:-hold}\" = crash ] && exit 7\nif [ \"${RKA_CHILD_MODE:-hold}\" = crash-once ] && [ ! -e \"$RKA_CRASH_ONCE_FILE\" ]; then : > \"$RKA_CRASH_ONCE_FILE\"; sleep 1; exit 7; fi\ntrap 'printf term\\n >> \"$RKA_CHILD_LOG\"; exit 0' TERM INT\nwhile :; do sleep 1; done\n",
+            "#!/bin/sh\nprintf '%s %s RKA_PROFILE_PATH=%s RKA_EXPECTED_PROFILE_EPOCH=%s RKA_PROFILE_RECEIPT_PATH=%s\\n' \"$0\" \"$*\" \"${RKA_PROFILE_PATH-}\" \"${RKA_EXPECTED_PROFILE_EPOCH-}\" \"${RKA_PROFILE_RECEIPT_PATH-}\" >> \"$RKA_CHILD_LOG\"\nif [ -n \"${RKA_PROFILE_RECEIPT_PATH-}\" ]; then profile_hash=$(sha256sum \"$RKA_PROFILE_PATH\" | awk '{print $1}'); printf 'version=1\\nprofile_sha256=%s\\nprofile_epoch=%s\\npeer_pin_sha256=%064d\\ntransport=DIRECT\\n' \"$profile_hash\" \"$RKA_EXPECTED_PROFILE_EPOCH\" 0 > \"$RKA_PROFILE_RECEIPT_PATH\"; chmod 600 \"$RKA_PROFILE_RECEIPT_PATH\"; fi\n[ \"${RKA_CHILD_MODE:-hold}\" = crash ] && exit 7\nif [ \"${RKA_CHILD_MODE:-hold}\" = crash-once ] && [ ! -e \"$RKA_CRASH_ONCE_FILE\" ]; then : > \"$RKA_CRASH_ONCE_FILE\"; sleep 1; exit 7; fi\ntrap 'printf term\\n >> \"$RKA_CHILD_LOG\"; exit 0' TERM INT\nwhile :; do sleep 1; done\n",
             encoding="utf-8",
         )
         child.chmod(0o755)
@@ -61,6 +74,7 @@ class RkaSupervisorTest(unittest.TestCase):
             self.write_role(root, role)
             if role not in {"LOCAL", "DISABLED"}:
                 self.write_profile(state, role)
+                self.write_direct_profile(state, role)
         return temporary, root, state
 
     def clean(self, root: Path, state: Path) -> None:

@@ -2,10 +2,10 @@ use super::BridgeError;
 use std::io::ErrorKind;
 
 use super::model::{
-    BridgeMessage, BrokerBatchId, BrokerCertificationMetadata, BrokerKeyMetadata, Hash32,
-    MAX_CERTIFICATE_BYTES, MAX_CHAIN_BYTES, MAX_CHAIN_CERTIFICATES, MAX_FRAME_BYTES,
-    MAX_PUBLIC_KEYS, MAX_TOTAL_INPUT_BYTES, MAX_UPDATE_BYTES, NetworkHandle, PublicBytes,
-    RequestId,
+    BridgeMessage, BrokerBatchId, BrokerCertificationMetadata, BrokerKeyMetadata,
+    CandidateBridgeOperation, Hash32, MAX_CERTIFICATE_BYTES, MAX_CHAIN_BYTES,
+    MAX_CHAIN_CERTIFICATES, MAX_FRAME_BYTES, MAX_PUBLIC_KEYS, MAX_TOTAL_INPUT_BYTES,
+    MAX_UPDATE_BYTES, NetworkHandle, PublicBytes, RequestId,
 };
 
 pub(super) fn decode_body(
@@ -58,6 +58,15 @@ pub(super) fn decode_body(
             }
             BridgeMessage::Error(request_id, code, Hash32::new(cursor.take_array()?))
         }
+        7 | 8 => {
+            let operation = CandidateBridgeOperation::from_wire(cursor.take_u8()?)?;
+            let payload = cursor.take_public(0, MAX_FRAME_BYTES.saturating_sub(5))?;
+            if tag == 7 {
+                BridgeMessage::CandidateCommand(request_id, operation, payload)
+            } else {
+                BridgeMessage::CandidateReply(request_id, operation, payload)
+            }
+        }
         9 => decode_certification_request(request_id, &mut cursor)?,
         10 => BridgeMessage::CertificationAck(
             request_id,
@@ -92,6 +101,7 @@ fn decode_public_key_response(
 ) -> Result<BridgeMessage, BridgeError> {
     let public_csr = cursor.take_public(1, MAX_FRAME_BYTES)?;
     let batch_id = BrokerBatchId::new(cursor.take_array()?);
+    let irpc_identity_hash = Hash32::new(cursor.take_array()?);
     let count = usize::from(cursor.take_u8()?);
     if !(1..=MAX_PUBLIC_KEYS).contains(&count) {
         return Err(BridgeError::NonCanonical);
@@ -112,7 +122,11 @@ fn decode_public_key_response(
         )?);
     }
     Ok(BridgeMessage::PublicKeyResponse(
-        request_id, public_csr, batch_id, keys,
+        request_id,
+        public_csr,
+        batch_id,
+        irpc_identity_hash,
+        keys,
     ))
 }
 

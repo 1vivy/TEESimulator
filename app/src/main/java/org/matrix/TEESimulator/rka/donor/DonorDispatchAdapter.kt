@@ -7,10 +7,4 @@ internal object DonorDispatchAdapter {
         command: BridgeMessage.CandidateCommand,
         backend: DonorKeyMintBackend,
     ): BridgeMessage = DonorBridgeDispatcher.dispatch(command, backend)
-
-    fun dispatch(
-        command: BridgeMessage.CandidateCommand,
-        backend: DonorKeyMintBackend,
-        dispatcher: (BridgeMessage.CandidateCommand, DonorKeyMintBackend) -> BridgeMessage,
-    ): BridgeMessage = dispatcher(command, backend)
 }

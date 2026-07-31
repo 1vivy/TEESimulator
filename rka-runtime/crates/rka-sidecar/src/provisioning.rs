@@ -84,7 +84,9 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
         .map_err(|_| ProvisioningRunError::Broker)?;
     let mut broker_handles = Vec::new();
     let result = (|| {
-        let BridgeMessage::PublicKeyResponse(_, hal_csr, batch_id, keys) = response else {
+        let BridgeMessage::PublicKeyResponse(_, hal_csr, batch_id, irpc_identity_hash, keys) =
+            response
+        else {
             return Err(ProvisioningRunError::Broker);
         };
         if keys.len() != usize::from(config.key_count) {
@@ -121,6 +123,7 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
             &executor,
             request_id,
             *batch_id.as_array(),
+            *irpc_identity_hash.as_array(),
             &prepared,
             &signed_body,
             &expected,
@@ -332,6 +335,7 @@ fn complete(
     executor: &RoleExecutor,
     request_id: u64,
     broker_batch_id: [u8; 16],
+    irpc_identity_hash: [u8; 32],
     prepared: &rka_rkp::PreparedCertificateRequest,
     response: &[u8],
     expected: &[ExpectedKey],
@@ -374,6 +378,7 @@ fn complete(
         &validated,
         request_id,
         broker_batch_id,
+        irpc_identity_hash,
         roots.epoch(),
         &config.validator_key,
         &mut quarantine,

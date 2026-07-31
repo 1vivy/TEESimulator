@@ -71,7 +71,7 @@ pub fn decode_frame(bytes: &[u8], role: ExchangeRole) -> Result<BridgeMessage, B
     if direction != role.direction() {
         return Err(BridgeError::WrongDirection);
     }
-    if !(1..=10).contains(&tag) || matches!(tag, 7 | 8) {
+    if !(1..=10).contains(&tag) {
         return Err(BridgeError::UnknownTag);
     }
     if !role.accepts(tag) {
@@ -141,8 +141,8 @@ fn body_length(message: &BridgeMessage) -> Result<usize, BridgeError> {
         |sum: usize, value: usize| sum.checked_add(value).ok_or(BridgeError::ValueTooLarge);
     match message {
         BridgeMessage::PublicKeyRequest(_, challenge, _) => checked(5, challenge.as_slice().len()),
-        BridgeMessage::PublicKeyResponse(_, public_csr, _, keys) => {
-            checked(21, public_csr.as_slice().len())?
+        BridgeMessage::PublicKeyResponse(_, public_csr, _, _, keys) => {
+            checked(53, public_csr.as_slice().len())?
                 .checked_add(
                     keys.len()
                         .checked_mul(97)
@@ -173,6 +173,8 @@ fn body_length(message: &BridgeMessage) -> Result<usize, BridgeError> {
             })
         }
         BridgeMessage::Error(..) => Ok(33),
+        BridgeMessage::CandidateCommand(_, _, payload)
+        | BridgeMessage::CandidateReply(_, _, payload) => checked(5, payload.as_slice().len()),
         BridgeMessage::CertificationRequest(_, _, keys, _, _) => keys
             .len()
             .checked_mul(130)
@@ -188,9 +190,10 @@ fn encode_body(message: &BridgeMessage, output: &mut Vec<u8>) -> Result<(), Brid
             output.push(*key_count);
             put_bytes(output, challenge.as_slice())?;
         }
-        BridgeMessage::PublicKeyResponse(_, public_csr, batch_id, keys) => {
+        BridgeMessage::PublicKeyResponse(_, public_csr, batch_id, irpc_identity_hash, keys) => {
             put_bytes(output, public_csr.as_slice())?;
             output.extend_from_slice(batch_id.as_array());
+            output.extend_from_slice(irpc_identity_hash.as_array());
             output.push(u8::try_from(keys.len()).map_err(|_| BridgeError::ValueTooLarge)?);
             for (order, key) in keys.iter().enumerate() {
                 if usize::from(key.order()) != order {
@@ -248,6 +251,11 @@ fn encode_body(message: &BridgeMessage, output: &mut Vec<u8>) -> Result<(), Brid
         BridgeMessage::Error(_, code, detail_hash) => {
             output.push(*code);
             output.extend_from_slice(detail_hash.as_array());
+        }
+        BridgeMessage::CandidateCommand(_, operation, payload)
+        | BridgeMessage::CandidateReply(_, operation, payload) => {
+            output.push(operation.wire());
+            put_bytes(output, payload.as_slice())?;
         }
         BridgeMessage::CertificationRequest(_, batch_id, keys, epoch, activation_binding) => {
             output.extend_from_slice(batch_id.as_array());

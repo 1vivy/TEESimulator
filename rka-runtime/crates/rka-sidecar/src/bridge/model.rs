@@ -100,6 +100,61 @@ fixed_bytes!(Hash32, 32, "Redacted fixed-width public hash.");
 fixed_bytes!(NetworkHandle, 16, "Opaque network-only operation handle.");
 fixed_bytes!(BrokerBatchId, 16, "Opaque broker-journal batch identifier.");
 
+/// Closed donor `KeyMint` operation carried by the authenticated local bridge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum CandidateBridgeOperation {
+    /// Generates a donor application key.
+    Generate,
+    /// Returns one retained donor public key.
+    Get,
+    /// Lists retained donor key handles.
+    List,
+    /// Deletes one donor key.
+    Delete,
+    /// Begins a signing operation.
+    Begin,
+    /// Supplies authenticated additional data.
+    UpdateAad,
+    /// Supplies signing input.
+    Update,
+    /// Finishes a signing operation.
+    Finish,
+    /// Aborts a signing operation.
+    Abort,
+}
+
+impl CandidateBridgeOperation {
+    pub(crate) const fn wire(self) -> u8 {
+        match self {
+            Self::Generate => 1,
+            Self::Get => 2,
+            Self::List => 3,
+            Self::Delete => 4,
+            Self::Begin => 5,
+            Self::UpdateAad => 6,
+            Self::Update => 7,
+            Self::Finish => 8,
+            Self::Abort => 9,
+        }
+    }
+
+    pub(crate) const fn from_wire(value: u8) -> Result<Self, BridgeError> {
+        match value {
+            1 => Ok(Self::Generate),
+            2 => Ok(Self::Get),
+            3 => Ok(Self::List),
+            4 => Ok(Self::Delete),
+            5 => Ok(Self::Begin),
+            6 => Ok(Self::UpdateAad),
+            7 => Ok(Self::Update),
+            8 => Ok(Self::Finish),
+            9 => Ok(Self::Abort),
+            _ => Err(BridgeError::NonCanonical),
+        }
+    }
+}
+
 /// Exact broker-journal identity for one ordered generated key.
 #[derive(Debug, Eq, PartialEq)]
 pub struct BrokerKeyMetadata {
@@ -233,6 +288,7 @@ pub enum BridgeMessage {
         RequestId,
         PublicBytes,
         BrokerBatchId,
+        Hash32,
         Vec<BrokerKeyMetadata>,
     ),
     #[doc = "Supplies a bounded operation chunk."]
@@ -243,6 +299,10 @@ pub enum BridgeMessage {
     Cancel(RequestId, Vec<Hash32>, Option<(BrokerBatchId, Vec<Hash32>)>),
     #[doc = "Returns one redacted typed failure."]
     Error(RequestId, u8, Hash32),
+    #[doc = "Invokes one donor `KeyMint` operation on the authenticated JVM broker."]
+    CandidateCommand(RequestId, CandidateBridgeOperation, PublicBytes),
+    #[doc = "Returns one public-only donor `KeyMint` result."]
+    CandidateReply(RequestId, CandidateBridgeOperation, PublicBytes),
     #[doc = "Commits exact validated activation metadata to the broker journal."]
     CertificationRequest(
         RequestId,
@@ -265,6 +325,8 @@ impl BridgeMessage {
             | Self::PublicResult(id, ..)
             | Self::Cancel(id, ..)
             | Self::Error(id, ..)
+            | Self::CandidateCommand(id, ..)
+            | Self::CandidateReply(id, ..)
             | Self::CertificationRequest(id, ..)
             | Self::CertificationAck(id, ..) => *id,
         }
@@ -278,6 +340,8 @@ impl BridgeMessage {
             Self::PublicResult(..) => 4,
             Self::Cancel(..) => 5,
             Self::Error(..) => 6,
+            Self::CandidateCommand(..) => 7,
+            Self::CandidateReply(..) => 8,
             Self::CertificationRequest(..) => 9,
             Self::CertificationAck(..) => 10,
         }
@@ -318,10 +382,10 @@ impl ExchangeRole {
 
     pub(crate) const fn accepts(self, tag: u8) -> bool {
         match self {
-            Self::DonorRequest => matches!(tag, 1 | 3 | 5 | 9),
-            Self::DonorResponse => matches!(tag, 2 | 4 | 5 | 6 | 10),
-            Self::CandidateRequest => matches!(tag, 1 | 3 | 5),
-            Self::CandidateResponse => matches!(tag, 2 | 4 | 5 | 6),
+            Self::DonorRequest => matches!(tag, 1 | 3 | 5 | 7 | 9),
+            Self::DonorResponse => matches!(tag, 2 | 4 | 5 | 6 | 8 | 10),
+            Self::CandidateRequest => matches!(tag, 1 | 3 | 5 | 7),
+            Self::CandidateResponse => matches!(tag, 2 | 4 | 5 | 6 | 8),
         }
     }
 }
@@ -332,10 +396,12 @@ pub const fn expected_response_tag(message: &BridgeMessage) -> Result<u8, Bridge
         BridgeMessage::PublicKeyRequest(..) => Ok(2),
         BridgeMessage::UpdateRequest(..) => Ok(4),
         BridgeMessage::Cancel(..) => Ok(5),
+        BridgeMessage::CandidateCommand(..) => Ok(8),
         BridgeMessage::CertificationRequest(..) => Ok(10),
         BridgeMessage::PublicKeyResponse(..)
         | BridgeMessage::PublicResult(..)
         | BridgeMessage::CertificationAck(..)
+        | BridgeMessage::CandidateReply(..)
         | BridgeMessage::Error(..) => Err(BridgeError::UnexpectedTag),
     }
 }

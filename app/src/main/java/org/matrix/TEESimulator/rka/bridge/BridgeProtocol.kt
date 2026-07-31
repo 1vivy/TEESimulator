@@ -325,6 +325,7 @@ sealed class BridgeMessage : AutoCloseable {
         override val requestId: RequestId,
         val publicCsr: PublicBytes,
         val batchId: BrokerBatchId,
+        val irpcIdentityHash: Hash32,
         keys: List<BrokerKeyMetadata>,
     ) : BridgeMessage() {
         private val values = keys.map(BrokerKeyMetadata::copy)
@@ -337,7 +338,7 @@ sealed class BridgeMessage : AutoCloseable {
             require(distinct(values.map { it.publicKeyHash.copyBytes() }))
             require(distinct(values.map { it.spkiHash.copyBytes() }))
             val encodedSize =
-                4L + publicCsr.size + 17L + Math.multiplyExact(values.size.toLong(), 97L)
+                4L + publicCsr.size + 49L + Math.multiplyExact(values.size.toLong(), 97L)
             require(encodedSize <= BridgeLimits.MAX_FRAME_BYTES)
         }
 
@@ -349,6 +350,7 @@ sealed class BridgeMessage : AutoCloseable {
         override fun close() {
             publicCsr.close()
             batchId.close()
+            irpcIdentityHash.close()
             values.forEach(BrokerKeyMetadata::close)
         }
 

@@ -71,6 +71,7 @@ class BridgeMaterialLifetimeTest {
                     it.requestId,
                     PublicBytes.of(byteArrayOf(1), BridgeLimits.MAX_FRAME_BYTES),
                     testBatchId(),
+                    Hash32.of(ByteArray(32)),
                     testKeyMetadata(Hash32.of(ByteArray(32))),
                 )
             }

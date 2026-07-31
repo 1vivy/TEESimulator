@@ -45,6 +45,7 @@ pub(crate) fn prepare(
     validated: &ValidatedResponse,
     request_id: u64,
     broker_batch_id: [u8; 16],
+    irpc_identity_hash: [u8; 32],
     epoch: u64,
     validator_path: &Path,
     quarantine: &mut dyn FnMut([u8; 32]),
@@ -63,7 +64,7 @@ pub(crate) fn prepare(
             .map_err(|_| ProvisioningRunError::Configuration)?,
     );
     let batch_id = BatchId::new(broker_batch_id);
-    let identity = IrpcIdentityHash::new(binding(b"irpc", request_id, &[0; 32]));
+    let identity = IrpcIdentityHash::new(irpc_identity_hash);
     let mut leases = Vec::with_capacity(validated.chains().len());
     let mut claims = Vec::with_capacity(validated.chains().len());
     for chain in validated.chains() {

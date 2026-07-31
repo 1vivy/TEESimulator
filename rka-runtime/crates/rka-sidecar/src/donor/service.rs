@@ -52,10 +52,12 @@ pub struct FinishResult {
 /// Synchronous donor coordinator. Exclusive mutable access serializes each handle.
 #[derive(Debug)]
 pub struct DonorRkaService {
-    policy: PairedPolicy,
-    keys: HashMap<[u8; 16], KeyRecord>,
+    pub(super) policy: PairedPolicy,
+    pub(super) keys: HashMap<[u8; 16], KeyRecord>,
     request_ids: HashSet<[u8; 16]>,
-    nonce_sessions: HashMap<[u8; 32], [u8; 32]>,
+    candidate_nonces: HashSet<[u8; 32]>,
+    remote_keys: HashSet<RemoteKeyHandle>,
+    pub(super) operation_tombstones: HashSet<RemoteOperationHandle>,
 }
 
 impl DonorRkaService {
@@ -66,7 +68,9 @@ impl DonorRkaService {
             policy,
             keys: HashMap::new(),
             request_ids: HashSet::new(),
-            nonce_sessions: HashMap::new(),
+            candidate_nonces: HashSet::new(),
+            remote_keys: HashSet::new(),
+            operation_tombstones: HashSet::new(),
         }
     }
 
@@ -81,27 +85,30 @@ impl DonorRkaService {
         }
         self.admit_request(request.request_id)?;
         let validated = validate_generate(self.policy, &request)?;
-        if self
-            .nonce_sessions
-            .get(&request.context.candidate_nonce)
-            .is_some_and(|session| session != &request.context.session_id)
-        {
+        if self.keys.contains_key(&request.alias) {
             return Err(DonorError::Replay);
         }
-        if self.keys.contains_key(&request.alias) {
+        if !self
+            .candidate_nonces
+            .insert(request.context.candidate_nonce)
+        {
             return Err(DonorError::Replay);
         }
         let generated = broker
             .generate(BrokerGenerate {
+                alias: request.alias,
                 rkp_handle: request.rkp_handle,
+                rkp_chain: request.rkp_chain,
                 candidate_aaid: validated.aaid,
                 challenge: request.challenge,
                 envelope_hash: validated.envelope_hash,
                 prior_transcript_hash: request.prior_transcript_hash,
             })
             .map_err(|_| DonorError::Broker)?;
-        self.nonce_sessions
-            .insert(request.context.candidate_nonce, request.context.session_id);
+        if !self.remote_keys.insert(generated.handle) {
+            self.reject_key_collision(generated.handle, broker);
+            return Err(DonorError::HandleCollision);
+        }
         self.keys.insert(
             request.alias,
             KeyRecord {
@@ -203,6 +210,7 @@ impl DonorRkaService {
         }
         let record = self.active_mut(request.alias)?;
         if record.live != Some(request.operation) {
+            self.invalidate(request.alias, broker);
             return Err(DonorError::StaleHandle);
         }
         if record.updates == MAX_UPDATES {
@@ -237,6 +245,7 @@ impl DonorRkaService {
             return;
         }
         if let Some(operation) = record.live.take() {
+            self.operation_tombstones.insert(operation);
             let _ = broker.abort(operation);
         }
         let _ = broker.delete(record.remote);
@@ -246,5 +255,19 @@ impl DonorRkaService {
 
     pub(super) fn aliases(&self) -> Vec<[u8; 16]> {
         self.keys.keys().copied().collect()
+    }
+
+    pub(super) fn retain_operation(&mut self, operation: RemoteOperationHandle) -> bool {
+        self.operation_tombstones.insert(operation)
+    }
+
+    pub(super) fn operation_retained(&self, operation: RemoteOperationHandle) -> bool {
+        self.operation_tombstones.contains(&operation)
+    }
+
+    pub(super) fn operation_owner(&self, operation: RemoteOperationHandle) -> Option<[u8; 16]> {
+        self.keys
+            .iter()
+            .find_map(|(alias, record)| (record.live == Some(operation)).then_some(*alias))
     }
 }

@@ -33,6 +33,19 @@ impl DonorRkaService {
             self.invalidate(request.alias, broker);
             return Err(DonorError::Broker);
         };
+        if self.operation_retained(operation) {
+            self.retain_operation(operation);
+            let _ = broker.abort(operation);
+            self.invalidate(request.alias, broker);
+            return Err(DonorError::HandleCollision);
+        }
+        if let Some(owner) = self.operation_owner(operation) {
+            self.retain_operation(operation);
+            self.invalidate(owner, broker);
+            self.invalidate(request.alias, broker);
+            return Err(DonorError::HandleCollision);
+        }
+        let record = self.active_mut(request.alias)?;
         record.operations = record.operations.saturating_add(1);
         record.live = Some(operation);
         record.updates = 0;
@@ -78,6 +91,7 @@ impl DonorRkaService {
             self.invalidate(request.0.alias, broker);
             return Err(DonorError::Broker);
         };
+        self.retain_operation(request.0.operation);
         let record = self.active_mut(request.0.alias)?;
         record.live = None;
         record.successful_finishes = record.successful_finishes.saturating_add(1);
@@ -97,6 +111,7 @@ impl DonorRkaService {
             self.invalidate(request.alias, broker);
             return Err(DonorError::Broker);
         }
+        self.retain_operation(request.operation);
         self.active_mut(request.alias)?.live = None;
         Ok(())
     }
@@ -108,12 +123,20 @@ impl DonorRkaService {
     ) -> Result<DonorKeyState, DonorError> {
         self.admit_key_request(request)?;
         let record = self.active_mut(request.alias)?;
-        if let Some(operation) = record.live.take() {
-            broker.abort(operation).map_err(|_| DonorError::Broker)?;
+        if let Some(operation) = record.live {
+            self.retain_operation(operation);
+            if broker.abort(operation).is_err() {
+                self.invalidate(request.alias, broker);
+                return Err(DonorError::Broker);
+            }
+            self.active_mut(request.alias)?.live = None;
         }
-        broker
-            .delete(record.remote)
-            .map_err(|_| DonorError::Broker)?;
+        let remote = self.active_mut(request.alias)?.remote;
+        if broker.delete(remote).is_err() {
+            self.invalidate(request.alias, broker);
+            return Err(DonorError::Broker);
+        }
+        let record = self.active_mut(request.alias)?;
         record.broker_deleted = true;
         record.state = DonorKeyState::Deleted;
         Ok(record.state)

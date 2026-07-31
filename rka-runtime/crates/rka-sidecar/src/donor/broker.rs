@@ -1,9 +1,11 @@
-use super::{RemoteKeyHandle, RemoteOperationHandle};
+use super::{RemoteKeyHandle, RemoteOperationHandle, RkpKeyHandle};
 
 /// Broker generate request containing public inputs and typed handles only.
 #[derive(Clone, Copy, Debug)]
 pub struct BrokerGenerate<'a> {
-    pub rkp_handle: RemoteKeyHandle,
+    pub alias: [u8; 16],
+    pub rkp_handle: RkpKeyHandle,
+    pub rkp_chain: &'a [&'a [u8]],
     pub candidate_aaid: &'a [u8],
     pub challenge: &'a [u8],
     pub envelope_hash: [u8; 32],

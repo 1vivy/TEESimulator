@@ -9,16 +9,22 @@
 )]
 
 mod broker;
+mod broker_bridge;
+mod collision;
 mod model;
 mod operations;
+mod runtime;
 mod service;
 mod validation;
 
 pub use broker::{
     BrokerBegin, BrokerFailure, BrokerGenerate, DonorBroker, GeneratedKey, PublicKeyResult,
 };
+pub use broker_bridge::BridgeDonorBroker;
 pub use model::{
     AccessContext, BeginRequest, DeleteRequest, DonorError, DonorKeyState, FinishRequest,
-    GenerateRequest, OperationRequest, PairedPolicy, RemoteKeyHandle, RemoteOperationHandle,
+    GenerateCoordinates, GenerateEvidence, GenerateKeyMaterial, GenerateRequest, OperationRequest,
+    PairedPolicy, RemoteKeyHandle, RemoteOperationHandle, RkpKeyHandle,
 };
+pub use runtime::DonorRuntime;
 pub use service::{BeginResult, DonorRkaService, FinishResult, GenerateResult};

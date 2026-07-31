@@ -11,7 +11,12 @@ use std::{
     time::Duration,
 };
 
-use rka_sidecar::{committed_profile_epoch, dispatch_rotation, provision_once, run};
+use rka_sidecar::{
+    LifecycleRole, committed_profile_epoch, dispatch_rotation, donor::DonorRuntime, provision_once,
+    run,
+};
+
+const BROKER_SOCKET: &str = "/data/adb/teesimulator-rka/run/sockets/broker.sock";
 
 fn main() -> Result<(), Box<dyn Error>> {
     let command = env::args_os().nth(1);
@@ -32,6 +37,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         || run(OsStr::new("health"), &mut io::stdout().lock()),
         |selected| run(selected, &mut io::stdout().lock()),
     )?;
+    let _donor_runtime = role
+        .filter(|selected| *selected == LifecycleRole::Donor)
+        .map(|_| DonorRuntime::new(PathBuf::from(BROKER_SOCKET).as_path()));
     if role.is_some() {
         loop {
             dispatch_pending_rotation()?;

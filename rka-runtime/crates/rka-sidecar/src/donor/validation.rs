@@ -63,6 +63,12 @@ pub(super) fn validate_generate<'a>(
     {
         return Err(DonorError::EnvelopeMismatch);
     }
+    if envelope.donor_irpc_identity_hash != policy.donor_irpc_identity_hash {
+        return Err(DonorError::IrpcIdentityMismatch);
+    }
+    if request.prior_transcript_hash != request.expected_prior_transcript_hash {
+        return Err(DonorError::TranscriptMismatch);
+    }
     let expires = envelope
         .donor_monotonic_start_ms
         .checked_add(rka_protocol::TTL_SECONDS.saturating_mul(1_000))

@@ -37,6 +37,7 @@ fn response() -> Result<BridgeMessage, BridgeError> {
         RequestId::new(9),
         PublicBytes::bounded(&[1], 1, 1)?,
         BrokerBatchId::new([7; 16]),
+        Hash32::new([8; 32]),
         vec![BrokerKeyMetadata::new(0, [2; 32], [3; 32], [4; 32])?],
     ))
 }
@@ -115,6 +116,7 @@ fn bridge_correlation_rejects_kind_id_generation_replay_and_out_of_order()
         RequestId::new(10),
         PublicBytes::bounded(&[1], 1, 1)?,
         BrokerBatchId::new([7; 16]),
+        Hash32::new([8; 32]),
         vec![BrokerKeyMetadata::new(0, [2; 32], [3; 32], [4; 32])?],
     );
     assert!(!correlation.accepts(&wrong_id, 3));
@@ -137,6 +139,7 @@ fn bridge_preserves_two_exact_key_identities_and_rejects_order_mutation()
         RequestId::new(12),
         PublicBytes::bounded(&[9], 1, 1)?,
         BrokerBatchId::new([8; 16]),
+        Hash32::new([9; 32]),
         vec![
             BrokerKeyMetadata::new(0, [1; 32], [2; 32], [3; 32])?,
             BrokerKeyMetadata::new(1, [4; 32], [5; 32], [6; 32])?,
@@ -144,7 +147,7 @@ fn bridge_preserves_two_exact_key_identities_and_rejects_order_mutation()
     );
     let encoded = encode_frame(&message, ExchangeRole::DonorResponse)?;
     let decoded = decode_frame(encoded.as_slice(), ExchangeRole::DonorResponse)?;
-    let BridgeMessage::PublicKeyResponse(_, _, _, keys) = decoded else {
+    let BridgeMessage::PublicKeyResponse(_, _, _, identity, keys) = decoded else {
         return Err("wrong response".into());
     };
     let first = keys.first().ok_or("first key")?;
@@ -152,9 +155,10 @@ fn bridge_preserves_two_exact_key_identities_and_rejects_order_mutation()
     assert_eq!(first.handle(), &[1; 32]);
     assert_eq!(second.public_key_hash(), &[5; 32]);
     assert_eq!(second.spki_hash(), &[6; 32]);
+    assert_eq!(identity.as_array(), &[9; 32]);
 
     let mut mutated = encoded.as_slice().to_vec();
-    *mutated.get_mut(143).ok_or("second order")? = 0;
+    *mutated.get_mut(175).ok_or("second order")? = 0;
     assert_eq!(
         decode_frame(&mutated, ExchangeRole::DonorResponse),
         Err(BridgeError::NonCanonical)

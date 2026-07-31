@@ -119,6 +119,7 @@ object BridgeCodec {
                     is BridgeMessage.PublicKeyResponse -> {
                         writeBytes(out, message.publicCsr)
                         writeFixed(out, message.batchId)
+                        writeFixed(out, message.irpcIdentityHash)
                         val keys = message.keyMetadata()
                         try {
                             out.writeByte(keys.size)
@@ -231,6 +232,7 @@ object BridgeCodec {
                     BridgeTag.PUBLIC_KEY_RESPONSE -> {
                         val csr = readPublicBytes(input, BridgeLimits.MAX_FRAME_BYTES, minimum = 1)
                         val batchId = readBatchId(input)
+                        val irpcIdentityHash = readHash(input)
                         val count = input.readUnsignedByte()
                         val keys = mutableListOf<BrokerKeyMetadata>()
                         try {
@@ -245,10 +247,17 @@ object BridgeCodec {
                                         readHash(input),
                                     )
                             }
-                            BridgeMessage.PublicKeyResponse(requestId, csr, batchId, keys)
+                            BridgeMessage.PublicKeyResponse(
+                                requestId,
+                                csr,
+                                batchId,
+                                irpcIdentityHash,
+                                keys,
+                            )
                         } catch (error: Throwable) {
                             csr.close()
                             batchId.close()
+                            irpcIdentityHash.close()
                             keys.forEach(BrokerKeyMetadata::close)
                             throw error
                         }

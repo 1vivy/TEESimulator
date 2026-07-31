@@ -177,3 +177,237 @@ fn donor_rka_peer_death_and_policy_failure_are_terminal() -> Result<(), Box<dyn 
     assert_eq!(broker.delete_calls, 1);
     Ok(())
 }
+
+#[test]
+fn donor_rejects_same_session_candidate_nonce_before_second_generate()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let fixture = Fixture::new();
+    let mut broker = FakeBroker::default();
+    let mut donor = DonorRkaService::new(fixture.policy());
+    donor.generate(fixture.generate(1), &mut broker)?;
+
+    // When
+    let replayed = donor.generate(fixture.generate_with_alias(2, [0xa2; 16]), &mut broker);
+
+    // Then
+    assert_eq!(replayed, Err(DonorError::Replay));
+    assert_eq!(broker.generated_requests, 1);
+    Ok(())
+}
+
+#[test]
+fn donor_rejects_tombstoned_operation_handle_collision_after_abort()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let fixture = Fixture::new();
+    let collision = rka_sidecar::donor::RemoteOperationHandle::new([0xee; 16]);
+    let mut broker = FakeBroker {
+        forced_operation: Some(collision),
+        ..FakeBroker::default()
+    };
+    let mut donor = DonorRkaService::new(fixture.policy());
+    donor.generate(fixture.generate(1), &mut broker)?;
+    let first = donor.begin(fixture.begin(2), &mut broker)?;
+    donor.abort(fixture.abort(3, first.operation_handle), &mut broker)?;
+
+    // When
+    let reused = donor.begin(fixture.begin(4), &mut broker);
+
+    // Then
+    assert_eq!(reused, Err(DonorError::HandleCollision));
+    assert_eq!(broker.begin_calls, 2);
+    assert_eq!(broker.delete_calls, 1);
+    Ok(())
+}
+
+#[test]
+fn donor_stale_operation_handle_aborts_live_and_quarantines()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let fixture = Fixture::new();
+    let mut broker = FakeBroker::default();
+    let mut donor = DonorRkaService::new(fixture.policy());
+    donor.generate(fixture.generate(1), &mut broker)?;
+    donor.begin(fixture.begin(2), &mut broker)?;
+
+    // When
+    let stale = donor.update(
+        fixture.update(
+            3,
+            rka_sidecar::donor::RemoteOperationHandle::new([0xff; 16]),
+            b"x",
+        ),
+        &mut broker,
+    );
+
+    // Then
+    assert_eq!(stale, Err(DonorError::StaleHandle));
+    assert_eq!(
+        donor.key_state(fixture.alias()),
+        Some(DonorKeyState::Quarantined)
+    );
+    assert_eq!(broker.abort_calls, 1);
+    assert_eq!(broker.delete_calls, 1);
+    Ok(())
+}
+
+#[test]
+fn donor_rejects_authoritative_irpc_mismatch_without_broker_generate() {
+    // Given
+    let fixture = Fixture::new();
+    let mut broker = FakeBroker::default();
+    let mut donor = DonorRkaService::new(fixture.policy());
+
+    // When
+    let mismatch = donor.generate(fixture.generate_with_irpc(1, [0xfa; 32]), &mut broker);
+
+    // Then
+    assert_eq!(mismatch, Err(DonorError::IrpcIdentityMismatch));
+    assert_eq!(broker.generated_requests, 0);
+}
+
+#[test]
+fn donor_rejects_prior_transcript_mismatch_without_broker_generate() {
+    // Given
+    let fixture = Fixture::new();
+    let mut broker = FakeBroker::default();
+    let mut donor = DonorRkaService::new(fixture.policy());
+
+    // When
+    let mismatch = donor.generate(fixture.generate_with_transcript(1, [0xfa; 32]), &mut broker);
+
+    // Then
+    assert_eq!(mismatch, Err(DonorError::TranscriptMismatch));
+    assert_eq!(broker.generated_requests, 0);
+}
+
+#[test]
+fn donor_broker_failures_are_terminal_and_expose_no_result()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let mut generate_broker = FakeBroker {
+        fail_generate: true,
+        ..FakeBroker::default()
+    };
+    let generated =
+        DonorRkaService::new(fixture.policy()).generate(fixture.generate(1), &mut generate_broker);
+    assert_eq!(generated, Err(DonorError::Broker));
+
+    let mut update_broker = FakeBroker::default();
+    let mut donor = DonorRkaService::new(fixture.policy());
+    donor.generate(fixture.generate(2), &mut update_broker)?;
+    let operation = donor.begin(fixture.begin(3), &mut update_broker)?;
+    update_broker.fail_update_aad = true;
+    let updated = donor.update_aad(
+        fixture.update(4, operation.operation_handle, b"aad"),
+        &mut update_broker,
+    );
+    assert_eq!(updated, Err(DonorError::Broker));
+    assert_eq!(
+        donor.key_state(fixture.alias()),
+        Some(DonorKeyState::Quarantined)
+    );
+    assert_eq!(
+        (update_broker.abort_calls, update_broker.delete_calls),
+        (1, 1)
+    );
+
+    let mut delete_broker = FakeBroker::default();
+    let mut donor = DonorRkaService::new(fixture.policy());
+    donor.generate(fixture.generate(5), &mut delete_broker)?;
+    delete_broker.fail_delete = true;
+    assert_eq!(
+        donor.delete(fixture.delete(6), &mut delete_broker),
+        Err(DonorError::Broker)
+    );
+    assert_eq!(
+        donor.key_state(fixture.alias()),
+        Some(DonorKeyState::Quarantined)
+    );
+    Ok(())
+}
+
+#[test]
+fn donor_rejects_remote_key_handle_collision() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let collision = rka_sidecar::donor::RemoteKeyHandle::new([0xdd; 16]);
+    let mut broker = FakeBroker {
+        forced_key: Some(collision),
+        ..FakeBroker::default()
+    };
+    let mut donor = DonorRkaService::new(fixture.policy());
+    donor.generate(fixture.generate(1), &mut broker)?;
+
+    let reused = donor.generate(fixture.generate_secondary(2), &mut broker);
+
+    assert_eq!(reused, Err(DonorError::HandleCollision));
+    assert_eq!(broker.generated_requests, 2);
+    assert_eq!(broker.delete_calls, 1);
+    assert_eq!(
+        donor.key_state(fixture.alias()),
+        Some(DonorKeyState::Quarantined)
+    );
+    Ok(())
+}
+
+#[test]
+fn donor_rejects_tombstoned_operation_after_finish_or_delete()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let collision = rka_sidecar::donor::RemoteOperationHandle::new([0xee; 16]);
+    let mut broker = FakeBroker {
+        forced_operation: Some(collision),
+        ..FakeBroker::default()
+    };
+    let mut donor = DonorRkaService::new(fixture.policy());
+    donor.generate(fixture.generate(1), &mut broker)?;
+    let first = donor.begin(fixture.begin(2), &mut broker)?;
+    donor.finish(fixture.finish(3, first.operation_handle), &mut broker)?;
+    donor.generate(fixture.generate_secondary(4), &mut broker)?;
+    assert_eq!(
+        donor.begin(fixture.begin_secondary(5), &mut broker),
+        Err(DonorError::HandleCollision)
+    );
+
+    let mut broker = FakeBroker {
+        forced_operation: Some(collision),
+        ..FakeBroker::default()
+    };
+    let mut donor = DonorRkaService::new(fixture.policy());
+    donor.generate(fixture.generate(6), &mut broker)?;
+    donor.begin(fixture.begin(7), &mut broker)?;
+    donor.delete(fixture.delete(8), &mut broker)?;
+    donor.generate(fixture.generate_secondary(9), &mut broker)?;
+    assert_eq!(
+        donor.begin(fixture.begin_secondary(10), &mut broker),
+        Err(DonorError::HandleCollision)
+    );
+    Ok(())
+}
+
+#[test]
+fn donor_live_operation_collision_quarantines_both_key_owners()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let collision = rka_sidecar::donor::RemoteOperationHandle::new([0xee; 16]);
+    let mut broker = FakeBroker {
+        forced_operation: Some(collision),
+        ..FakeBroker::default()
+    };
+    let mut donor = DonorRkaService::new(fixture.policy());
+    donor.generate(fixture.generate(1), &mut broker)?;
+    donor.begin(fixture.begin(2), &mut broker)?;
+    donor.generate(fixture.generate_secondary(3), &mut broker)?;
+
+    let reused = donor.begin(fixture.begin_secondary(4), &mut broker);
+
+    assert_eq!(reused, Err(DonorError::HandleCollision));
+    assert_eq!(
+        donor.key_state(fixture.alias()),
+        Some(DonorKeyState::Quarantined)
+    );
+    assert_eq!(broker.abort_calls, 1);
+    assert_eq!(broker.delete_calls, 2);
+    Ok(())
+}

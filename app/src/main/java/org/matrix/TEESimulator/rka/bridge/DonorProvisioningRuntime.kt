@@ -14,7 +14,6 @@ import org.matrix.TEESimulator.rka.broker.QuarantineReceiptStore
 import org.matrix.TEESimulator.rka.broker.QuarantineResult
 import org.matrix.TEESimulator.rka.broker.RkpKeyCount
 import org.matrix.TEESimulator.rka.donor.AndroidDonorKeyMintDevice
-import org.matrix.TEESimulator.rka.donor.DonorBridgeDispatcher
 import org.matrix.TEESimulator.rka.donor.DonorDispatchAdapter
 import org.matrix.TEESimulator.rka.donor.DonorKeyMintBackend
 import org.matrix.TEESimulator.rka.journal.DurableIrpcKeyBatchGenerator
@@ -104,9 +103,7 @@ object DonorProvisioningRuntime {
             is BridgeMessage.PublicKeyRequest -> provision(message)
             is BridgeMessage.CertificationRequest -> certify(message)
             is BridgeMessage.CandidateCommand ->
-                DonorDispatchAdapter.dispatch(message, donorBackend.value) { _, _ ->
-                    DonorBridgeDispatcher.dispatch(message, donorBackend.value)
-                }
+                DonorDispatchAdapter.dispatch(message, donorBackend.value)
             is BridgeMessage.Cancel -> {
                 val handles = message.brokerHandles()
                 val batchId = message.cleanupBatchId()
@@ -171,6 +168,7 @@ object DonorProvisioningRuntime {
             request.requestId,
             PublicBytes.of(csr.value.copyBytes(), BridgeLimits.MAX_FRAME_BYTES),
             BrokerBatchId.of(record.batchId.copyBytes()),
+            Hash32.of(record.identity.hash()),
             record.entries.map { entry ->
                 BrokerKeyMetadata(
                     entry.order,

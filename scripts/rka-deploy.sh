@@ -772,15 +772,18 @@ authorize_next_manager() {
     local serial="$1" role="$2" boot="$3" profile="$4"
     [[ "$profile" == "$KSU_NEXT_PROFILE" ]] || return 0
     local remote_probe="$STATE_ROOT/probes/$transaction_id.$role.manager-appid"
+    cleanup_remote_probe() {
+        "$adb_command" -s "$serial" shell su 0 sh -c ": PROBE_CLEANUP_ROLLBACK; rm -f '$remote_probe'; [ ! -e '$remote_probe' ] && [ ! -L '$remote_probe' ]"
+    }
     "$adb_command" -s "$serial" shell su 0 sh -c "mkdir -p '$STATE_ROOT/probes' && chmod 700 '$STATE_ROOT' '$STATE_ROOT/probes'" >/dev/null
     "$adb_command" -s "$serial" push "$local_probe" "$remote_probe" >/dev/null
     remote "$serial" READ_ONLY_PROBE_TRANSFER "$transaction_id" "$remote_probe" "$probe_sha" "$role" >/dev/null || {
-        "$adb_command" -s "$serial" shell su 0 rm -f "$remote_probe" >/dev/null 2>&1 || true
+        cleanup_remote_probe >/dev/null 2>&1 || fail KSU_PROBE_CLEANUP_FAILED 3
         fail KSU_MANAGER_AUTHORIZATION_FAILED 3
     }
     local result
     result="$(remote "$serial" manager-probe "$transaction_id" "$remote_probe" "$probe_sha" "$boot" "$role")" || {
-        "$adb_command" -s "$serial" shell su 0 rm -f "$remote_probe" >/dev/null 2>&1 || true
+        cleanup_remote_probe >/dev/null 2>&1 || fail KSU_PROBE_CLEANUP_FAILED 3
         fail KSU_MANAGER_AUTHORIZATION_FAILED 3
     }
     [[ "$result" == RESULT=AUTHORIZED\ *probe_cleanup=REMOVED ]] || fail KSU_MANAGER_AUTHORIZATION_FAILED 3

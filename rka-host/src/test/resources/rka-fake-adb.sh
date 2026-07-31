@@ -16,7 +16,23 @@ if [ "${1-}" = push ]; then
     if [ "${RKA_FAKE_CORRUPT_SOURCE_SERIAL:-}" = "$serial" ] && [ "$3" = /data/adb/teesimulator-rka/upload/role-neutral-release.zip.source-sha ]; then
         printf '%040d\n' 0 > "$root$3"
     fi
+    if [ "${RKA_FAKE_NEXT_MUTATION:-}" = probe-hash-mismatch ] && [[ "$3" = /data/adb/teesimulator-rka/probes/*.manager-appid ]]; then
+        printf 'corrupt\n' >> "$root$3"
+    fi
     exit 0
+fi
+
+if [[ " $* " == *" PROBE_CLEANUP_ROLLBACK; "* ]]; then
+    cleanup_command=${*: -1}
+    probe=${cleanup_command#*rm -f \'}
+    probe=${probe%%\'*}
+    if [ "${RKA_FAKE_NEXT_MUTATION:-}" = probe-cleanup-failure ]; then
+        [[ "$cleanup_command" == *"[ ! -e "* ]] && exit 1
+        exit 0
+    fi
+    rm -f "$root$probe"
+    [ ! -e "$root$probe" ]
+    exit
 fi
 
 if [[ " $* " == *" mkdir -p "* ]]; then
@@ -48,6 +64,11 @@ write_shim() {
 
 write_shim id 'if [ "${1-}" = -u ]; then printf "0\n"; else /usr/bin/id "$@"; fi'
 write_shim chown 'exit 0'
+write_shim rm '
+if [ "${RKA_FAKE_NEXT_MUTATION:-}" = probe-cleanup-failure ] && [ "${2-}" != "" ]; then
+  case "${@: -1}" in /data/adb/teesimulator-rka/probes/*.manager-appid) exit 0 ;; esac
+fi
+exec /usr/bin/rm "$@"'
 write_shim ksud '
 case "${1-} ${2-}" in
   "--version ") printf "%s\n" "3.2.5-12-g824f2f23 (uapi: 2)" ;;

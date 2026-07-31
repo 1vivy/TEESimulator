@@ -41,6 +41,8 @@ internal enum class FixtureMutation {
     NEXT_APPID_ERROR,
     NEXT_UID_MISMATCH,
     NEXT_BOOT_DRIFT,
+    NEXT_PROBE_HASH_MISMATCH,
+    NEXT_PROBE_CLEANUP_FAILURE,
 }
 
 internal data class ModuleSnapshot(
@@ -97,6 +99,10 @@ internal fun applyFixtureMutation(
         FixtureMutation.NEXT_APPID_ERROR -> environment["RKA_FAKE_NEXT_MUTATION"] = "appid-error"
         FixtureMutation.NEXT_UID_MISMATCH -> environment["RKA_FAKE_NEXT_MUTATION"] = "uid-mismatch"
         FixtureMutation.NEXT_BOOT_DRIFT -> environment["RKA_FAKE_NEXT_MUTATION"] = "boot-drift"
+        FixtureMutation.NEXT_PROBE_HASH_MISMATCH ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "probe-hash-mismatch"
+        FixtureMutation.NEXT_PROBE_CLEANUP_FAILURE ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "probe-cleanup-failure"
     }
 }
 

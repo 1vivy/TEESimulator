@@ -45,7 +45,10 @@ class KsuNext330AdapterTest {
                 FixtureMutation.NEXT_APPID_ERROR,
                 FixtureMutation.NEXT_UID_MISMATCH,
                 FixtureMutation.NEXT_BOOT_DRIFT,
+                FixtureMutation.NEXT_PROBE_HASH_MISMATCH,
+                FixtureMutation.NEXT_PROBE_CLEANUP_FAILURE,
             )
+        assertEquals(13, mutations.size)
         mutations.forEach { mutation ->
             Fixture(mutation = mutation, kernelProfile = KernelProfile.KSU_NEXT_DUAL).use { fixture
                 ->
@@ -58,7 +61,32 @@ class KsuNext330AdapterTest {
                         "role-neutral-release.zip " in "$it " || " deploy " in " $it "
                     },
                 )
-                assertTrue(mutation.name, fixture.probeArtifactsAbsent())
+                if (mutation == FixtureMutation.NEXT_PROBE_CLEANUP_FAILURE) {
+                    assertFalse(mutation.name, fixture.probeArtifactsAbsent())
+                    assertTrue(result.stderr, result.stderr.contains("KSU_PROBE_CLEANUP_FAILED"))
+                } else {
+                    assertTrue(mutation.name, fixture.probeArtifactsAbsent())
+                }
+                if (mutation == FixtureMutation.NEXT_PROBE_HASH_MISMATCH) {
+                    assertTrue(
+                        result.stderr,
+                        result.stderr.contains("KSU_MANAGER_AUTHORIZATION_FAILED"),
+                    )
+                    assertTrue(
+                        mutation.name,
+                        fixture.trace().any { "PROBE_CLEANUP_ROLLBACK" in it },
+                    )
+                }
+                if (mutation == FixtureMutation.NEXT_PROBE_HASH_MISMATCH) {
+                    assertFalse(mutation.name, fixture.trace().any { " manager-probe " in " $it " })
+                }
+                if (mutation == FixtureMutation.NEXT_PROBE_CLEANUP_FAILURE) {
+                    assertTrue(
+                        mutation.name,
+                        fixture.trace().any { "PROBE_CLEANUP_ROLLBACK" in it },
+                    )
+                    assertTrue(mutation.name, fixture.trace().any { " manager-probe " in " $it " })
+                }
             }
         }
     }

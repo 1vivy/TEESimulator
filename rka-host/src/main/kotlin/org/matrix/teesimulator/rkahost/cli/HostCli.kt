@@ -1,7 +1,5 @@
 package org.matrix.teesimulator.rkahost.cli
 
-import java.io.FileDescriptor
-import java.io.FileInputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.system.exitProcess
@@ -25,7 +23,11 @@ object HostCli {
         exitProcess(run(arguments, runtime))
     }
 
-    internal fun run(arguments: Array<String>, runtime: Path): Int =
+    internal fun run(
+        arguments: Array<String>,
+        runtime: Path,
+        runner: HostCommandRunner = ProcessHostCommandRunner(),
+    ): Int =
         try {
             when {
                 arguments.contentEquals(arrayOf("--help")) -> {
@@ -34,19 +36,20 @@ object HostCli {
                 }
                 arguments.take(2) == listOf("device-pair", "bind") -> bind(arguments, runtime)
                 arguments.firstOrNull() == "verify-physical" -> verify(arguments)
-                arguments.firstOrNull() in physicalRoots -> physical(arguments)
+                arguments.firstOrNull() in physicalRoots -> physical(arguments, runner)
                 else -> throw HostCliException("COMMAND_INVALID")
             }
         } catch (failure: HostCliException) {
             System.err.println("RESULT=${failure.message}")
             2
+        } catch (_: Exception) {
+            System.err.println("RESULT=HOST_OPERATION_FAILED")
+            2
         }
 
     private fun bind(arguments: Array<String>, runtime: Path): Int {
         val values = options(arguments.drop(2))
-        if (values.keys != setOf("--donor", "--candidate", "--profile")) {
-            throw HostCliException("ARGUMENT_INVALID")
-        }
+        requireKeys(values, setOf("--donor", "--candidate", "--profile"))
         val snapshot =
             DevicePairStore(runtime)
                 .bind(
@@ -62,79 +65,179 @@ object HostCli {
 
     private fun verify(arguments: Array<String>): Int {
         val values = options(arguments.drop(1))
-        if (values.keys != setOf("--manifest", "--artifact", "--source-sha", "--nonce")) {
-            throw HostCliException("ARGUMENT_INVALID")
-        }
-        val artifact = Path.of(values.getValue("--artifact"))
-        val digest = Hashes.sha256(Files.readAllBytes(artifact))
-        PhysicalManifest.verify(
+        requireKeys(
+            values,
+            setOf("--manifest", "--baseline", "--artifact", "--source-sha", "--nonce"),
+        )
+        val artifactDigest = digest(values.getValue("--artifact"))
+        val baseline = BaselineStore.read(Path.of(values.getValue("--baseline")))
+        PhysicalReceipt.verify(
             Files.readString(Path.of(values.getValue("--manifest"))),
+            baseline,
             values.getValue("--source-sha"),
-            digest,
+            artifactDigest,
             values.getValue("--nonce"),
         )
-        println("""{"artifact_sha256":"$digest","result":"PHYSICAL_VERIFIED"}""")
+        println("""{"artifact_sha256":"$artifactDigest","result":"PHYSICAL_VERIFIED"}""")
         return 0
     }
 
-    private fun physical(arguments: Array<String>): Int {
-        if (arguments.any { it == "--pair" || it.startsWith("--pair=") }) {
+    private fun physical(arguments: Array<String>, runner: HostCommandRunner): Int {
+        if (
+            arguments.any {
+                it in setOf("--pair", "--donor", "--candidate", "--serial") ||
+                    it.startsWith("--pair=") ||
+                    it.startsWith("--donor=") ||
+                    it.startsWith("--candidate=") ||
+                    it.startsWith("--serial=")
+            }
+        ) {
             throw HostCliException("PAIR_PATH_FORBIDDEN")
         }
-        val snapshot = DevicePairFd.readOnce()
+        val snapshot = NativePairDescriptor.readOnce()
+        val host = HostOrchestrator(snapshot, runner)
+        val result =
+            when (arguments.first()) {
+                "sentinel" -> sentinel(arguments, host)
+                "profile" -> {
+                    if (!arguments.contentEquals(arrayOf("profile", "pair"))) invalid()
+                    host.profilePair()
+                    "PROFILED"
+                }
+                "deploy-no-reboot" -> {
+                    val values = options(arguments.drop(1))
+                    requireKeys(values, setOf("--zip"))
+                    host.deployNoReboot(values.getValue("--zip"))
+                    "DEPLOYED_NO_REBOOT"
+                }
+                "snapshot" -> {
+                    if (arguments.size != 2) invalid()
+                    host.snapshot(arguments[1])
+                    "SNAPSHOT_CAPTURED"
+                }
+                "lifecycle" -> {
+                    if (arguments.size != 2) invalid()
+                    host.lifecycle(arguments[1])
+                    "LIFECYCLE_${arguments[1].uppercase()}"
+                }
+                "recover-exact" -> {
+                    val values = options(arguments.drop(1))
+                    requireKeys(values, setOf("--service"))
+                    host.recoverExact(values.getValue("--service"))
+                    "RECOVERED_EXACT"
+                }
+                "cleanup" -> {
+                    if (arguments.size != 1) invalid()
+                    host.cleanup()
+                    "CLEANED"
+                }
+                "evidence" -> evidence(arguments, host)
+                else -> invalid()
+            }
         println(
-            """{"command":"${arguments.joinToString("-")}","pair_sha256":"${Hashes.sha256(snapshot.canonical().toByteArray())}","result":"READY","transport":"DIRECT"}"""
+            """{"pair_sha256":"${Hashes.sha256(snapshot.canonical().toByteArray())}","result":"$result","transport":"DIRECT"}"""
         )
         return 0
     }
 
+    private fun sentinel(arguments: Array<String>, host: HostOrchestrator): String {
+        if (arguments.size < 2) invalid()
+        val values = options(arguments.drop(2))
+        return when (arguments[1]) {
+            "start" -> {
+                requireKeys(values, setOf("--baseline", "--nonce"))
+                host.sentinelStart(
+                    Path.of(values.getValue("--baseline")),
+                    values.getValue("--nonce"),
+                )
+                "SENTINEL_STARTED"
+            }
+            "sample" -> {
+                requireKeys(values, setOf("--baseline"))
+                host.sentinelSample(Path.of(values.getValue("--baseline")))
+                "SENTINEL_SAMPLED"
+            }
+            "finish" -> {
+                requireKeys(values, setOf("--baseline"))
+                host.sentinelFinish(Path.of(values.getValue("--baseline")))
+                "SENTINEL_FINISHED"
+            }
+            "verify" -> {
+                requireKeys(values, setOf("--baseline"))
+                host.sentinelVerify(Path.of(values.getValue("--baseline")))
+                "SENTINEL_VERIFIED"
+            }
+            else -> invalid()
+        }
+    }
+
+    private fun evidence(arguments: Array<String>, host: HostOrchestrator): String {
+        if (arguments.getOrNull(1) != "manifest") invalid()
+        val values = options(arguments.drop(2))
+        requireKeys(
+            values,
+            setOf("--baseline", "--artifact", "--source-sha", "--nonce", "--output"),
+        )
+        val baseline = BaselineStore.read(Path.of(values.getValue("--baseline")))
+        if (baseline.nonce != values.getValue("--nonce")) throw HostCliException("NONCE_STALE")
+        val sample = host.sentinelFinish(Path.of(values.getValue("--baseline")))
+        val receipt =
+            PhysicalReceipt.create(
+                baseline,
+                sample.donorBootId,
+                sample.candidateBootId,
+                sample.donorMillis,
+                sample.candidateMillis,
+                values.getValue("--source-sha"),
+                digest(values.getValue("--artifact")),
+                host.trace(),
+            )
+        EvidenceStore.write(Path.of(values.getValue("--output")), receipt)
+        return "EVIDENCE_WRITTEN"
+    }
+
+    private fun digest(path: String): String =
+        try {
+            Hashes.sha256(Files.readAllBytes(Path.of(path)))
+        } catch (_: Exception) {
+            throw HostCliException("ARTIFACT_INVALID")
+        }
+
     private fun options(arguments: List<String>): Map<String, String> {
-        if (arguments.size % 2 != 0) throw HostCliException("ARGUMENT_INVALID")
+        if (arguments.size % 2 != 0) invalid()
         val pairs = arguments.chunked(2).map { it[0] to it[1] }
         if (
             pairs.any { !it.first.startsWith("--") } ||
                 pairs.map { it.first }.distinct().size != pairs.size
         ) {
-            throw HostCliException("ARGUMENT_INVALID")
+            invalid()
         }
         return pairs.toMap()
     }
+
+    private fun requireKeys(values: Map<String, String>, required: Set<String>) {
+        if (values.keys != required || values.values.any(String::isBlank)) invalid()
+    }
+
+    private fun invalid(): Nothing = throw HostCliException("ARGUMENT_INVALID")
 
     private fun printHelp() {
         println(
             """
             Usage: rka-host <fixed-command>
               device-pair bind --donor SERIAL --candidate SERIAL --profile FILE
-              sentinel start|assert-live [--scope donor]
+              sentinel start --baseline FILE --nonce NONCE
+              sentinel sample|finish|verify --baseline FILE
               profile pair
-              deploy-no-reboot
+              deploy-no-reboot --zip FILE
               snapshot capability|config
-              lifecycle run
-              recover-exact
+              lifecycle status|start|stop
+              recover-exact --service keystore2|rkpd
               cleanup
-              evidence manifest
-              verify-physical --manifest FILE --artifact FILE --source-sha SHA --nonce NONCE
+              evidence manifest --baseline FILE --artifact FILE --source-sha SHA --nonce NONCE --output FILE
+              verify-physical --manifest FILE --baseline FILE --artifact FILE --source-sha SHA --nonce NONCE
             """
                 .trimIndent()
         )
-    }
-}
-
-private object DevicePairFd {
-    fun readOnce(): DevicePairSnapshot {
-        if (System.getenv("RKA_DEVICE_PAIR_FD") != "3") throw HostCliException("PAIR_FD_MISSING")
-        val target =
-            try {
-                Files.readSymbolicLink(Path.of("/proc/self/fd/3")).toString()
-            } catch (_: Exception) {
-                throw HostCliException("PAIR_FD_INVALID")
-            }
-        if (!target.startsWith("/memfd:rka-device-pair")) throw HostCliException("PAIR_FD_UNSEALED")
-        val constructor =
-            FileDescriptor::class.java.getDeclaredConstructor(Int::class.javaPrimitiveType)
-        if (!constructor.trySetAccessible()) throw HostCliException("PAIR_FD_INVALID")
-        val descriptor = constructor.newInstance(3)
-        val raw = FileInputStream(descriptor).use { it.readBytes().toString(Charsets.UTF_8) }
-        return DevicePairSnapshot.parse(raw)
     }
 }

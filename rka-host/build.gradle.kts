@@ -15,13 +15,17 @@ kotlin {
 
 dependencies {
     implementation(project(":two-phone"))
+    implementation("net.java.dev.jna:jna:5.17.0")
     testImplementation(libs.junit)
 }
 
 application {
     mainClass.set("org.matrix.teesimulator.rkahost.cli.HostCli")
     applicationName = "rka-host"
-    applicationDefaultJvmArgs = listOf("--add-opens=java.base/java.io=ALL-UNNAMED")
+    applicationDefaultJvmArgs =
+        listOf("--add-opens=java.base/java.io=ALL-UNNAMED", "--enable-native-access=ALL-UNNAMED")
 }
 
-tasks.test { jvmArgs("--add-opens=java.base/java.io=ALL-UNNAMED") }
+tasks.test {
+    jvmArgs("--add-opens=java.base/java.io=ALL-UNNAMED", "--enable-native-access=ALL-UNNAMED")
+}

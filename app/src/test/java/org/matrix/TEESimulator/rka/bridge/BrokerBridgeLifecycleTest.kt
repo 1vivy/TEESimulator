@@ -71,6 +71,7 @@ class BrokerBridgeLifecycleTest {
                 BridgeMessage.PublicKeyResponse(
                     it.requestId,
                     PublicBytes.of(byteArrayOf(1), BridgeLimits.MAX_FRAME_BYTES),
+                    testBatchId(),
                     testKeyMetadata(Hash32.of(ByteArray(32))),
                 )
             }

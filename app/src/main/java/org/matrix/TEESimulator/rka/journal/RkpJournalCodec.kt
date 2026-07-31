@@ -38,6 +38,23 @@ internal object RkpJournalCodec {
                     output.write(entry.copySpkiHash())
                     output.write(entry.handle.copyBytes())
                 }
+                val certification = record.certification
+                output.writeByte(if (certification == null) 0 else 1)
+                certification?.let {
+                    output.writeLong(it.requestId)
+                    output.write(it.batchId.copyBytes())
+                    output.writeLong(it.profileEpoch)
+                    output.write(it.copyActivationBindingHash())
+                    output.writeByte(it.keys.size)
+                    it.keys.forEach { key ->
+                        output.writeByte(key.order)
+                        output.write(key.handle.copyBytes())
+                        output.write(key.copyPublicHash())
+                        output.write(key.copySpkiHash())
+                        output.write(key.copyChainHash())
+                        output.writeByte(key.certificateCount)
+                    }
+                }
             }
             bytes.toByteArray().also { require(it.size <= MAX_BYTES) }
         }
@@ -76,8 +93,29 @@ internal object RkpJournalCodec {
                     )
                     RkpJournalEntry(order, publicKey, spkiDer, publicHash, spkiHash, handle)
                 }
+            val certification =
+                if (input.available() == 0 || input.readUnsignedByte() == 0) {
+                    null
+                } else {
+                    val requestId = input.readLong()
+                    val certifiedBatch = RkpBatchId.from(input.readNBytes(16))
+                    val profileEpoch = input.readLong()
+                    val binding = input.readNBytes(32)
+                    val keys =
+                        List(input.readUnsignedByte()) {
+                            RkpCertifiedKey(
+                                input.readUnsignedByte(),
+                                RkpOpaqueHandle.from(input.readNBytes(32)),
+                                input.readNBytes(32),
+                                input.readNBytes(32),
+                                input.readNBytes(32),
+                                input.readUnsignedByte(),
+                            )
+                        }
+                    RkpCertification(requestId, certifiedBatch, keys, profileEpoch, binding)
+                }
             require(input.read() == -1)
-            RkpJournalRecord(batchId, state, count, identity, entries)
+            RkpJournalRecord(batchId, state, count, identity, entries, certification)
         }
     }
 

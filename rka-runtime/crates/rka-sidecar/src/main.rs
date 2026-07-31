@@ -1,8 +1,17 @@
 //! Minimal command entrypoint for the standalone RKA sidecar process.
 
-use std::{env, error::Error, ffi::OsStr, fs, io, path::PathBuf, thread, time::Duration};
+use std::{
+    env,
+    error::Error,
+    ffi::OsStr,
+    fs,
+    io::{self, Write as _},
+    path::PathBuf,
+    thread,
+    time::Duration,
+};
 
-use rka_sidecar::{dispatch_rotation, provision_once, run};
+use rka_sidecar::{committed_profile_epoch, dispatch_rotation, provision_once, run};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let command = env::args_os().nth(1);
@@ -13,6 +22,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if command.as_deref() == Some(OsStr::new("rotate-roots")) {
         dispatch_rotation()?;
+        return Ok(());
+    }
+    if command.as_deref() == Some(OsStr::new("trust-epoch")) {
+        writeln!(io::stdout().lock(), "{}", committed_profile_epoch()?)?;
         return Ok(());
     }
     let role = command.as_deref().map_or_else(

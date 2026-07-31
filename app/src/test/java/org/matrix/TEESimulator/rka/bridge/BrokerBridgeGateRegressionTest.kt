@@ -92,6 +92,7 @@ class BrokerBridgeGateRegressionTest {
                 BridgeMessage.PublicKeyResponse(
                     it.requestId,
                     csr,
+                    testBatchId(),
                     testKeyMetadata(Hash32.of(ByteArray(32))),
                 )
             }
@@ -157,6 +158,7 @@ class BrokerBridgeGateRegressionTest {
                 BridgeMessage.PublicKeyResponse(
                     it.requestId,
                     PublicBytes.of(byteArrayOf(1), BridgeLimits.MAX_FRAME_BYTES),
+                    testBatchId(),
                     testKeyMetadata(Hash32.of(ByteArray(32))),
                 )
             }
@@ -178,6 +180,7 @@ class BrokerBridgeGateRegressionTest {
                 BridgeMessage.PublicKeyResponse(
                     it.requestId,
                     PublicBytes.of(byteArrayOf(1), BridgeLimits.MAX_FRAME_BYTES),
+                    testBatchId(),
                     testKeyMetadata(Hash32.of(ByteArray(32))),
                 )
             }
@@ -236,6 +239,7 @@ class BrokerBridgeGateRegressionTest {
             BridgeMessage.PublicKeyResponse(
                 request.requestId,
                 PublicBytes.of(byteArrayOf(1), BridgeLimits.MAX_FRAME_BYTES),
+                testBatchId(),
                 testKeyMetadata(Hash32.of(ByteArray(32))),
             )
         val transport =

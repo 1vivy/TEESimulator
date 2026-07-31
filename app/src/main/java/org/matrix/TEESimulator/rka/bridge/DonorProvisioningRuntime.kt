@@ -12,6 +12,9 @@ import org.matrix.TEESimulator.rka.broker.RkpKeyCount
 import org.matrix.TEESimulator.rka.journal.DurableIrpcKeyBatchGenerator
 import org.matrix.TEESimulator.rka.journal.FileHalCsrJournal
 import org.matrix.TEESimulator.rka.journal.FileRkpJournalStore
+import org.matrix.TEESimulator.rka.journal.RkpBatchId
+import org.matrix.TEESimulator.rka.journal.RkpCertification
+import org.matrix.TEESimulator.rka.journal.RkpCertifiedKey
 import org.matrix.TEESimulator.rka.journal.RkpJournal
 import org.matrix.TEESimulator.rka.journal.RkpJournalState
 
@@ -21,6 +24,7 @@ object DonorProvisioningRuntime {
     private val client by lazy(IrpcClient::android)
     private val journal by lazy { RkpJournal(FileRkpJournalStore.production(root)) }
     private val csrJournal by lazy { FileHalCsrJournal(root) }
+    private var activeRequestId: RequestId? = null
 
     fun initializeLifecycle() {
         if (!started.compareAndSet(false, true)) return
@@ -40,10 +44,13 @@ object DonorProvisioningRuntime {
             .start()
     }
 
+    @Synchronized
     private fun dispatch(message: BridgeMessage): BridgeMessage =
         when (message) {
             is BridgeMessage.PublicKeyRequest -> provision(message)
+            is BridgeMessage.CertificationRequest -> certify(message)
             is BridgeMessage.Cancel -> {
+                activeRequestId = null
                 val handles = message.brokerHandles()
                 val exact =
                     try {
@@ -65,6 +72,7 @@ object DonorProvisioningRuntime {
         val challenge =
             AttestationChallenge.parse(request.challenge.copyBytes()) as? BrokerOutcome.Success
                 ?: return failure(request.requestId)
+        activeRequestId = null
         val deadline = BrokerDeadline.at(BridgeLimits.DEADLINE_MILLIS)
         val cancellation = BrokerCancellation.active()
         val generator = DurableIrpcKeyBatchGenerator(client, journal)
@@ -88,9 +96,11 @@ object DonorProvisioningRuntime {
                 journal.quarantineCurrent()
                 return failure(request.requestId)
             }
+        activeRequestId = request.requestId
         return BridgeMessage.PublicKeyResponse(
             request.requestId,
             PublicBytes.of(csr.value.copyBytes(), BridgeLimits.MAX_FRAME_BYTES),
+            BrokerBatchId.of(record.batchId.copyBytes()),
             record.entries.map { entry ->
                 BrokerKeyMetadata(
                     entry.order,
@@ -99,6 +109,52 @@ object DonorProvisioningRuntime {
                     Hash32.of(entry.copySpkiHash()),
                 )
             },
+        )
+    }
+
+    private fun certify(request: BridgeMessage.CertificationRequest): BridgeMessage {
+        val batchBytes = request.batchId.copyBytes()
+        val binding = request.activationBindingHash.copyBytes()
+        val keys = request.keyMetadata()
+        val certification =
+            try {
+                RkpCertification(
+                    request.requestId.value,
+                    RkpBatchId.from(batchBytes),
+                    keys.map {
+                        RkpCertifiedKey(
+                            it.order,
+                            org.matrix.TEESimulator.rka.journal.RkpOpaqueHandle.from(
+                                it.handle.copyBytes()
+                            ),
+                            it.publicKeyHash.copyBytes(),
+                            it.spkiHash.copyBytes(),
+                            it.chainHash.copyBytes(),
+                            it.certificateCount,
+                        )
+                    },
+                    request.profileEpoch,
+                    binding,
+                )
+            } finally {
+                keys.forEach(BrokerCertificationMetadata::close)
+            }
+        val exact =
+            if (activeRequestId == request.requestId) {
+                journal.certifyCurrent(certification)
+            } else {
+                journal.quarantineCurrent()
+                false
+            }
+        if (!exact) {
+            activeRequestId = null
+            return failure(request.requestId)
+        }
+        activeRequestId = null
+        return BridgeMessage.CertificationAck(
+            request.requestId,
+            BrokerBatchId.of(batchBytes),
+            Hash32.of(binding),
         )
     }
 

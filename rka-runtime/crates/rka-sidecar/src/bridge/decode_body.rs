@@ -2,9 +2,10 @@ use super::BridgeError;
 use std::io::ErrorKind;
 
 use super::model::{
-    BridgeMessage, BrokerKeyMetadata, Hash32, MAX_CERTIFICATE_BYTES, MAX_CHAIN_BYTES,
-    MAX_CHAIN_CERTIFICATES, MAX_FRAME_BYTES, MAX_PUBLIC_KEYS, MAX_TOTAL_INPUT_BYTES,
-    MAX_UPDATE_BYTES, NetworkHandle, PublicBytes, RequestId,
+    BridgeMessage, BrokerBatchId, BrokerCertificationMetadata, BrokerKeyMetadata, Hash32,
+    MAX_CERTIFICATE_BYTES, MAX_CHAIN_BYTES, MAX_CHAIN_CERTIFICATES, MAX_FRAME_BYTES,
+    MAX_PUBLIC_KEYS, MAX_TOTAL_INPUT_BYTES, MAX_UPDATE_BYTES, NetworkHandle, PublicBytes,
+    RequestId,
 };
 
 pub(super) fn decode_body(
@@ -36,6 +37,12 @@ pub(super) fn decode_body(
             }
             BridgeMessage::Error(request_id, code, Hash32::new(cursor.take_array()?))
         }
+        9 => decode_certification_request(request_id, &mut cursor)?,
+        10 => BridgeMessage::CertificationAck(
+            request_id,
+            BrokerBatchId::new(cursor.take_array()?),
+            Hash32::new(cursor.take_array()?),
+        ),
         _ => return Err(BridgeError::UnknownTag),
     };
     if cursor.remaining() != 0 {
@@ -63,6 +70,7 @@ fn decode_public_key_response(
     cursor: &mut Cursor<'_>,
 ) -> Result<BridgeMessage, BridgeError> {
     let public_csr = cursor.take_public(1, MAX_FRAME_BYTES)?;
+    let batch_id = BrokerBatchId::new(cursor.take_array()?);
     let count = usize::from(cursor.take_u8()?);
     if !(1..=MAX_PUBLIC_KEYS).contains(&count) {
         return Err(BridgeError::NonCanonical);
@@ -83,7 +91,42 @@ fn decode_public_key_response(
         )?);
     }
     Ok(BridgeMessage::PublicKeyResponse(
-        request_id, public_csr, keys,
+        request_id, public_csr, batch_id, keys,
+    ))
+}
+
+fn decode_certification_request(
+    request_id: RequestId,
+    cursor: &mut Cursor<'_>,
+) -> Result<BridgeMessage, BridgeError> {
+    let batch_id = BrokerBatchId::new(cursor.take_array()?);
+    let count = usize::from(cursor.take_u8()?);
+    if !(1..=MAX_PUBLIC_KEYS).contains(&count) {
+        return Err(BridgeError::NonCanonical);
+    }
+    let mut keys = Vec::new();
+    keys.try_reserve_exact(count)
+        .map_err(|_| BridgeError::Allocation)?;
+    for expected_order in 0..count {
+        let order = cursor.take_u8()?;
+        if usize::from(order) != expected_order {
+            return Err(BridgeError::NonCanonical);
+        }
+        keys.push(BrokerCertificationMetadata::new(
+            order,
+            cursor.take_array()?,
+            cursor.take_array()?,
+            cursor.take_array()?,
+            cursor.take_array()?,
+            cursor.take_u8()?,
+        )?);
+    }
+    Ok(BridgeMessage::CertificationRequest(
+        request_id,
+        batch_id,
+        keys,
+        cursor.take_u64()?,
+        Hash32::new(cursor.take_array()?),
     ))
 }
 
@@ -197,6 +240,10 @@ impl<'a> Cursor<'a> {
 
     fn take_u32(&mut self) -> Result<u32, BridgeError> {
         Ok(u32::from_be_bytes(self.take_array()?))
+    }
+
+    fn take_u64(&mut self) -> Result<u64, BridgeError> {
+        Ok(u64::from_be_bytes(self.take_array()?))
     }
 
     fn take_array<const N: usize>(&mut self) -> Result<[u8; N], BridgeError> {

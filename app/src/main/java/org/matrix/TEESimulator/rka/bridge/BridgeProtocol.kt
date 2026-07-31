@@ -36,6 +36,8 @@ object BridgeTag {
     const val ERROR = 6
     const val CANDIDATE_COMMAND = 7
     const val CANDIDATE_REPLY = 8
+    const val CERTIFICATION_REQUEST = 9
+    const val CERTIFICATION_ACK = 10
 
     internal val known =
         setOf(
@@ -47,13 +49,20 @@ object BridgeTag {
             ERROR,
             CANDIDATE_COMMAND,
             CANDIDATE_REPLY,
+            CERTIFICATION_REQUEST,
+            CERTIFICATION_ACK,
         )
 }
 
 enum class BridgeExchangeRole(val direction: BridgeDirection, internal val tags: Set<Int>) {
     DONOR_REQUEST(
         BridgeDirection.SIDECAR_TO_BROKER,
-        setOf(BridgeTag.PUBLIC_KEY_REQUEST, BridgeTag.UPDATE_REQUEST, BridgeTag.CANCEL),
+        setOf(
+            BridgeTag.PUBLIC_KEY_REQUEST,
+            BridgeTag.UPDATE_REQUEST,
+            BridgeTag.CANCEL,
+            BridgeTag.CERTIFICATION_REQUEST,
+        ),
     ),
     DONOR_RESPONSE(
         BridgeDirection.BROKER_TO_SIDECAR,
@@ -62,6 +71,7 @@ enum class BridgeExchangeRole(val direction: BridgeDirection, internal val tags:
             BridgeTag.PUBLIC_RESULT,
             BridgeTag.CANCEL,
             BridgeTag.ERROR,
+            BridgeTag.CERTIFICATION_ACK,
         ),
     ),
     CANDIDATE_REQUEST(
@@ -188,6 +198,69 @@ class BrokerKeyMetadata(
     override fun toString(): String = "BrokerKeyMetadata(order=$order,redacted)"
 }
 
+class BrokerBatchId private constructor(bytes: ByteArray) : AutoCloseable {
+    private val value = bytes.copyOf()
+    private val destroyed = AtomicBoolean()
+
+    fun copyBytes(): ByteArray {
+        check(!destroyed.get()) { "batch identifier destroyed" }
+        return value.copyOf()
+    }
+
+    internal fun copy(): BrokerBatchId = of(copyBytes())
+
+    override fun close() {
+        if (destroyed.compareAndSet(false, true)) value.fill(0)
+    }
+
+    override fun equals(other: Any?): Boolean =
+        other is BrokerBatchId && value.contentEquals(other.value)
+
+    override fun hashCode(): Int = value.contentHashCode()
+
+    override fun toString(): String = "BrokerBatchId(redacted)"
+
+    companion object {
+        fun of(bytes: ByteArray): BrokerBatchId {
+            require(bytes.size == 16)
+            return BrokerBatchId(bytes)
+        }
+    }
+}
+
+class BrokerCertificationMetadata(
+    val order: Int,
+    val handle: Hash32,
+    val publicKeyHash: Hash32,
+    val spkiHash: Hash32,
+    val chainHash: Hash32,
+    val certificateCount: Int,
+) : AutoCloseable {
+    init {
+        require(order in 0 until BridgeLimits.MAX_PUBLIC_KEYS)
+        require(certificateCount in 1..BridgeLimits.MAX_CHAIN_CERTIFICATES)
+    }
+
+    internal fun copy(): BrokerCertificationMetadata =
+        BrokerCertificationMetadata(
+            order,
+            Hash32.of(handle.copyBytes()),
+            Hash32.of(publicKeyHash.copyBytes()),
+            Hash32.of(spkiHash.copyBytes()),
+            Hash32.of(chainHash.copyBytes()),
+            certificateCount,
+        )
+
+    override fun close() {
+        handle.close()
+        publicKeyHash.close()
+        spkiHash.close()
+        chainHash.close()
+    }
+
+    override fun toString(): String = "BrokerCertificationMetadata(order=$order,redacted)"
+}
+
 class NetworkHandle private constructor(bytes: ByteArray) : AutoCloseable {
     private val value = bytes.copyOf()
     private val destroyed = AtomicBoolean()
@@ -249,6 +322,7 @@ sealed class BridgeMessage : AutoCloseable {
     class PublicKeyResponse(
         override val requestId: RequestId,
         val publicCsr: PublicBytes,
+        val batchId: BrokerBatchId,
         keys: List<BrokerKeyMetadata>,
     ) : BridgeMessage() {
         private val values = keys.map(BrokerKeyMetadata::copy)
@@ -261,7 +335,7 @@ sealed class BridgeMessage : AutoCloseable {
             require(distinct(values.map { it.publicKeyHash.copyBytes() }))
             require(distinct(values.map { it.spkiHash.copyBytes() }))
             val encodedSize =
-                4L + publicCsr.size + 1L + Math.multiplyExact(values.size.toLong(), 97L)
+                4L + publicCsr.size + 17L + Math.multiplyExact(values.size.toLong(), 97L)
             require(encodedSize <= BridgeLimits.MAX_FRAME_BYTES)
         }
 
@@ -272,6 +346,7 @@ sealed class BridgeMessage : AutoCloseable {
 
         override fun close() {
             publicCsr.close()
+            batchId.close()
             values.forEach(BrokerKeyMetadata::close)
         }
 
@@ -382,6 +457,51 @@ sealed class BridgeMessage : AutoCloseable {
         }
     }
 
+    class CertificationRequest(
+        override val requestId: RequestId,
+        val batchId: BrokerBatchId,
+        keys: List<BrokerCertificationMetadata>,
+        val profileEpoch: Long,
+        val activationBindingHash: Hash32,
+    ) : BridgeMessage() {
+        private val values = keys.map(BrokerCertificationMetadata::copy)
+
+        init {
+            require(values.size in 1..BridgeLimits.MAX_PUBLIC_KEYS)
+            require(values.map { it.order } == values.indices.toList())
+            require(distinct(values.map { it.handle.copyBytes() }))
+            require(distinct(values.map { it.publicKeyHash.copyBytes() }))
+            require(distinct(values.map { it.spkiHash.copyBytes() }))
+            require(distinct(values.map { it.chainHash.copyBytes() }))
+            require(profileEpoch > 0)
+        }
+
+        fun keyMetadata(): List<BrokerCertificationMetadata> =
+            values.map(BrokerCertificationMetadata::copy)
+
+        override fun close() {
+            batchId.close()
+            values.forEach(BrokerCertificationMetadata::close)
+            activationBindingHash.close()
+        }
+
+        private fun distinct(items: List<ByteArray>): Boolean =
+            items.indices.all { index ->
+                items.drop(index + 1).none { candidate -> items[index].contentEquals(candidate) }
+            }
+    }
+
+    class CertificationAck(
+        override val requestId: RequestId,
+        val batchId: BrokerBatchId,
+        val activationBindingHash: Hash32,
+    ) : BridgeMessage() {
+        override fun close() {
+            batchId.close()
+            activationBindingHash.close()
+        }
+    }
+
     class CandidateCommand(
         override val requestId: RequestId,
         val operation: CandidateBridgeOperation,
@@ -435,6 +555,8 @@ internal object BridgeProtocol {
             is BridgeMessage.Error -> BridgeTag.ERROR
             is BridgeMessage.CandidateCommand -> BridgeTag.CANDIDATE_COMMAND
             is BridgeMessage.CandidateReply -> BridgeTag.CANDIDATE_REPLY
+            is BridgeMessage.CertificationRequest -> BridgeTag.CERTIFICATION_REQUEST
+            is BridgeMessage.CertificationAck -> BridgeTag.CERTIFICATION_ACK
         }
 
     fun correlationFor(request: BridgeMessage, generation: Long): BridgeCorrelation {
@@ -444,6 +566,7 @@ internal object BridgeProtocol {
                 is BridgeMessage.UpdateRequest -> BridgeTag.PUBLIC_RESULT
                 is BridgeMessage.Cancel -> BridgeTag.CANCEL
                 is BridgeMessage.CandidateCommand -> BridgeTag.CANDIDATE_REPLY
+                is BridgeMessage.CertificationRequest -> BridgeTag.CERTIFICATION_ACK
                 else -> throw IllegalArgumentException("message is not a request")
             }
         return BridgeCorrelation(request.requestId, expected, generation, Thread.currentThread())

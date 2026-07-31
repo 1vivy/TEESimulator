@@ -1,11 +1,16 @@
 package org.matrix.TEESimulator.rka.broker
 
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.security.MessageDigest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.matrix.TEESimulator.rka.journal.RkpIrpcIdentity
+import org.matrix.TEESimulator.rka.journal.RkpCertification
+import org.matrix.TEESimulator.rka.journal.RkpCertifiedKey
 import org.matrix.TEESimulator.rka.journal.RkpJournal
 import org.matrix.TEESimulator.rka.journal.RkpJournalStore
 
@@ -77,7 +82,55 @@ class IrpcKeyBatchTest {
         assertFalse(journal.quarantineHandles(handles))
     }
 
+    @Test
+    fun certificationResolvesEveryRetainedBlobAndCommitsCertifiedAtomically() {
+        val (journal, record) = certificationFixture()
+        val certification = certification(record, 77)
+
+        assertTrue(journal.certifyCurrent(certification))
+        assertEquals(
+            org.matrix.TEESimulator.rka.journal.RkpJournalState.RKP_CERTIFIED,
+            journal.recover()?.state,
+        )
+    }
+
+    @Test
+    fun certificationMutationOrReplayQuarantinesWithoutCertifiedSuccess() {
+        val (journal, record) = certificationFixture()
+        val certification = certification(record, 78)
+        val mutated =
+            RkpCertification(
+                certification.requestId,
+                certification.batchId,
+                certification.keys.mapIndexed { index, key ->
+                    RkpCertifiedKey(
+                        key.order,
+                        key.handle,
+                        key.copyPublicHash(),
+                        key.copySpkiHash(),
+                        if (index == 1) ByteArray(32) { 99 } else key.copyChainHash(),
+                        key.certificateCount,
+                    )
+                },
+                certification.profileEpoch,
+                certification.copyActivationBindingHash(),
+            )
+
+        assertFalse(journal.certifyCurrent(mutated))
+        assertFalse(journal.certifyCurrent(certification))
+        assertEquals(
+            org.matrix.TEESimulator.rka.journal.RkpJournalState.QUARANTINED,
+            journal.recover()?.state,
+        )
+    }
+
     private fun recordedTwoKeyBatch(): Pair<RkpJournal, MutableList<ByteArray>> {
+        val (journal, record) = certificationFixture()
+        return journal to record.entries.map { it.handle.copyBytes() }.toMutableList()
+    }
+
+    private fun certificationFixture():
+        Pair<RkpJournal, org.matrix.TEESimulator.rka.journal.RkpJournalRecord> {
         val batch =
             IrpcKeyBatch(
                 testIrpcIdentity(),
@@ -91,7 +144,67 @@ class IrpcKeyBatchTest {
         val intent = journal.begin(count, RkpIrpcIdentity.from(testIrpcIdentity()))
         val entries = journal.deriveEntries(intent, batch.publicKeys().zip(batch.spkiPublicKeys()))
         batch.recordInJournal(journal, intent, entries)
-        return journal to entries.map { it.handle.copyBytes() }.toMutableList()
+        val recorded = requireNotNull(journal.recover())
+        val prepared =
+            journal.transition(
+                recorded,
+                org.matrix.TEESimulator.rka.journal.RkpJournalState.CSR_PREPARED,
+            )
+        return journal to prepared
+    }
+
+    private fun certification(
+        record: org.matrix.TEESimulator.rka.journal.RkpJournalRecord,
+        requestId: Long,
+    ): RkpCertification =
+        RkpCertification(
+            requestId,
+            record.batchId,
+            record.entries.map { entry ->
+                RkpCertifiedKey(
+                    entry.order,
+                    entry.handle,
+                    entry.copyPublicHash(),
+                    entry.copySpkiHash(),
+                    ByteArray(32) { (entry.order + 20).toByte() },
+                    2,
+                )
+            },
+            7,
+            task14Binding(record, requestId),
+        )
+
+    private fun task14Binding(
+        record: org.matrix.TEESimulator.rka.journal.RkpJournalRecord,
+        requestId: Long,
+    ): ByteArray {
+        val digest = MessageDigest.getInstance("SHA-256")
+        record.entries.forEach { entry ->
+            val lease = MessageDigest.getInstance("SHA-256")
+            lease.update("TEESimulator-RS activation v1\u0000".toByteArray())
+            lease.update("lease".toByteArray())
+            lease.update(
+                ByteBuffer.allocate(Long.SIZE_BYTES)
+                    .order(ByteOrder.BIG_ENDIAN)
+                    .putLong(requestId)
+                    .array()
+            )
+            lease.update(entry.copySpkiHash())
+            digest.update(lease.digest().copyOf(16))
+            digest.update(record.batchId.copyBytes())
+            digest.update(entry.order.toByte())
+            digest.update(entry.copyPublicHash())
+            digest.update(entry.copySpkiHash())
+            digest.update(ByteArray(32) { (entry.order + 20).toByte() })
+            digest.update(2.toByte())
+            digest.update(
+                ByteBuffer.allocate(Long.SIZE_BYTES)
+                    .order(ByteOrder.BIG_ENDIAN)
+                    .putLong(7L)
+                    .array()
+            )
+        }
+        return digest.digest()
     }
 }
 

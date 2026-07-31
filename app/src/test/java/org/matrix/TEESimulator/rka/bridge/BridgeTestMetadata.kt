@@ -12,3 +12,5 @@ internal fun testKeyMetadata(hash: Hash32): List<BrokerKeyMetadata> {
         )
     )
 }
+
+internal fun testBatchId(): BrokerBatchId = BrokerBatchId.of(ByteArray(16) { 7 })

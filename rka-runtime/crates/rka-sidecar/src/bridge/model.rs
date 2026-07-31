@@ -98,6 +98,7 @@ macro_rules! fixed_bytes {
 
 fixed_bytes!(Hash32, 32, "Redacted fixed-width public hash.");
 fixed_bytes!(NetworkHandle, 16, "Opaque network-only operation handle.");
+fixed_bytes!(BrokerBatchId, 16, "Opaque broker-journal batch identifier.");
 
 /// Exact broker-journal identity for one ordered generated key.
 #[derive(Debug, Eq, PartialEq)]
@@ -152,6 +153,75 @@ impl BrokerKeyMetadata {
     }
 }
 
+/// Exact certified identity for one ordered broker key.
+#[derive(Debug, Eq, PartialEq)]
+pub struct BrokerCertificationMetadata {
+    order: u8,
+    handle: Hash32,
+    public_key_hash: Hash32,
+    spki_hash: Hash32,
+    chain_hash: Hash32,
+    certificate_count: u8,
+}
+
+impl BrokerCertificationMetadata {
+    /// Creates one bounded ordered certification identity.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one certified key binds order and four independent hashes"
+    )]
+    pub fn new(
+        order: u8,
+        handle: [u8; 32],
+        public_key_hash: [u8; 32],
+        spki_hash: [u8; 32],
+        chain_hash: [u8; 32],
+        certificate_count: u8,
+    ) -> Result<Self, BridgeError> {
+        if usize::from(order) >= MAX_PUBLIC_KEYS || certificate_count == 0 {
+            return Err(BridgeError::NonCanonical);
+        }
+        Ok(Self {
+            order,
+            handle: Hash32::new(handle),
+            public_key_hash: Hash32::new(public_key_hash),
+            spki_hash: Hash32::new(spki_hash),
+            chain_hash: Hash32::new(chain_hash),
+            certificate_count,
+        })
+    }
+
+    /// Returns the exact generated-key order.
+    pub const fn order(&self) -> u8 {
+        self.order
+    }
+
+    /// Returns the exact opaque broker handle.
+    pub const fn handle(&self) -> &[u8; 32] {
+        self.handle.as_array()
+    }
+
+    /// Returns the `MACed` public-key hash.
+    pub const fn public_key_hash(&self) -> &[u8; 32] {
+        self.public_key_hash.as_array()
+    }
+
+    /// Returns the SPKI hash.
+    pub const fn spki_hash(&self) -> &[u8; 32] {
+        self.spki_hash.as_array()
+    }
+
+    /// Returns the validated DER chain hash.
+    pub const fn chain_hash(&self) -> &[u8; 32] {
+        self.chain_hash.as_array()
+    }
+
+    /// Returns the complete validated chain certificate count.
+    pub const fn certificate_count(&self) -> u8 {
+        self.certificate_count
+    }
+}
+
 #[doc = "One closed, public-only bridge DTO."]
 #[derive(Eq, PartialEq)]
 #[non_exhaustive]
@@ -159,7 +229,12 @@ pub enum BridgeMessage {
     #[doc = "Requests public CSR material."]
     PublicKeyRequest(RequestId, PublicBytes, u8),
     #[doc = "Returns public CSR and exact ordered broker identities."]
-    PublicKeyResponse(RequestId, PublicBytes, Vec<BrokerKeyMetadata>),
+    PublicKeyResponse(
+        RequestId,
+        PublicBytes,
+        BrokerBatchId,
+        Vec<BrokerKeyMetadata>,
+    ),
     #[doc = "Supplies a bounded operation chunk."]
     UpdateRequest(RequestId, NetworkHandle, PublicBytes, u32),
     #[doc = "Returns a public SPKI and DER chain."]
@@ -168,6 +243,16 @@ pub enum BridgeMessage {
     Cancel(RequestId, Vec<Hash32>),
     #[doc = "Returns one redacted typed failure."]
     Error(RequestId, u8, Hash32),
+    #[doc = "Commits exact validated activation metadata to the broker journal."]
+    CertificationRequest(
+        RequestId,
+        BrokerBatchId,
+        Vec<BrokerCertificationMetadata>,
+        u64,
+        Hash32,
+    ),
+    #[doc = "Acknowledges one exact durable broker certification."]
+    CertificationAck(RequestId, BrokerBatchId, Hash32),
 }
 
 impl BridgeMessage {
@@ -179,7 +264,9 @@ impl BridgeMessage {
             | Self::UpdateRequest(id, ..)
             | Self::PublicResult(id, ..)
             | Self::Cancel(id, ..)
-            | Self::Error(id, ..) => *id,
+            | Self::Error(id, ..)
+            | Self::CertificationRequest(id, ..)
+            | Self::CertificationAck(id, ..) => *id,
         }
     }
 
@@ -191,6 +278,8 @@ impl BridgeMessage {
             Self::PublicResult(..) => 4,
             Self::Cancel(..) => 5,
             Self::Error(..) => 6,
+            Self::CertificationRequest(..) => 9,
+            Self::CertificationAck(..) => 10,
         }
     }
 }
@@ -229,8 +318,10 @@ impl ExchangeRole {
 
     pub(crate) const fn accepts(self, tag: u8) -> bool {
         match self {
-            Self::DonorRequest | Self::CandidateRequest => matches!(tag, 1 | 3 | 5),
-            Self::DonorResponse | Self::CandidateResponse => matches!(tag, 2 | 4 | 5 | 6),
+            Self::DonorRequest => matches!(tag, 1 | 3 | 5 | 9),
+            Self::DonorResponse => matches!(tag, 2 | 4 | 5 | 6 | 10),
+            Self::CandidateRequest => matches!(tag, 1 | 3 | 5),
+            Self::CandidateResponse => matches!(tag, 2 | 4 | 5 | 6),
         }
     }
 }
@@ -241,8 +332,10 @@ pub const fn expected_response_tag(message: &BridgeMessage) -> Result<u8, Bridge
         BridgeMessage::PublicKeyRequest(..) => Ok(2),
         BridgeMessage::UpdateRequest(..) => Ok(4),
         BridgeMessage::Cancel(..) => Ok(5),
+        BridgeMessage::CertificationRequest(..) => Ok(10),
         BridgeMessage::PublicKeyResponse(..)
         | BridgeMessage::PublicResult(..)
+        | BridgeMessage::CertificationAck(..)
         | BridgeMessage::Error(..) => Err(BridgeError::UnexpectedTag),
     }
 }

@@ -15,7 +15,8 @@ object BridgeCodec {
             message is BridgeMessage.PublicKeyRequest ||
                 message is BridgeMessage.UpdateRequest ||
                 message is BridgeMessage.Cancel ||
-                message is BridgeMessage.CandidateCommand
+                message is BridgeMessage.CandidateCommand ||
+                message is BridgeMessage.CertificationRequest
         val role =
             when (direction) {
                 BridgeDirection.SIDECAR_TO_BROKER ->
@@ -117,6 +118,7 @@ object BridgeCodec {
                     }
                     is BridgeMessage.PublicKeyResponse -> {
                         writeBytes(out, message.publicCsr)
+                        writeFixed(out, message.batchId)
                         val keys = message.keyMetadata()
                         try {
                             out.writeByte(keys.size)
@@ -167,6 +169,29 @@ object BridgeCodec {
                         out.writeByte(message.operation.wire)
                         writeBytes(out, message.payload)
                     }
+                    is BridgeMessage.CertificationRequest -> {
+                        writeFixed(out, message.batchId)
+                        val keys = message.keyMetadata()
+                        try {
+                            out.writeByte(keys.size)
+                            keys.forEach {
+                                out.writeByte(it.order)
+                                writeFixed(out, it.handle)
+                                writeFixed(out, it.publicKeyHash)
+                                writeFixed(out, it.spkiHash)
+                                writeFixed(out, it.chainHash)
+                                out.writeByte(it.certificateCount)
+                            }
+                            out.writeLong(message.profileEpoch)
+                            writeFixed(out, message.activationBindingHash)
+                        } finally {
+                            keys.forEach(BrokerCertificationMetadata::close)
+                        }
+                    }
+                    is BridgeMessage.CertificationAck -> {
+                        writeFixed(out, message.batchId)
+                        writeFixed(out, message.activationBindingHash)
+                    }
                 }
             }
             bytes.toByteArray()
@@ -193,6 +218,7 @@ object BridgeCodec {
                     }
                     BridgeTag.PUBLIC_KEY_RESPONSE -> {
                         val csr = readPublicBytes(input, BridgeLimits.MAX_FRAME_BYTES, minimum = 1)
+                        val batchId = readBatchId(input)
                         val count = input.readUnsignedByte()
                         val keys = mutableListOf<BrokerKeyMetadata>()
                         try {
@@ -207,9 +233,10 @@ object BridgeCodec {
                                         readHash(input),
                                     )
                             }
-                            BridgeMessage.PublicKeyResponse(requestId, csr, keys)
+                            BridgeMessage.PublicKeyResponse(requestId, csr, batchId, keys)
                         } catch (error: Throwable) {
                             csr.close()
+                            batchId.close()
                             keys.forEach(BrokerKeyMetadata::close)
                             throw error
                         }
@@ -291,6 +318,43 @@ object BridgeCodec {
                             BridgeMessage.CandidateReply(requestId, operation, payload)
                         }
                     }
+                    BridgeTag.CERTIFICATION_REQUEST -> {
+                        val batchId = readBatchId(input)
+                        val count = input.readUnsignedByte()
+                        val keys = mutableListOf<BrokerCertificationMetadata>()
+                        try {
+                            require(count in 1..BridgeLimits.MAX_PUBLIC_KEYS)
+                            repeat(count) { order ->
+                                require(input.readUnsignedByte() == order)
+                                keys +=
+                                    BrokerCertificationMetadata(
+                                        order,
+                                        readHash(input),
+                                        readHash(input),
+                                        readHash(input),
+                                        readHash(input),
+                                        input.readUnsignedByte(),
+                                    )
+                            }
+                            BridgeMessage.CertificationRequest(
+                                requestId,
+                                batchId,
+                                keys,
+                                input.readLong(),
+                                readHash(input),
+                            )
+                        } catch (error: Throwable) {
+                            batchId.close()
+                            keys.forEach(BrokerCertificationMetadata::close)
+                            throw error
+                        }
+                    }
+                    BridgeTag.CERTIFICATION_ACK ->
+                        BridgeMessage.CertificationAck(
+                            requestId,
+                            readBatchId(input),
+                            readHash(input),
+                        )
                     else -> return BridgeResult.Failure(BridgeError.UnknownTag)
                 }
             if (input.available() != 0) {
@@ -325,6 +389,15 @@ object BridgeCodec {
     }
 
     private fun writeFixed(output: DataOutputStream, value: NetworkHandle) {
+        val copy = value.copyBytes()
+        try {
+            output.write(copy)
+        } finally {
+            copy.fill(0)
+        }
+    }
+
+    private fun writeFixed(output: DataOutputStream, value: BrokerBatchId) {
         val copy = value.copyBytes()
         try {
             output.write(copy)
@@ -374,6 +447,15 @@ object BridgeCodec {
         val bytes = readFixed(input, 16)
         return try {
             NetworkHandle.of(bytes)
+        } finally {
+            bytes.fill(0)
+        }
+    }
+
+    private fun readBatchId(input: DataInputStream): BrokerBatchId {
+        val bytes = readFixed(input, 16)
+        return try {
+            BrokerBatchId.of(bytes)
         } finally {
             bytes.fill(0)
         }

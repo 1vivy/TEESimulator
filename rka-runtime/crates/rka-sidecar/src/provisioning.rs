@@ -13,8 +13,11 @@ use rka_rkp::{
 use thiserror::Error;
 
 use crate::{
-    bridge::{BridgeMessage, BrokerOperation, PublicBytes, RequestId, RoleExecutor, SidecarRole},
-    provision_activation::activate,
+    bridge::{
+        BridgeMessage, BrokerCertificationMetadata, BrokerOperation, Hash32, PublicBytes,
+        RequestId, RoleExecutor, SidecarRole,
+    },
+    provision_activation::prepare,
     provisioning_io::{FileAttemptJournal, FileBaseStore, FileStateStore, ProductionConfig},
 };
 
@@ -73,7 +76,7 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
         .map_err(|_| ProvisioningRunError::Broker)?;
     let mut broker_handles = Vec::new();
     let result = (|| {
-        let BridgeMessage::PublicKeyResponse(_, hal_csr, keys) = response else {
+        let BridgeMessage::PublicKeyResponse(_, hal_csr, batch_id, keys) = response else {
             return Err(ProvisioningRunError::Broker);
         };
         if keys.len() != usize::from(config.key_count) {
@@ -101,7 +104,9 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
             .map_err(|_| ProvisioningRunError::Http)?;
         complete(
             &config,
+            &executor,
             request_id,
+            *batch_id.as_array(),
             &prepared,
             signed.response().body(),
             &expected,
@@ -132,7 +137,9 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
 )]
 fn complete(
     config: &ProductionConfig,
+    executor: &RoleExecutor,
     request_id: u64,
+    broker_batch_id: [u8; 16],
     prepared: &rka_rkp::PreparedCertificateRequest,
     response: &[u8],
     expected: &[ExpectedKey],
@@ -171,14 +178,52 @@ fn complete(
         &mut quarantine,
     )
     .map_err(|_| ProvisioningRunError::Validation)?;
-    activate(
+    let prepared_activation = prepare(
         &validated,
         request_id,
+        broker_batch_id,
         roots.epoch(),
         &config.validator_key,
-        &FileStateStore::new(&config.state_root),
         &mut quarantine,
     )?;
+    let certification = BridgeMessage::CertificationRequest(
+        RequestId::new(request_id),
+        crate::bridge::BrokerBatchId::new(broker_batch_id),
+        validated
+            .chains()
+            .iter()
+            .map(|chain| {
+                BrokerCertificationMetadata::new(
+                    chain.order,
+                    chain.handle,
+                    chain.public_key_hash,
+                    chain.leaf_spki_hash,
+                    chain.chain_hash,
+                    chain.certificate_count,
+                )
+                .map_err(|_| ProvisioningRunError::Broker)
+            })
+            .collect::<Result<Vec<_>, ProvisioningRunError>>()?,
+        roots.epoch(),
+        Hash32::new(*prepared_activation.binding_hash()),
+    );
+    let acknowledgement = executor
+        .dispatch(BrokerOperation::Donor {
+            socket_path: &config.socket,
+            request: &certification,
+        })
+        .map_err(|_| ProvisioningRunError::Broker)?;
+    let BridgeMessage::CertificationAck(_, acknowledged_batch, acknowledged_binding) =
+        acknowledgement
+    else {
+        return Err(ProvisioningRunError::Broker);
+    };
+    if acknowledged_batch.as_array() != &broker_batch_id
+        || acknowledged_binding.as_array() != prepared_activation.binding_hash()
+    {
+        return Err(ProvisioningRunError::Broker);
+    }
+    prepared_activation.activate(&FileStateStore::new(&config.state_root))?;
     Ok(())
 }
 

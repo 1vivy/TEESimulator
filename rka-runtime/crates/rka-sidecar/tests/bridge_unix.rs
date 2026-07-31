@@ -11,8 +11,9 @@ use std::{
 };
 
 use rka_sidecar::bridge::{
-    BridgeError, BridgeMessage, BrokerKeyMetadata, Correlation, ExchangeRole, NetworkHandle,
-    PublicBytes, RequestId, decode_frame, encode_frame, read_frame,
+    BridgeError, BridgeMessage, BrokerBatchId, BrokerCertificationMetadata, BrokerKeyMetadata,
+    Correlation, ExchangeRole, Hash32, NetworkHandle, PublicBytes, RequestId, decode_frame,
+    encode_frame, read_frame,
 };
 
 struct SocketPath(PathBuf);
@@ -35,6 +36,7 @@ fn response() -> Result<BridgeMessage, BridgeError> {
     Ok(BridgeMessage::PublicKeyResponse(
         RequestId::new(9),
         PublicBytes::bounded(&[1], 1, 1)?,
+        BrokerBatchId::new([7; 16]),
         vec![BrokerKeyMetadata::new(0, [2; 32], [3; 32], [4; 32])?],
     ))
 }
@@ -112,6 +114,7 @@ fn bridge_correlation_rejects_kind_id_generation_replay_and_out_of_order()
     let wrong_id = BridgeMessage::PublicKeyResponse(
         RequestId::new(10),
         PublicBytes::bounded(&[1], 1, 1)?,
+        BrokerBatchId::new([7; 16]),
         vec![BrokerKeyMetadata::new(0, [2; 32], [3; 32], [4; 32])?],
     );
     assert!(!correlation.accepts(&wrong_id, 3));
@@ -133,6 +136,7 @@ fn bridge_preserves_two_exact_key_identities_and_rejects_order_mutation()
     let message = BridgeMessage::PublicKeyResponse(
         RequestId::new(12),
         PublicBytes::bounded(&[9], 1, 1)?,
+        BrokerBatchId::new([8; 16]),
         vec![
             BrokerKeyMetadata::new(0, [1; 32], [2; 32], [3; 32])?,
             BrokerKeyMetadata::new(1, [4; 32], [5; 32], [6; 32])?,
@@ -140,7 +144,7 @@ fn bridge_preserves_two_exact_key_identities_and_rejects_order_mutation()
     );
     let encoded = encode_frame(&message, ExchangeRole::DonorResponse)?;
     let decoded = decode_frame(encoded.as_slice(), ExchangeRole::DonorResponse)?;
-    let BridgeMessage::PublicKeyResponse(_, _, keys) = decoded else {
+    let BridgeMessage::PublicKeyResponse(_, _, _, keys) = decoded else {
         return Err("wrong response".into());
     };
     let first = keys.first().ok_or("first key")?;
@@ -150,10 +154,39 @@ fn bridge_preserves_two_exact_key_identities_and_rejects_order_mutation()
     assert_eq!(second.spki_hash(), &[6; 32]);
 
     let mut mutated = encoded.as_slice().to_vec();
-    *mutated.get_mut(127).ok_or("second order")? = 0;
+    *mutated.get_mut(143).ok_or("second order")? = 0;
     assert_eq!(
         decode_frame(&mutated, ExchangeRole::DonorResponse),
         Err(BridgeError::NonCanonical)
+    );
+    Ok(())
+}
+
+#[test]
+fn certification_round_trip_binds_batch_keys_chains_and_activation() -> Result<(), Box<dyn Error>> {
+    let message = BridgeMessage::CertificationRequest(
+        RequestId::new(44),
+        BrokerBatchId::new([8; 16]),
+        vec![
+            BrokerCertificationMetadata::new(0, [1; 32], [2; 32], [3; 32], [4; 32], 2)?,
+            BrokerCertificationMetadata::new(1, [5; 32], [6; 32], [7; 32], [9; 32], 3)?,
+        ],
+        7,
+        Hash32::new([10; 32]),
+    );
+    let encoded = encode_frame(&message, ExchangeRole::DonorRequest)?;
+    let decoded = decode_frame(encoded.as_slice(), ExchangeRole::DonorRequest)?;
+    assert_eq!(decoded, message);
+
+    let ack = BridgeMessage::CertificationAck(
+        RequestId::new(44),
+        BrokerBatchId::new([8; 16]),
+        Hash32::new([10; 32]),
+    );
+    let encoded_ack = encode_frame(&ack, ExchangeRole::DonorResponse)?;
+    assert_eq!(
+        decode_frame(encoded_ack.as_slice(), ExchangeRole::DonorResponse)?,
+        ack
     );
     Ok(())
 }

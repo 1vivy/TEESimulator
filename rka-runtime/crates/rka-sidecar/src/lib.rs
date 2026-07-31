@@ -17,7 +17,7 @@ mod provisioning_io;
 mod trust_runtime;
 
 pub use provisioning::{ProvisioningRunError, provision_once};
-pub use trust_runtime::dispatch_rotation;
+pub use trust_runtime::{committed_profile_epoch, dispatch_rotation};
 
 /// Authenticated, bounded broker bridge.
 pub mod bridge;

@@ -68,6 +68,12 @@ pub struct ValidatedCertificationToken {
 }
 
 impl ValidatedCertificationToken {
+    /// Returns the Task14 binding that must be durably acknowledged before activation.
+    #[must_use]
+    pub const fn binding_hash(&self) -> &[u8; 32] {
+        &self.binding_hash
+    }
+
     pub(crate) fn consume_matches(self, batch: &RkpLeaseBatch) -> bool {
         batch.leases.first().is_some_and(|lease| {
             self.batch_id == lease.metadata().batch_id && self.binding_hash == batch_binding(batch)

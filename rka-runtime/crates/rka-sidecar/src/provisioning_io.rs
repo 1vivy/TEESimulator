@@ -39,7 +39,10 @@ impl ProductionConfig {
         let base = BaseUrl::parse(&required_text("RKA_PROVISIONING_BASE")?)
             .map_err(|_| crate::ProvisioningRunError::Configuration)?;
         let fingerprint = required_text("RKA_BUILD_FINGERPRINT")?;
-        let epoch = parse_u64("RKA_PROFILE_EPOCH")?;
+        let epoch = crate::trust_runtime::effective_profile_epoch(
+            &state_root,
+            parse_u64("RKA_PROFILE_EPOCH")?,
+        )?;
         let key_count = u8::try_from(parse_u64("RKA_KEY_COUNT")?)
             .ok()
             .filter(|count| (1..=20).contains(count))
@@ -183,17 +186,58 @@ impl FileStateStore {
     reason = "sibling trust runtime shares this private durable primitive"
 )]
 pub(crate) fn atomic_replace(path: &Path, value: &[u8]) -> std::io::Result<()> {
+    atomic_replace_with(path, value, |_| Ok(()))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "sibling trust runtime injects durable-stage failures"
+)]
+pub(crate) enum AtomicReplaceStage {
+    TempOpen,
+    TempWrite,
+    TempSync,
+    Rename,
+    ParentSync,
+}
+
+impl AtomicReplaceStage {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 5] = [
+        Self::TempOpen,
+        Self::TempWrite,
+        Self::TempSync,
+        Self::Rename,
+        Self::ParentSync,
+    ];
+}
+
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "sibling trust runtime injects durable-stage failures"
+)]
+pub(crate) fn atomic_replace_with(
+    path: &Path,
+    value: &[u8],
+    mut checkpoint: impl FnMut(AtomicReplaceStage) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let parent = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
     fs::create_dir_all(parent)?;
     let temporary = path.with_extension("tmp");
+    checkpoint(AtomicReplaceStage::TempOpen)?;
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open(&temporary)?;
+    checkpoint(AtomicReplaceStage::TempWrite)?;
     file.write_all(value)?;
+    checkpoint(AtomicReplaceStage::TempSync)?;
     file.sync_all()?;
+    checkpoint(AtomicReplaceStage::Rename)?;
     fs::rename(&temporary, path)?;
+    checkpoint(AtomicReplaceStage::ParentSync)?;
     File::open(parent)?.sync_all()
 }
 

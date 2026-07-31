@@ -1,5 +1,7 @@
 package org.matrix.TEESimulator.rka.journal
 
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.security.SecureRandom
 import org.matrix.TEESimulator.rka.broker.RkpKeyCount
@@ -86,12 +88,70 @@ data class RkpJournalEntry(
     override fun toString(): String = "RkpJournalEntry(order=$order, redacted)"
 }
 
+class RkpCertifiedKey(
+    val order: Int,
+    val handle: RkpOpaqueHandle,
+    publicHash: ByteArray,
+    spkiHash: ByteArray,
+    chainHash: ByteArray,
+    val certificateCount: Int,
+) {
+    private val publicHash = publicHash.copyOf()
+    private val spkiHash = spkiHash.copyOf()
+    private val chainHash = chainHash.copyOf()
+
+    init {
+        require(order in 0 until RkpKeyCount.MAX)
+        require(this.publicHash.size == 32)
+        require(this.spkiHash.size == 32)
+        require(this.chainHash.size == 32)
+        require(certificateCount in 1..20)
+    }
+
+    fun copyPublicHash(): ByteArray = publicHash.copyOf()
+
+    fun copySpkiHash(): ByteArray = spkiHash.copyOf()
+
+    fun copyChainHash(): ByteArray = chainHash.copyOf()
+}
+
+class RkpCertification(
+    val requestId: Long,
+    val batchId: RkpBatchId,
+    keys: List<RkpCertifiedKey>,
+    val profileEpoch: Long,
+    activationBindingHash: ByteArray,
+) {
+    val keys = keys.toList()
+    private val activationBindingHash = activationBindingHash.copyOf()
+
+    init {
+        require(requestId > 0)
+        require(this.keys.size in 1..RkpKeyCount.MAX)
+        require(this.keys.map { it.order } == this.keys.indices.toList())
+        require(this.activationBindingHash.size == 32)
+        require(profileEpoch > 0)
+        require(distinct(this.keys.map { it.handle.copyBytes() }))
+        require(distinct(this.keys.map(RkpCertifiedKey::copyPublicHash)))
+        require(distinct(this.keys.map(RkpCertifiedKey::copySpkiHash)))
+        require(distinct(this.keys.map(RkpCertifiedKey::copyChainHash)))
+    }
+
+    fun copyActivationBindingHash(): ByteArray = activationBindingHash.copyOf()
+
+    private fun distinct(items: List<ByteArray>): Boolean =
+        items.indices.all { index ->
+            items.drop(index + 1).none { candidate -> items[index].contentEquals(candidate) }
+        }
+}
+
 data class RkpJournalRecord(
     val batchId: RkpBatchId,
     val state: RkpJournalState,
     val count: Int,
     val identity: RkpIrpcIdentity,
     val entries: List<RkpJournalEntry>,
+    val certification: RkpCertification? = null,
 ) {
     init {
         require(count in 1..RkpKeyCount.MAX)
@@ -105,6 +165,18 @@ data class RkpJournalRecord(
         require(entries.map { it.copyPublicHash().hex() }.distinct().size == entries.size)
         require(entries.map { it.copySpkiHash().hex() }.distinct().size == entries.size)
         require(entries.map { it.handle.copyBytes().hex() }.distinct().size == entries.size)
+        certification?.let { certified ->
+            require(certified.batchId.matches(batchId))
+            require(certified.keys.size == entries.size)
+            require(
+                certified.keys.zip(entries).all { (key, entry) ->
+                    key.order == entry.order &&
+                        key.handle.matches(entry.handle) &&
+                        key.copyPublicHash().contentEquals(entry.copyPublicHash()) &&
+                        key.copySpkiHash().contentEquals(entry.copySpkiHash())
+                }
+            )
+        }
     }
 }
 
@@ -218,6 +290,66 @@ class RkpJournal(private val store: RkpJournalStore) {
         clearRetainedBlobs()
         persist(current.copy(state = RkpJournalState.QUARANTINED))
         return exact
+    }
+
+    fun certifyCurrent(certification: RkpCertification): Boolean {
+        val current = store.read()?.let(RkpJournalCodec::decode) ?: return false
+        val exact =
+            current.state == RkpJournalState.CSR_PREPARED &&
+                certification.batchId.matches(current.batchId) &&
+                certification.keys.size == current.entries.size &&
+                certification.keys.zip(current.entries).all { (key, entry) ->
+                    key.order == entry.order &&
+                        key.handle.matches(entry.handle) &&
+                        key.copyPublicHash().contentEquals(entry.copyPublicHash()) &&
+                        key.copySpkiHash().contentEquals(entry.copySpkiHash()) &&
+                        resolveBrokerBlob?.invoke(key.handle.copyBytes()) == true
+                } &&
+                certification
+                    .copyActivationBindingHash()
+                    .contentEquals(task14Binding(certification))
+        if (!exact) {
+            clearRetainedBlobs()
+            persist(current.copy(state = RkpJournalState.QUARANTINED))
+            return false
+        }
+        persist(
+            current.copy(
+                state = RkpJournalState.RKP_CERTIFIED,
+                certification = certification,
+            )
+        )
+        return true
+    }
+
+    private fun task14Binding(certification: RkpCertification): ByteArray {
+        val batch = MessageDigest.getInstance("SHA-256")
+        certification.keys.forEach { key ->
+            val lease = MessageDigest.getInstance("SHA-256")
+            lease.update("TEESimulator-RS activation v1\u0000".toByteArray())
+            lease.update("lease".toByteArray())
+            lease.update(
+                ByteBuffer.allocate(Long.SIZE_BYTES)
+                    .order(ByteOrder.BIG_ENDIAN)
+                    .putLong(certification.requestId)
+                    .array()
+            )
+            lease.update(key.copySpkiHash())
+            batch.update(lease.digest().copyOf(16))
+            batch.update(certification.batchId.copyBytes())
+            batch.update(key.order.toByte())
+            batch.update(key.copyPublicHash())
+            batch.update(key.copySpkiHash())
+            batch.update(key.copyChainHash())
+            batch.update(key.certificateCount.toByte())
+            batch.update(
+                ByteBuffer.allocate(Long.SIZE_BYTES)
+                    .order(ByteOrder.BIG_ENDIAN)
+                    .putLong(certification.profileEpoch)
+                    .array()
+            )
+        }
+        return batch.digest()
     }
 
     fun recover(): RkpJournalRecord? {

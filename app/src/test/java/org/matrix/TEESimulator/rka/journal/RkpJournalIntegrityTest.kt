@@ -17,8 +17,10 @@ import org.matrix.TEESimulator.rka.broker.testSpki
 class RkpJournalIntegrityTest {
     @Test
     fun rejectsForgedDeterministicHandle() {
-        val encoded = RkpJournalCodec.encode(recorded())
-        encoded[encoded.lastIndex] = (encoded.last().toInt() xor 1).toByte()
+        val record = recorded()
+        val encoded = RkpJournalCodec.encode(record)
+        val handleOffset = encoded.indexOfSubsequence(record.entries.single().handle.copyBytes())
+        encoded[handleOffset] = (encoded[handleOffset].toInt() xor 1).toByte()
 
         assertThrows(IllegalArgumentException::class.java) { RkpJournalCodec.decode(encoded) }
     }

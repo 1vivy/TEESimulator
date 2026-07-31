@@ -86,6 +86,28 @@ pub fn dispatch_rotation() -> Result<(), ProvisioningRunError> {
         .map_err(|_| ProvisioningRunError::Validation)
 }
 
+/// Returns the atomically committed trust/profile epoch for a new process session.
+pub fn committed_profile_epoch() -> Result<u64, ProvisioningRunError> {
+    let root = env::var_os("RKA_STATE_ROOT")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or(ProvisioningRunError::Configuration)?;
+    load_active(&root)?
+        .map(|bundle| bundle.epoch())
+        .ok_or(ProvisioningRunError::Configuration)
+}
+
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "sibling production config resolves the durable trust/profile epoch"
+)]
+pub(crate) fn effective_profile_epoch(
+    root: &Path,
+    bootstrap_epoch: u64,
+) -> Result<u64, ProvisioningRunError> {
+    Ok(load_active(root)?.map_or(bootstrap_epoch, |bundle| bundle.epoch()))
+}
+
 fn open_lock(root: &Path) -> Result<File, ProvisioningRunError> {
     let directory = root.join("trust");
     fs::create_dir_all(&directory).map_err(|_| ProvisioningRunError::Configuration)?;
@@ -182,6 +204,14 @@ fn parse_request(path: &Path) -> Result<RotationRequest, ProvisioningRunError> {
 }
 
 fn persist(path: &Path, bundle: &RootBundle) -> Result<(), ()> {
+    persist_with(path, bundle, atomic_replace)
+}
+
+fn persist_with(
+    path: &Path,
+    bundle: &RootBundle,
+    replace: impl FnOnce(&Path, &[u8]) -> std::io::Result<()>,
+) -> Result<(), ()> {
     let mut value = format!("version=1\nepoch={}\n", bundle.epoch());
     for pin in bundle.pins() {
         value.push_str("pin=");
@@ -190,7 +220,19 @@ fn persist(path: &Path, bundle: &RootBundle) -> Result<(), ()> {
         }
         value.push('\n');
     }
-    atomic_replace(path, value.as_bytes()).map_err(|_| ())
+    match replace(path, value.as_bytes()) {
+        Ok(()) => Ok(()),
+        Err(_) if active_matches(path, bundle) => Ok(()),
+        Err(_) => Err(()),
+    }
+}
+
+fn active_matches(path: &Path, bundle: &RootBundle) -> bool {
+    parse_request(path).is_ok_and(|request| {
+        let mut pins = request.pins;
+        pins.sort_unstable();
+        request.epoch == bundle.epoch() && pins == bundle.pins()
+    })
 }
 
 fn decode_array<const N: usize>(value: &str) -> Option<[u8; N]> {
@@ -203,4 +245,53 @@ fn decode_array<const N: usize>(value: &str) -> Option<[u8; N]> {
         *byte = u8::from_str_radix(value.get(offset..offset.checked_add(2)?)?, 16).ok()?;
     }
     Some(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provisioning_io::{AtomicReplaceStage, atomic_replace_with};
+    use rka_rkp::RootTrustManager;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn every_atomic_stage_leaves_manager_and_record_on_one_coherent_epoch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for failed_stage in AtomicReplaceStage::ALL {
+            let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+            let root = env::temp_dir().join(format!(
+                "rka-trust-atomic-{}-{nonce}-{:?}",
+                std::process::id(),
+                failed_stage
+            ));
+            let active = root.join("trust/root-bundle.active");
+            let old = RootBundle::pinned(1, vec![[1; 32], [2; 32]]);
+            persist(&active, &old).map_err(|()| "initial persist")?;
+            let manager = RootTrustManager::new(old);
+            let rotated =
+                manager.pause_rotate_and_persist(2, vec![[2; 32], [3; 32]], None, |next| {
+                    persist_with(&active, next, |path, value| {
+                        atomic_replace_with(path, value, |stage| {
+                            if stage == failed_stage {
+                                Err(std::io::Error::other("injected"))
+                            } else {
+                                Ok(())
+                            }
+                        })
+                    })
+                });
+            let memory_epoch = manager.begin()?.roots().epoch();
+            let disk_epoch = parse_request(&active)?.epoch;
+            assert_eq!(memory_epoch, disk_epoch);
+            if failed_stage == AtomicReplaceStage::ParentSync {
+                assert!(rotated.is_ok());
+                assert_eq!(disk_epoch, 2);
+            } else {
+                assert!(rotated.is_err());
+                assert_eq!(disk_epoch, 1);
+            }
+            fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
 }

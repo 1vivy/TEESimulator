@@ -33,7 +33,7 @@ pub use error::BridgeError;
 pub use executor_state::RuntimeSnapshot;
 pub use identity::{BrokerRole, PeerCredentials};
 pub use model::{
-    BridgeMessage, BrokerKeyMetadata, Correlation, ExchangeRole, Hash32, NetworkHandle,
-    PublicBytes, RequestId, expected_response_tag,
+    BridgeMessage, BrokerBatchId, BrokerCertificationMetadata, BrokerKeyMetadata, Correlation,
+    ExchangeRole, Hash32, NetworkHandle, PublicBytes, RequestId, expected_response_tag,
 };
 pub use runtime::{BrokerOperation, RoleExecutor, SidecarRole};

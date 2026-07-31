@@ -216,11 +216,7 @@ internal constructor(
                     handles.forEachIndexed { index, handle ->
                         val discardId = actionIds[1 + index * 2]
                         when (
-                            durableAction(
-                                discardId,
-                                { discarded(handle) },
-                                { discard(handle) },
-                            )
+                            durableAction(discardId, { discarded(handle) }, { discard(handle) })
                         ) {
                             DurableActionResult.COMPLETE -> Unit
                             DurableActionResult.TAMPERED -> return QuarantineResult.HANDLE_MISMATCH

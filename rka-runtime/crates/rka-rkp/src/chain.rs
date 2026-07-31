@@ -1,0 +1,107 @@
+use x509_parser::{certificate::X509Certificate, parse_x509_certificate, time::ASN1Time};
+
+use crate::{RootBundle, StatusSnapshot, ValidationError, parse_signed_certificates};
+
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "sibling validation module consumes the private chain implementation"
+)]
+pub(crate) fn parse_chain(bytes: &[u8]) -> Result<Vec<X509Certificate<'_>>, ValidationError> {
+    let mut remaining = bytes;
+    let mut certificates = Vec::new();
+    while !remaining.is_empty() {
+        let (rest, certificate) =
+            parse_x509_certificate(remaining).map_err(|_| ValidationError::Der)?;
+        if rest.len() == remaining.len() {
+            return Err(ValidationError::Der);
+        }
+        certificates.push(certificate);
+        remaining = rest;
+    }
+    if certificates.len() < 2 {
+        return Err(ValidationError::Der);
+    }
+    Ok(certificates)
+}
+
+#[allow(
+    clippy::redundant_pub_crate,
+    clippy::too_many_arguments,
+    reason = "sibling validation binds DER, time, epoch, status, and roots"
+)]
+pub(crate) fn validate_chain(
+    certificates: &[X509Certificate<'_>],
+    encoded: &[u8],
+    epoch: u64,
+    now: u64,
+    roots: &RootBundle,
+    status: &StatusSnapshot,
+) -> Result<(), ValidationError> {
+    let time = ASN1Time::from_timestamp(i64::try_from(now).map_err(|_| ValidationError::Validity)?)
+        .map_err(|_| ValidationError::Validity)?;
+    for (index, certificate) in certificates.iter().enumerate() {
+        if !certificate.validity().is_valid_at(time) {
+            return Err(ValidationError::Validity);
+        }
+        status.require_good(now, &certificate.raw_serial_as_string())?;
+        let is_leaf = index == 0;
+        let ca = certificate
+            .basic_constraints()
+            .map_err(|_| ValidationError::CertificateType)?
+            .is_some_and(|extension| extension.value.ca);
+        let usage = certificate
+            .key_usage()
+            .map_err(|_| ValidationError::CertificateType)?;
+        if certificate
+            .extended_key_usage()
+            .map_err(|_| ValidationError::CertificateType)?
+            .is_some()
+        {
+            return Err(ValidationError::CertificateType);
+        }
+        let valid_usage = usage.as_ref().is_some_and(|extension| {
+            if is_leaf {
+                extension.value.digital_signature()
+            } else {
+                extension.value.key_cert_sign()
+            }
+        });
+        if ca == is_leaf || !valid_usage {
+            return Err(ValidationError::CertificateType);
+        }
+        if let Some(issuer) = certificates.get(index.saturating_add(1)) {
+            certificate
+                .verify_signature(Some(issuer.public_key()))
+                .map_err(|_| ValidationError::Signature)?;
+        }
+    }
+    let root = certificates.last().ok_or(ValidationError::Der)?;
+    root.verify_signature(Some(root.public_key()))
+        .map_err(|_| ValidationError::Signature)?;
+    let root_start = encoded
+        .len()
+        .checked_sub(root.as_ref().len())
+        .ok_or(ValidationError::Der)?;
+    roots.admits(
+        epoch,
+        encoded.get(root_start..).ok_or(ValidationError::Der)?,
+    )
+}
+
+/// Extracts every returned certificate serial before the status lookup.
+pub fn returned_serials(
+    server_response: &[u8],
+    expected_count: usize,
+) -> Result<Vec<String>, ValidationError> {
+    let chains = parse_signed_certificates(server_response, expected_count)?;
+    let mut serials = Vec::new();
+    for encoded in &chains {
+        for certificate in parse_chain(encoded)? {
+            let serial = certificate.raw_serial_as_string().to_ascii_lowercase();
+            if !serials.contains(&serial) {
+                serials.push(serial);
+            }
+        }
+    }
+    Ok(serials)
+}

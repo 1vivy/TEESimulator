@@ -163,12 +163,20 @@ struct TestCertificate {
 }
 
 fn certificate_fixture() -> (TestCertificate, Vec<u8>, Vec<TestCertificate>) {
-    certificate_fixture_with_leaf_policy(false, true)
+    certificate_fixture_with_eku(false, true, false)
 }
 
 fn certificate_fixture_with_leaf_policy(
     leaf_is_ca: bool,
     leaf_digital_signature: bool,
+) -> (TestCertificate, Vec<u8>, Vec<TestCertificate>) {
+    certificate_fixture_with_eku(leaf_is_ca, leaf_digital_signature, false)
+}
+
+fn certificate_fixture_with_eku(
+    leaf_is_ca: bool,
+    leaf_digital_signature: bool,
+    restrictive_eku: bool,
 ) -> (TestCertificate, Vec<u8>, Vec<TestCertificate>) {
     let mut root_params = CertificateParams::new(Vec::<String>::new()).unwrap();
     root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -196,7 +204,7 @@ fn certificate_fixture_with_leaf_policy(
 
     let leaves = (0..2)
         .map(|_| {
-            let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+            let mut params = CertificateParams::new(vec!["key.invalid".to_owned()]).unwrap();
             if leaf_is_ca {
                 params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
             }
@@ -205,9 +213,11 @@ fn certificate_fixture_with_leaf_policy(
             } else {
                 KeyUsagePurpose::KeyCertSign
             });
-            params
-                .extended_key_usages
-                .push(ExtendedKeyUsagePurpose::ClientAuth);
+            if restrictive_eku {
+                params
+                    .extended_key_usages
+                    .push(ExtendedKeyUsagePurpose::ClientAuth);
+            }
             let key = KeyPair::generate().unwrap();
             let spki = sha256(&key.subject_public_key_info());
             let certificate = params.signed_by(&key, &intermediate_issuer).unwrap();
@@ -536,4 +546,37 @@ fn rejects_count_spki_der_signature_validity_type_root_epoch_and_status_failures
             Err(ValidationError::CertificateType)
         );
     }
+
+    let (bad_root, bad_shared, bad_leaves) = certificate_fixture_with_eku(false, true, true);
+    let bad_response = signed_response(
+        &bad_shared,
+        bad_leaves.iter().map(|leaf| leaf.der.as_slice()),
+    );
+    let bad_expected = bad_leaves
+        .iter()
+        .enumerate()
+        .map(|(index, leaf)| ExpectedKey::new([u8::try_from(index + 1).unwrap(); 32], leaf.spki))
+        .collect::<Vec<_>>();
+    let bad_status = StatusSnapshot::for_test(
+        now,
+        60,
+        bad_leaves
+            .iter()
+            .flat_map(|leaf| leaf.serials.iter())
+            .chain(bad_root.serials.iter())
+            .map(|serial| (serial.as_str(), CertificateStatus::Good)),
+    );
+    assert_eq!(
+        validate_response(
+            &prepared,
+            prepared.body(),
+            &bad_response,
+            &bad_expected,
+            &context,
+            &RootBundle::for_test(7, vec![sha256(&bad_root.der)]),
+            &bad_status,
+            &mut |_| {},
+        ),
+        Err(ValidationError::CertificateType)
+    );
 }

@@ -30,16 +30,7 @@ impl StatusSnapshot {
         cache_control: &str,
         entries: impl IntoIterator<Item = (String, CertificateStatus)>,
     ) -> Result<Self, ValidationError> {
-        let max_age = cache_control
-            .split(',')
-            .map(str::trim)
-            .find_map(|part| part.strip_prefix("max-age="))
-            .ok_or(ValidationError::Status)?
-            .parse::<u64>()
-            .map_err(|_| ValidationError::Status)?;
-        if max_age == 0 {
-            return Err(ValidationError::Status);
-        }
+        let max_age = parse_max_age(cache_control)?;
         Ok(Self {
             fetched_at,
             max_age,
@@ -64,7 +55,8 @@ impl StatusSnapshot {
         }
     }
 
-    pub(crate) fn require_good(&self, now: u64, serial: &str) -> Result<(), ValidationError> {
+    /// Requires one fresh non-revoked serial result.
+    pub fn require_good(&self, now: u64, serial: &str) -> Result<(), ValidationError> {
         if now < self.fetched_at || now.saturating_sub(self.fetched_at) >= self.max_age {
             return Err(ValidationError::StatusStale);
         }
@@ -74,6 +66,26 @@ impl StatusSnapshot {
             None => Err(ValidationError::StatusIncomplete),
         }
     }
+}
+
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "sibling status client reuses the private cache parser"
+)]
+pub(crate) fn parse_max_age(cache_control: &str) -> Result<u64, ValidationError> {
+    let mut values = cache_control
+        .split(',')
+        .map(str::trim)
+        .filter_map(|part| part.strip_prefix("max-age="));
+    let max_age = values
+        .next()
+        .ok_or(ValidationError::Status)?
+        .parse::<u64>()
+        .map_err(|_| ValidationError::Status)?;
+    if max_age == 0 || values.next().is_some() {
+        return Err(ValidationError::Status);
+    }
+    Ok(max_age)
 }
 
 #[cfg(test)]

@@ -54,6 +54,11 @@ impl HttpResponse {
         &self.body
     }
 
+    /// Returns the bounded canonical response headers.
+    pub const fn headers(&self) -> &ResponseHeaders {
+        &self.headers
+    }
+
     #[cfg(test)]
     fn ok(body: Vec<u8>) -> Self {
         Self::new(
@@ -96,6 +101,20 @@ pub trait AttemptJournal {
 #[non_exhaustive]
 pub struct OsEntropy;
 
+impl OsEntropy {
+    /// Creates the production kernel entropy source.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for OsEntropy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EntropySource for OsEntropy {
     fn fill_uuid(&mut self, output: &mut [u8; 16]) -> Result<(), ClientError> {
         File::open("/dev/urandom")
@@ -112,6 +131,25 @@ pub struct FetchConfiguration {
     pub challenge: Vec<u8>,
     /// Effective base after applying a valid override.
     pub effective_base: BaseUrl,
+}
+
+/// Successful sign response bound to its durable request identifier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignedCertificateResponse {
+    request_id: String,
+    response: HttpResponse,
+}
+
+impl SignedCertificateResponse {
+    /// Returns the exact request identifier placed in the sign URL.
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    /// Returns the bounded provisioning response.
+    pub const fn response(&self) -> &HttpResponse {
+        &self.response
+    }
 }
 
 /// Redacted provisioning client failure.
@@ -220,6 +258,16 @@ impl<T: HttpTransport, S: EffectiveBaseStore, E: EntropySource, J: AttemptJourna
 
     /// Posts one Task-18 body after durably recording a fresh `UUIDv4`.
     pub fn sign(&mut self, body: &[u8], challenge: &[u8]) -> Result<HttpResponse, ClientError> {
+        self.sign_with_request_id(body, challenge)
+            .map(|signed| signed.response)
+    }
+
+    /// Posts one Task-18 body and returns its durably journaled request identifier.
+    pub fn sign_with_request_id(
+        &mut self,
+        body: &[u8],
+        challenge: &[u8],
+    ) -> Result<SignedCertificateResponse, ClientError> {
         if body.len() > MAX_PROVISIONING_BYTES {
             return Err(ClientError::RequestTooLarge);
         }
@@ -252,7 +300,10 @@ impl<T: HttpTransport, S: EffectiveBaseStore, E: EntropySource, J: AttemptJourna
             body,
         })?;
         validate_response(&response)?;
-        Ok(response)
+        Ok(SignedCertificateResponse {
+            request_id,
+            response,
+        })
     }
 
     #[cfg(test)]

@@ -136,6 +136,9 @@ internal constructor(
         const val DEFAULT_TEE_SERVICE = "$IRPC_DESCRIPTOR/default"
         const val REQUIRED_VERSION = 3
         private const val EEK_CURVE_P256 = 1
+
+        fun android(): IrpcClient =
+            IrpcClient(AndroidBrokerServiceResolver(), ExecutorBrokerCallRunner())
     }
 }
 

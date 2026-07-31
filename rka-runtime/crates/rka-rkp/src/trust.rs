@@ -16,6 +16,12 @@ pub const GOOGLE_ROOT_HASHES: [[u8; 32]; 2] = [
     ],
 ];
 
+/// Exact Google attestation roots published at `android.googleapis.com/attestation/root`.
+pub const GOOGLE_ROOTS_DER: [&[u8]; 2] = [
+    include_bytes!("../data/google-attestation-root-2022.der"),
+    include_bytes!("../data/google-attestation-root-2025.der"),
+];
+
 const ROTATION_DOMAIN: &[u8] = b"TEESimulator-RS RKP root rotation v1\0";
 
 /// Ed25519 authorization for a root rotation with no old/new pin overlap.
@@ -37,6 +43,7 @@ impl RootRotationAuthorization {
 pub struct RootBundle {
     epoch: u64,
     pins: Vec<[u8; 32]>,
+    roots: Vec<Vec<u8>>,
     bundle_hash: [u8; 32],
     rotation_public_key: Option<[u8; 32]>,
 }
@@ -45,7 +52,13 @@ impl RootBundle {
     /// Creates the production bundle for a profile epoch.
     #[must_use]
     pub fn production(epoch: u64) -> Self {
-        Self::new(epoch, GOOGLE_ROOT_HASHES.to_vec(), None)
+        let roots = GOOGLE_ROOTS_DER
+            .iter()
+            .map(|root| root.to_vec())
+            .collect::<Vec<_>>();
+        let pins = roots.iter().map(|root| hash(root)).collect::<Vec<_>>();
+        debug_assert_eq!(pins, GOOGLE_ROOT_HASHES);
+        Self::new(epoch, pins, roots, None)
     }
 
     /// Creates a root bundle with a preconfigured Ed25519 rotation trust key.
@@ -55,22 +68,32 @@ impl RootBundle {
         pins: Vec<[u8; 32]>,
         rotation_public_key: [u8; 32],
     ) -> Self {
-        Self::new(epoch, pins, Some(rotation_public_key))
+        Self::new(epoch, pins, Vec::new(), Some(rotation_public_key))
     }
 
     #[doc(hidden)]
     #[must_use]
     pub fn for_test(epoch: u64, pins: Vec<[u8; 32]>) -> Self {
-        Self::new(epoch, pins, None)
+        Self::new(epoch, pins, Vec::new(), None)
     }
 
-    fn new(epoch: u64, mut pins: Vec<[u8; 32]>, rotation_public_key: Option<[u8; 32]>) -> Self {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "bundle construction keeps pins, exact roots, and rotation key distinct"
+    )]
+    fn new(
+        epoch: u64,
+        mut pins: Vec<[u8; 32]>,
+        roots: Vec<Vec<u8>>,
+        rotation_public_key: Option<[u8; 32]>,
+    ) -> Self {
         pins.sort_unstable();
         pins.dedup();
         let bytes = pins.iter().flatten().copied().collect::<Vec<_>>();
         Self {
             epoch,
             pins,
+            roots,
             bundle_hash: hash(&bytes),
             rotation_public_key,
         }
@@ -80,7 +103,12 @@ impl RootBundle {
         if epoch != self.epoch {
             return Err(ValidationError::Epoch);
         }
-        if !self.pins.contains(&hash(root)) {
+        let admitted = if self.roots.is_empty() {
+            self.pins.contains(&hash(root))
+        } else {
+            self.roots.iter().any(|candidate| candidate == root)
+        };
+        if !admitted {
             return Err(ValidationError::Root);
         }
         Ok(())
@@ -92,13 +120,24 @@ impl RootBundle {
         self.bundle_hash
     }
 
+    /// Returns the profile epoch bound to this immutable bundle.
+    #[must_use]
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
     /// Returns the domain-separated bytes that authorize a proposed rotation.
     pub fn rotation_message(
         &self,
         next_epoch: u64,
         pins: &[[u8; 32]],
     ) -> Result<Vec<u8>, ValidationError> {
-        let next = Self::new(next_epoch, pins.to_vec(), self.rotation_public_key);
+        let next = Self::new(
+            next_epoch,
+            pins.to_vec(),
+            Vec::new(),
+            self.rotation_public_key,
+        );
         if next_epoch != self.epoch.saturating_add(1) || next.bundle_hash == self.bundle_hash {
             return Err(ValidationError::Rotation);
         }
@@ -125,7 +164,7 @@ impl RootBundle {
         pins: Vec<[u8; 32]>,
         authorization: Option<&RootRotationAuthorization>,
     ) -> Result<Self, ValidationError> {
-        let next = Self::new(next_epoch, pins, self.rotation_public_key);
+        let next = Self::new(next_epoch, pins, Vec::new(), self.rotation_public_key);
         let message = self.rotation_message(next_epoch, &next.pins)?;
         let overlaps = next.pins.iter().any(|pin| self.pins.contains(pin));
         if !overlaps {

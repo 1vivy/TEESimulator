@@ -83,6 +83,16 @@ impl ResponseHeaders {
     pub(crate) fn has_location(&self) -> bool {
         self.0.iter().any(|header| header.name == "location")
     }
+
+    pub(crate) fn unique_value(&self, name: &str) -> Option<&str> {
+        let mut values = self
+            .0
+            .iter()
+            .filter(|header| header.name == name)
+            .map(|header| header.value.as_str());
+        let value = values.next()?;
+        values.next().is_none().then_some(value)
+    }
 }
 
 fn valid_header_name(name: &str) -> bool {
@@ -192,19 +202,28 @@ pub const fn validate_request(request: &[u8]) -> Result<(), ProvisioningError> {
 }
 
 mod activation;
+mod chain;
 pub mod challenge;
 pub mod config;
 mod csr;
+mod https;
 mod response;
 mod status;
+mod status_client;
 mod trust;
+mod trust_session;
 mod validation;
 
 pub use activation::{ActivationError, activate_validated_response};
+pub use chain::returned_serials;
+pub use challenge::{ClientError, HttpResponse, SignedCertificateResponse};
 pub use csr::{PreparedCertificateRequest, assemble_android_v3_body};
+pub use https::BoundedHttpsTransport;
 pub use response::parse_signed_certificates;
 pub use status::{CertificateStatus, STATUS_URL, StatusSnapshot};
-pub use trust::{GOOGLE_ROOT_HASHES, RootBundle, RootRotationAuthorization};
+pub use status_client::{AttestationStatusClient, StatusHttpTransport, StatusRequest};
+pub use trust::{GOOGLE_ROOT_HASHES, GOOGLE_ROOTS_DER, RootBundle, RootRotationAuthorization};
+pub use trust_session::{ProvisioningSession, RootTrustManager, TrustSessionError};
 pub use validation::{
     ExpectedKey, ResponseContext, ValidatedChain, ValidatedResponse, ValidationError,
     validate_response,

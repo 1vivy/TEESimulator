@@ -11,6 +11,12 @@ use std::{
 
 use thiserror::Error;
 
+mod provision_activation;
+mod provisioning;
+mod provisioning_io;
+
+pub use provisioning::{ProvisioningRunError, provision_once};
+
 /// Authenticated, bounded broker bridge.
 pub mod bridge;
 

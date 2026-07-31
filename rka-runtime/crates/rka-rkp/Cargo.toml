@@ -10,8 +10,11 @@ publish = false
 
 [dependencies]
 ciborium.workspace = true
+reqwest.workspace = true
 ring.workspace = true
 rka-state = { version = "=0.1.0", path = "../rka-state" }
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 x509-parser.workspace = true
 

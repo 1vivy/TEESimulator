@@ -198,6 +198,12 @@ class RkpJournal(private val store: RkpJournalStore) {
         return persist(expected.copy(state = RkpJournalState.QUARANTINED))
     }
 
+    fun quarantineCurrent(): RkpJournalRecord? {
+        val current = store.read()?.let(RkpJournalCodec::decode) ?: return null
+        clearRetainedBlobs()
+        return persist(current.copy(state = RkpJournalState.QUARANTINED))
+    }
+
     fun recover(): RkpJournalRecord? {
         val record = store.read()?.let(RkpJournalCodec::decode) ?: return null
         val recovery =

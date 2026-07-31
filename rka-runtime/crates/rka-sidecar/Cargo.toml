@@ -13,6 +13,7 @@ rka-protocol = { version = "=0.1.0", path = "../rka-protocol" }
 rka-rkp = { version = "=0.1.0", path = "../rka-rkp" }
 rka-state = { version = "=0.1.0", path = "../rka-state" }
 rka-transport = { version = "=0.1.0", path = "../rka-transport" }
+ring.workspace = true
 rustix.workspace = true
 thiserror.workspace = true
 

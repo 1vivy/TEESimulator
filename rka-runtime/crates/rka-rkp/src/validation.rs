@@ -1,8 +1,10 @@
 use crate::{
-    PreparedCertificateRequest, RootBundle, StatusSnapshot, csr::hash, parse_signed_certificates,
+    PreparedCertificateRequest, RootBundle, StatusSnapshot,
+    chain::{parse_chain, validate_chain},
+    csr::hash,
+    parse_signed_certificates,
 };
 use thiserror::Error;
-use x509_parser::{certificate::X509Certificate, parse_x509_certificate, time::ASN1Time};
 
 /// Expected generated-key identity used to bind and reorder returned leaf certificates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -288,78 +290,4 @@ fn validate(
         });
     }
     Ok(ValidatedResponse { chains: ordered })
-}
-
-fn parse_chain(bytes: &[u8]) -> Result<Vec<X509Certificate<'_>>, ValidationError> {
-    let mut remaining = bytes;
-    let mut certificates = Vec::new();
-    while !remaining.is_empty() {
-        let (rest, certificate) =
-            parse_x509_certificate(remaining).map_err(|_| ValidationError::Der)?;
-        if rest.len() == remaining.len() {
-            return Err(ValidationError::Der);
-        }
-        certificates.push(certificate);
-        remaining = rest;
-    }
-    if certificates.len() < 2 {
-        return Err(ValidationError::Der);
-    }
-    Ok(certificates)
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "chain validation binds DER to epoch, time, roots, and status"
-)]
-fn validate_chain(
-    certificates: &[X509Certificate<'_>],
-    encoded: &[u8],
-    epoch: u64,
-    now: u64,
-    roots: &RootBundle,
-    status: &StatusSnapshot,
-) -> Result<(), ValidationError> {
-    let time = ASN1Time::from_timestamp(i64::try_from(now).map_err(|_| ValidationError::Validity)?)
-        .map_err(|_| ValidationError::Validity)?;
-    for (index, certificate) in certificates.iter().enumerate() {
-        if !certificate.validity().is_valid_at(time) {
-            return Err(ValidationError::Validity);
-        }
-        status.require_good(now, &certificate.raw_serial_as_string())?;
-        let is_leaf = index == 0;
-        let ca = certificate
-            .basic_constraints()
-            .map_err(|_| ValidationError::CertificateType)?
-            .is_some_and(|extension| extension.value.ca);
-        let usage = certificate
-            .key_usage()
-            .map_err(|_| ValidationError::CertificateType)?;
-        let valid_usage = usage.as_ref().is_some_and(|extension| {
-            if is_leaf {
-                extension.value.digital_signature()
-            } else {
-                extension.value.key_cert_sign()
-            }
-        });
-        if ca == is_leaf || !valid_usage {
-            return Err(ValidationError::CertificateType);
-        }
-        if let Some(issuer) = certificates.get(index.saturating_add(1)) {
-            certificate
-                .verify_signature(Some(issuer.public_key()))
-                .map_err(|_| ValidationError::Signature)?;
-        }
-    }
-    let root = certificates.last().ok_or(ValidationError::Der)?;
-    root.verify_signature(Some(root.public_key()))
-        .map_err(|_| ValidationError::Signature)?;
-    let root_start = encoded
-        .len()
-        .checked_sub(root.as_ref().len())
-        .ok_or(ValidationError::Der)?;
-    roots.admits(
-        epoch,
-        encoded.get(root_start..).ok_or(ValidationError::Der)?,
-    )
 }

@@ -28,13 +28,8 @@ internal object ProvisioningSnapshotCallsiteGuard {
             }
             .toSet()
 
-    fun runMutationDriver(): Map<String, Set<String>> {
-        val rejected = mutableMapOf<String, Set<String>>()
-        mutationFixtures().forEach { (category, sources) ->
-            rejected[category] = compileAndReject(category, sources)
-        }
-        return rejected
-    }
+    fun runMutationDriver(): Map<String, Set<String>> =
+        mutationFixtures().mapValues { (category, sources) -> compileAndReject(category, sources) }
 
     private fun compileAndReject(category: String, sources: Map<String, String>): Set<String> {
         val root = Files.createTempDirectory("provisioning-snapshot-$category-")
@@ -109,7 +104,7 @@ internal object ProvisioningSnapshotCallsiteGuard {
                     """
                     package android.hardware.security.keymint;
                     public interface IRemotelyProvisionedComponent {
-                      void generateEcdsaP256KeyPair();
+                      void setProvisioningInfo(byte[] provisioningInfo);
                     }
                     """,
                     null,
@@ -117,15 +112,14 @@ internal object ProvisioningSnapshotCallsiteGuard {
                     public final class Mutant {
                       public static void mutate(
                           android.hardware.security.keymint.IRemotelyProvisionedComponent rkpd) {
-                        rkpd.generateEcdsaP256KeyPair();
+                        rkpd.setProvisioningInfo(new byte[] {1});
                       }
                     }
                     """,
                 ),
             "reflection" to
-                sources(null, null, "Class.forName(\"java.lang.String\");", throwsException = true),
-            "exec" to
-                sources(null, null, "Runtime.getRuntime().exec(\"false\");", throwsException = true),
+                sources(null, null, "Mutant.class.getDeclaredField(\"p\").set(null, \"x\");"),
+            "exec" to sources(null, null, "Runtime.getRuntime().exec(\"setprop rkpd.url x\");"),
         )
 
     private fun sources(
@@ -135,22 +129,16 @@ internal object ProvisioningSnapshotCallsiteGuard {
         mutantSource: String =
             """
             public final class Mutant {
+              public static String p = "original";
               public static void mutate() throws Exception {
                 $call
               }
             }
             """,
-        throwsException: Boolean = false,
     ): Map<String, String> {
-        val mutant =
-            if (throwsException) {
-                mutantSource
-            } else {
-                mutantSource.replace(" throws Exception", "")
-            }
         return buildMap {
             if (stubPath != null && stubSource != null) put(stubPath, stubSource)
-            put("Mutant.java", mutant)
+            put("Mutant.java", mutantSource)
         }
     }
 

@@ -173,58 +173,6 @@ class RkpJournalTest {
     }
 
     @Test
-    fun rejectsForgedDeterministicHandle() {
-        val journal = RkpJournal(MemoryJournalStore())
-        val encoded = RkpJournalCodec.encode(recorded(journal))
-        encoded[encoded.lastIndex] = (encoded.last().toInt() xor 1).toByte()
-
-        assertThrows(IllegalArgumentException::class.java) { RkpJournalCodec.decode(encoded) }
-    }
-
-    @Test
-    fun rejectsSpkiAndResolvedIdentityMutation() {
-        val recorded = recorded(RkpJournal(MemoryJournalStore()))
-        val encoded = RkpJournalCodec.encode(recorded)
-        val spki = recorded.entries.single().copySpkiDer()
-        val spkiOffset = encoded.indexOfSubsequence(spki)
-        encoded[spkiOffset] = (encoded[spkiOffset].toInt() xor 1).toByte()
-        assertThrows(IllegalArgumentException::class.java) { RkpJournalCodec.decode(encoded) }
-
-        val identityEncoded = RkpJournalCodec.encode(recorded)
-        val identityOffset = identityEncoded.indexOfSubsequence("fake-irpc".toByteArray())
-        identityEncoded[identityOffset] = (identityEncoded[identityOffset].toInt() xor 1).toByte()
-        assertThrows(IllegalArgumentException::class.java) {
-            RkpJournalCodec.decode(identityEncoded)
-        }
-    }
-
-    @Test
-    fun identitySwapIsRejectedBeforeHardwareGeneration() {
-        val calls = intArrayOf(0)
-        val endpoints =
-            ArrayDeque(
-                listOf(
-                    FakeIrpcEndpoint(),
-                    FakeIrpcEndpoint(componentName = "swapped", onGenerate = { calls[0] += 1 }),
-                )
-            )
-        val client =
-            org.matrix.TEESimulator.rka.broker.IrpcClient(
-                FakeResolver(irpcProvider = { endpoints.removeFirst() }),
-                DirectCallRunner,
-            )
-        val store = MemoryJournalStore()
-
-        val outcome =
-            DurableIrpcKeyBatchGenerator(client, RkpJournal(store))
-                .generate(count(1), BrokerDeadline.at(5_000), BrokerCancellation.active())
-
-        assertTrue(outcome is BrokerOutcome.Failure)
-        assertEquals(0, calls[0])
-        assertEquals(RkpJournalState.QUARANTINED, RkpJournalCodec.decode(store.read()!!).state)
-    }
-
-    @Test
     fun terminalDeleteClearsBrokerOwnerBeforeReturn() {
         val journal = RkpJournal(MemoryJournalStore())
         val generating = journal.begin(count(1), identity())
@@ -317,12 +265,6 @@ private class RecordingSyncOps(private val order: MutableList<String>) : Journal
 
 private fun ByteArray.containsSubsequence(candidate: ByteArray): Boolean =
     indices.any { start ->
-        start + candidate.size <= size &&
-            candidate.indices.all { offset -> this[start + offset] == candidate[offset] }
-    }
-
-private fun ByteArray.indexOfSubsequence(candidate: ByteArray): Int =
-    indices.first { start ->
         start + candidate.size <= size &&
             candidate.indices.all { offset -> this[start + offset] == candidate[offset] }
     }

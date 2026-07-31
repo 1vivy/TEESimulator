@@ -1,7 +1,10 @@
 use super::*;
-use crate::{ValidatedChainClaims, ValidatedChainReceipt, verify_validated_chain_receipts};
+use crate::{
+    ValidatedChainClaims, ValidatedChainReceipt, ValidatedReceiptStore,
+    verify_validated_chain_receipts,
+};
 use ring::signature::{Ed25519KeyPair, KeyPair};
-use std::cell::RefCell;
+use std::{cell::RefCell, collections::HashSet};
 
 struct MemoryStore {
     fail: bool,
@@ -24,6 +27,17 @@ impl StateStore for MemoryStore {
         }
         self.value.replace(value.to_vec());
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct ReceiptStore {
+    consumed: RefCell<HashSet<[u8; 32]>>,
+}
+
+impl ValidatedReceiptStore for ReceiptStore {
+    fn consume_once(&self, receipt_identity: &[u8; 32]) -> Result<bool, StateError> {
+        Ok(self.consumed.borrow_mut().insert(*receipt_identity))
     }
 }
 
@@ -82,7 +96,12 @@ fn receipt(order: u8, seed: u8) -> ValidatedChainReceipt {
 #[test]
 fn activation_is_ordered_and_persisted() {
     let batch = RkpLeaseBatch::new(vec![lease(0), lease(1)]).unwrap();
-    let token = verify_validated_chain_receipts(&batch, &[receipt(0, 42), receipt(1, 42)]).unwrap();
+    let token = verify_validated_chain_receipts(
+        &batch,
+        &[receipt(0, 42), receipt(1, 42)],
+        &ReceiptStore::default(),
+    )
+    .unwrap();
     let store = MemoryStore {
         fail: false,
         value: RefCell::new(Vec::new()),
@@ -120,7 +139,9 @@ fn duplicate_and_reordered_batches_are_rejected() {
 #[test]
 fn storage_failure_prevents_activation_exposure() {
     let batch = RkpLeaseBatch::new(vec![lease(0)]).unwrap();
-    let token = verify_validated_chain_receipts(&batch, &[receipt(0, 42)]).unwrap();
+    let token =
+        verify_validated_chain_receipts(&batch, &[receipt(0, 42)], &ReceiptStore::default())
+            .unwrap();
     let store = MemoryStore {
         fail: true,
         value: RefCell::new(Vec::new()),
@@ -134,9 +155,10 @@ fn storage_failure_prevents_activation_exposure() {
 #[test]
 fn signed_receipt_mutations_and_wrong_validator_are_rejected() {
     let batch = RkpLeaseBatch::new(vec![lease(0), lease(1)]).unwrap();
+    let store = ReceiptStore::default();
     let reordered = [receipt(1, 42), receipt(0, 42)];
     assert!(matches!(
-        verify_validated_chain_receipts(&batch, &reordered),
+        verify_validated_chain_receipts(&batch, &reordered, &store),
         Err(RkpLeaseError::Certification)
     ));
     let mut wrong_spki = claims(1);
@@ -144,11 +166,11 @@ fn signed_receipt_mutations_and_wrong_validator_are_rejected() {
     let signature = validator(42).sign(&wrong_spki.canonical_bytes());
     let wrong_spki = ValidatedChainReceipt::new(wrong_spki, signature.as_ref().try_into().unwrap());
     assert!(matches!(
-        verify_validated_chain_receipts(&batch, &[receipt(0, 42), wrong_spki]),
+        verify_validated_chain_receipts(&batch, &[receipt(0, 42), wrong_spki], &store),
         Err(RkpLeaseError::Certification)
     ));
     assert!(matches!(
-        verify_validated_chain_receipts(&batch, &[receipt(0, 43), receipt(1, 43)]),
+        verify_validated_chain_receipts(&batch, &[receipt(0, 43), receipt(1, 43)], &store),
         Err(RkpLeaseError::Certification)
     ));
 }
@@ -156,9 +178,10 @@ fn signed_receipt_mutations_and_wrong_validator_are_rejected() {
 #[test]
 fn forged_signature_and_cross_lease_replay_are_rejected() {
     let batch = RkpLeaseBatch::new(vec![lease(0)]).unwrap();
+    let store = ReceiptStore::default();
     let forged = ValidatedChainReceipt::new(claims(0), [0; 64]);
     assert_eq!(
-        verify_validated_chain_receipts(&batch, &[forged]).unwrap_err(),
+        verify_validated_chain_receipts(&batch, &[forged], &store).unwrap_err(),
         RkpLeaseError::Certification
     );
 
@@ -166,7 +189,21 @@ fn forged_signature_and_cross_lease_replay_are_rejected() {
     replay_target.metadata.lease_id = LeaseId::new([88; 16]);
     let replay_target = RkpLeaseBatch::new(vec![replay_target]).unwrap();
     assert_eq!(
-        verify_validated_chain_receipts(&replay_target, &[receipt(0, 42)]).unwrap_err(),
+        verify_validated_chain_receipts(&replay_target, &[receipt(0, 42)], &store).unwrap_err(),
+        RkpLeaseError::Certification
+    );
+}
+
+#[test]
+fn exact_receipt_set_replay_is_rejected() {
+    let receipts = [receipt(0, 42)];
+    let first = RkpLeaseBatch::new(vec![lease(0)]).unwrap();
+    let equivalent = RkpLeaseBatch::new(vec![lease(0)]).unwrap();
+    let store = ReceiptStore::default();
+
+    assert!(verify_validated_chain_receipts(&first, &receipts, &store).is_ok());
+    assert_eq!(
+        verify_validated_chain_receipts(&equivalent, &receipts, &store).unwrap_err(),
         RkpLeaseError::Certification
     );
 }

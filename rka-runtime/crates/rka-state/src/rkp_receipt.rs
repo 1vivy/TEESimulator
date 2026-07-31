@@ -1,12 +1,14 @@
+use crate::StateError;
 use crate::rkp_lease::{
     BatchId, ChainHash, LeaseId, PublicKeyHash, RkpLeaseBatch, RkpLeaseError, SpkiHash,
 };
 use ring::{
-    digest::{SHA256, digest},
+    digest::{Context, SHA256, digest},
     signature::{ED25519, UnparsedPublicKey},
 };
 
 const DOMAIN: &[u8] = b"RKA-VALIDATED-CHAIN-v1\0";
+const CONSUMPTION_DOMAIN: &[u8] = b"RKA-CONSUMED-RECEIPTS-v1\0";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(
@@ -66,6 +68,10 @@ pub struct ValidatedCertificationToken {
     pub(crate) binding_hash: [u8; 32],
 }
 
+pub trait ValidatedReceiptStore {
+    fn consume_once(&self, receipt_identity: &[u8; 32]) -> Result<bool, StateError>;
+}
+
 impl ValidatedCertificationToken {
     pub(crate) fn consume_matches(self, batch: &RkpLeaseBatch) -> bool {
         batch.leases.first().is_some_and(|lease| {
@@ -86,6 +92,7 @@ impl ValidatedCertificationToken {
 pub fn verify_validated_chain_receipts(
     pending: &RkpLeaseBatch,
     receipts: &[ValidatedChainReceipt],
+    store: &dyn ValidatedReceiptStore,
 ) -> Result<ValidatedCertificationToken, RkpLeaseError> {
     if receipts.len() != pending.leases.len() || receipts.is_empty() {
         return Err(RkpLeaseError::Certification);
@@ -115,11 +122,26 @@ pub fn verify_validated_chain_receipts(
         .first()
         .ok_or(RkpLeaseError::Certification)?
         .metadata();
+    if !store.consume_once(&receipt_set_identity(receipts))? {
+        return Err(RkpLeaseError::Certification);
+    }
     Ok(ValidatedCertificationToken {
         batch_id: first.batch_id,
         chain_hash: first.chain.chain_hash,
         binding_hash: batch_binding(pending),
     })
+}
+
+fn receipt_set_identity(receipts: &[ValidatedChainReceipt]) -> [u8; 32] {
+    let mut digest = Context::new(&SHA256);
+    digest.update(CONSUMPTION_DOMAIN);
+    for receipt in receipts {
+        digest.update(&receipt.claims.canonical_bytes());
+        digest.update(&receipt.signature);
+    }
+    let mut identity = [0_u8; 32];
+    identity.copy_from_slice(digest.finish().as_ref());
+    identity
 }
 
 fn batch_binding(batch: &RkpLeaseBatch) -> [u8; 32] {

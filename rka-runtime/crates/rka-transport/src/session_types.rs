@@ -6,7 +6,7 @@ use rka_state::{PersistedTombstone, StateError};
 use thiserror::Error;
 
 /// Fixed paired-peer coordinates for a session manager.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct SessionScope {
     pub(crate) peer: PeerSpkiHash,
@@ -21,8 +21,14 @@ impl SessionScope {
     }
 }
 
+impl fmt::Debug for SessionScope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SessionScope([redacted peer coordinates])")
+    }
+}
+
 /// Correlation and time for one candidate-generated request.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct RequestContext {
     pub(crate) session: SessionId,
@@ -35,6 +41,12 @@ impl RequestContext {
     #[must_use]
     pub const fn new(session: SessionId, kind: MessageKind, now: u64) -> Self {
         Self { session, kind, now }
+    }
+}
+
+impl fmt::Debug for RequestContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RequestContext([redacted request coordinates])")
     }
 }
 
@@ -63,16 +75,16 @@ impl CsRng for SystemCsRng {
 /// Persisted request authority with immutable response correlation.
 pub struct PendingRequest {
     request_id: RequestId,
-    expected_kind: MessageKind,
+    terminal: TerminalPolicy,
     sequence: u32,
     persisted: PersistedTombstone,
 }
 
 impl PendingRequest {
-    /// Returns the exact response ID, kind, and sequence required for acceptance.
+    /// Returns the exact response identifier and sequence.
     #[must_use]
-    pub const fn correlation(&self) -> (RequestId, MessageKind, u32) {
-        (self.request_id, self.expected_kind, self.sequence)
+    pub const fn coordinates(&self) -> (RequestId, u32) {
+        (self.request_id, self.sequence)
     }
 
     /// Returns the persisted canonical request tuple.
@@ -82,13 +94,14 @@ impl PendingRequest {
     }
 
     /// Consumes the request only when every response coordinate matches.
-    pub fn accept(
-        self,
-        response: (RequestId, MessageKind, u32),
-    ) -> Result<AcceptedResponse, SessionError> {
-        let (request_id, response_kind, sequence) = response;
+    pub fn accept(self, response: ResponseContext) -> Result<AcceptedResponse, SessionError> {
+        let ResponseContext {
+            request_id,
+            terminal,
+            sequence,
+        } = response;
         if request_id != self.request_id
-            || response_kind != self.expected_kind
+            || !self.terminal.accepts(terminal)
             || sequence != self.sequence
         {
             return Err(SessionError::Correlation);
@@ -99,13 +112,16 @@ impl PendingRequest {
     }
 
     pub(crate) const fn new(
-        correlation: (RequestId, MessageKind, u32),
+        correlation: (RequestId, MessageKind, MessageKind, u32),
         persisted: PersistedTombstone,
     ) -> Self {
-        let (request_id, expected_kind, sequence) = correlation;
+        let (request_id, request_kind, success_kind, sequence) = correlation;
         Self {
             request_id,
-            expected_kind,
+            terminal: TerminalPolicy {
+                request_kind,
+                success_kind,
+            },
             sequence,
             persisted,
         }
@@ -115,6 +131,69 @@ impl PendingRequest {
 impl fmt::Debug for PendingRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("PendingRequest([redacted correlation])")
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TerminalPolicy {
+    request_kind: MessageKind,
+    success_kind: MessageKind,
+}
+
+impl TerminalPolicy {
+    fn accepts(self, terminal: ResponseTerminal) -> bool {
+        match terminal {
+            ResponseTerminal::Success(kind) => kind == self.success_kind,
+            ResponseTerminal::Error(triggering) => {
+                self.request_kind != MessageKind::Hello && triggering == self.request_kind
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ResponseTerminal {
+    Success(MessageKind),
+    Error(MessageKind),
+}
+
+/// Opaque coordinates parsed from one terminal response frame.
+#[derive(Clone, Copy)]
+pub struct ResponseContext {
+    request_id: RequestId,
+    terminal: ResponseTerminal,
+    sequence: u32,
+}
+
+impl ResponseContext {
+    /// Creates coordinates for one successful response frame.
+    #[must_use]
+    pub const fn success(request_id: RequestId, kind: MessageKind, sequence: u32) -> Self {
+        Self {
+            request_id,
+            terminal: ResponseTerminal::Success(kind),
+            sequence,
+        }
+    }
+
+    /// Creates coordinates for an ERROR naming its triggering request kind.
+    #[must_use]
+    pub const fn protocol_error(
+        request_id: RequestId,
+        triggering: MessageKind,
+        sequence: u32,
+    ) -> Self {
+        Self {
+            request_id,
+            terminal: ResponseTerminal::Error(triggering),
+            sequence,
+        }
+    }
+}
+
+impl fmt::Debug for ResponseContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ResponseContext([redacted correlation])")
     }
 }
 

@@ -29,8 +29,8 @@ pub use profile::{
 pub use session::SessionManager;
 pub use session_lifecycle::{LiveSessionLease, SessionLifecycle};
 pub use session_types::{
-    AcceptedResponse, CsRng, PendingRequest, RequestContext, SessionError, SessionScope,
-    SystemCsRng,
+    AcceptedResponse, CsRng, PendingRequest, RequestContext, ResponseContext, SessionError,
+    SessionScope, SystemCsRng,
 };
 pub use tls::{PinnedTlsClient, PinnedTlsServer, peer_spki_hash};
 pub use tls_types::{
@@ -66,5 +66,9 @@ pub enum TransportError {
     Deadline,
 }
 
+#[cfg(test)]
+mod second_gate_audit_harness;
+#[cfg(test)]
+mod second_gate_tls_harness;
 #[cfg(test)]
 mod task10_tests;

@@ -18,8 +18,7 @@ use ring::{
     signature::{Ed25519KeyPair, KeyPair as RingKeyPair},
 };
 use rka_protocol::{
-    AUDIT_DOMAIN, MessageKind, PeerSpkiHash, RequestId, RkaErrorCode, SessionId, Stage,
-    request_tombstone, sha256,
+    MessageKind, PeerSpkiHash, RequestId, RkaErrorCode, SessionId, Stage, request_tombstone,
 };
 use rka_state::{ReplayManager, StateError, StateStore, TombstoneTime};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
@@ -27,9 +26,9 @@ use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
 use super::{
     AdmissionBinding, AuditChain, AuditEntry, ClientPeer, CsRng, Endpoint, PairedProfile,
     PinnedTlsClient, PinnedTlsServer, ProfileError, ProfileInput, ProfileRotation, ReceiptContext,
-    ReceiptVerifier, RequestContext, Role, ServerPeer, SessionError, SessionLifecycle,
-    SessionManager, SessionScope, TlsAdmission, TlsCredentials, TlsError, TransportKind,
-    peer_spki_hash,
+    ReceiptVerifier, RequestContext, ResponseContext, Role, ServerPeer, SessionError,
+    SessionLifecycle, SessionManager, SessionScope, TlsAdmission, TlsCredentials, TlsError,
+    TransportKind, peer_spki_hash,
 };
 use crate::tls_io::{Deadline, TlsStream, read_frame};
 use zeroize::Zeroizing;
@@ -456,7 +455,7 @@ fn generated_request_id_skips_retained_value_after_restart()
     let session = restarted.open_candidate(2)?;
     let pending =
         restarted.persist_request(RequestContext::new(session.id(), MessageKind::Abort, 3))?;
-    assert_eq!(pending.correlation().0.bytes(), [10; 16]);
+    assert_eq!(pending.coordinates().0.bytes(), [10; 16]);
     Ok(())
 }
 
@@ -522,7 +521,7 @@ fn duplicate_persisted_namespace_record_fails_closed() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn pending_response_rejects_id_kind_and_sequence_mutations()
+fn pending_response_accepts_error_and_rejects_correlation_mutations()
 -> Result<(), Box<dyn std::error::Error>> {
     let store = MemoryStore::new();
     let mut manager = SessionManager::load(
@@ -537,21 +536,143 @@ fn pending_response_rejects_id_kind_and_sequence_mutations()
     let context = RequestContext::new(session.id(), MessageKind::Finish, 1);
     let wrong_id = manager.admit_request_id(context, RequestId::new([10; 16]))?;
     assert!(matches!(
-        wrong_id.accept((RequestId::new([99; 16]), MessageKind::Result, 0)),
+        wrong_id.accept(ResponseContext::success(
+            RequestId::new([99; 16]),
+            MessageKind::Result,
+            0,
+        )),
         Err(SessionError::Correlation)
     ));
-    let wrong_kind = manager.admit_request_id(context, RequestId::new([11; 16]))?;
+    let valid_error = manager.admit_request_id(context, RequestId::new([11; 16]))?;
+    let _accepted = valid_error.accept(ResponseContext::protocol_error(
+        RequestId::new([11; 16]),
+        MessageKind::Finish,
+        1,
+    ))?;
+    let wrong_error_trigger = manager.admit_request_id(context, RequestId::new([15; 16]))?;
     assert!(matches!(
-        wrong_kind.accept((RequestId::new([11; 16]), MessageKind::Error, 1)),
+        wrong_error_trigger.accept(ResponseContext::protocol_error(
+            RequestId::new([15; 16]),
+            MessageKind::Abort,
+            2,
+        )),
+        Err(SessionError::Correlation)
+    ));
+    let wrong_kind = manager.admit_request_id(context, RequestId::new([14; 16]))?;
+    assert!(matches!(
+        wrong_kind.accept(ResponseContext::success(
+            RequestId::new([14; 16]),
+            MessageKind::HelloAck,
+            3,
+        )),
         Err(SessionError::Correlation)
     ));
     let wrong_sequence = manager.admit_request_id(context, RequestId::new([12; 16]))?;
     assert!(matches!(
-        wrong_sequence.accept((RequestId::new([12; 16]), MessageKind::Result, 99)),
+        wrong_sequence.accept(ResponseContext::success(
+            RequestId::new([12; 16]),
+            MessageKind::Result,
+            99,
+        )),
         Err(SessionError::Correlation)
     ));
     let exact = manager.admit_request_id(context, RequestId::new([13; 16]))?;
-    let _accepted = exact.accept((RequestId::new([13; 16]), MessageKind::Result, 3))?;
+    let _accepted = exact.accept(ResponseContext::success(
+        RequestId::new([13; 16]),
+        MessageKind::Result,
+        5,
+    ))?;
+    Ok(())
+}
+
+#[test]
+fn live_sessions_advance_sequences_independently() -> Result<(), Box<dyn std::error::Error>> {
+    let store = MemoryStore::new();
+    let mut manager = SessionManager::load(
+        &store,
+        SequenceRng::new(vec![vec![1; 32], vec![2; 32], vec![3; 32], vec![4; 32]]),
+        (
+            SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+            SessionLifecycle::new(),
+        ),
+    )?;
+    let first = manager.open_candidate(0)?;
+    let second = manager.open_candidate(0)?;
+    let first_zero = manager.admit_request_id(
+        RequestContext::new(first.id(), MessageKind::Finish, 1),
+        RequestId::new([10; 16]),
+    )?;
+    let second_zero = manager.admit_request_id(
+        RequestContext::new(second.id(), MessageKind::Finish, 1),
+        RequestId::new([11; 16]),
+    )?;
+    let first_one = manager.admit_request_id(
+        RequestContext::new(first.id(), MessageKind::Abort, 2),
+        RequestId::new([12; 16]),
+    )?;
+    assert_eq!(first_zero.coordinates().1, 0);
+    assert_eq!(second_zero.coordinates().1, 0);
+    assert_eq!(first_one.coordinates().1, 1);
+    Ok(())
+}
+
+#[test]
+fn closed_session_sequence_state_is_destroyed() -> Result<(), Box<dyn std::error::Error>> {
+    let store = MemoryStore::new();
+    let mut manager = SessionManager::load(
+        &store,
+        SequenceRng::new(vec![vec![1; 32], vec![2; 32], vec![3; 32], vec![4; 32]]),
+        (
+            SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+            SessionLifecycle::new(),
+        ),
+    )?;
+    let first = manager.open_candidate(0)?;
+    let pending = manager.admit_request_id(
+        RequestContext::new(first.id(), MessageKind::Finish, 1),
+        RequestId::new([10; 16]),
+    )?;
+    assert_eq!(pending.coordinates().1, 0);
+    first.close();
+    let replacement = manager.open_candidate(2)?;
+    let fresh = manager.admit_request_id(
+        RequestContext::new(replacement.id(), MessageKind::Finish, 3),
+        RequestId::new([11; 16]),
+    )?;
+    assert_eq!(fresh.coordinates().1, 0);
+    Ok(())
+}
+
+#[test]
+fn sequence_overflow_fails_before_persistence() -> Result<(), Box<dyn std::error::Error>> {
+    let store = MemoryStore::new();
+    let lifecycle = SessionLifecycle::new();
+    let mut manager = SessionManager::load(
+        &store,
+        SequenceRng::new(vec![vec![1; 32], vec![2; 32]]),
+        (
+            SessionScope::new(PeerSpkiHash::new([5; 32]), 9),
+            lifecycle.clone(),
+        ),
+    )?;
+    let session = manager.open_candidate(0)?;
+    lifecycle.set_next_sequence_for_test(session.id(), u32::MAX)?;
+    let before = store
+        .records
+        .lock()
+        .map_err(|_| StateError::Storage)?
+        .clone();
+    assert!(matches!(
+        manager.admit_request_id(
+            RequestContext::new(session.id(), MessageKind::Finish, 1),
+            RequestId::new([10; 16]),
+        ),
+        Err(SessionError::Capacity)
+    ));
+    assert_eq!(
+        *store.records.lock().map_err(|_| StateError::Storage)?,
+        before
+    );
     Ok(())
 }
 
@@ -788,11 +909,7 @@ fn audit_chain_signs_redacted_receipt_and_rejects_replay() -> Result<(), Box<dyn
         RkaErrorCode::InvalidRequest,
         [7; 32],
     );
-    let mut preimage = Vec::new();
-    preimage.extend_from_slice(AUDIT_DOMAIN);
-    preimage.extend_from_slice(&[0; 32]);
-    preimage.extend_from_slice(&super::audit_codec::entry_cbor(entry));
-    assert_eq!(chain.append(entry)?, sha256(&preimage));
+    chain.append(entry)?;
     let raw_correlation = [0xa7; 32];
     let receipt = chain.receipt(ReceiptContext::new(
         8,
@@ -844,16 +961,7 @@ fn audit_chain_signs_redacted_receipt_and_rejects_replay() -> Result<(), Box<dyn
     }
     captured.extend_from_slice(format!("{chain:?}{receipt:?}").as_bytes());
     captured.extend_from_slice(super::audit::AuditError::Receipt.to_string().as_bytes());
-    let forbidden = [
-        raw_correlation.as_slice(),
-        private.as_slice(),
-        b"session-id-canary-unique-01".as_slice(),
-        b"request-id-canary-unique-02".as_slice(),
-        b"alias-package-canary-unique-03".as_slice(),
-        b"certificate-key-canary-unique-04".as_slice(),
-        b"blob-token-bearer-canary-unique-05".as_slice(),
-        b"/data/adb/modules/canary/private/key".as_slice(),
-    ];
+    let forbidden = [raw_correlation.as_slice(), private.as_slice()];
     for canary in forbidden {
         assert!(
             !captured
@@ -873,4 +981,14 @@ fn audit_chain_signs_redacted_receipt_and_rejects_replay() -> Result<(), Box<dyn
         chain.public_key()
     );
     Ok(())
+}
+
+#[test]
+fn transport_debug_boundaries_redact_raw_identifiers() {
+    let admission = TlsAdmission::new(binding(), Duration::from_secs(1));
+    let request = RequestContext::new(SessionId::new([0xa9; 32]), MessageKind::Finish, 7);
+    let captured = format!("{admission:?}{request:?}");
+    assert!(!captured.contains("session_id"));
+    assert!(!captured.contains("candidate_nonce"));
+    assert!(!captured.contains("SessionId"));
 }

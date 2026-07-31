@@ -190,6 +190,7 @@ pub fn write_bytes<S: TlsStream>(
             return Err(TlsError::Io);
         }
         input = input.get(length..).ok_or(TlsError::Io)?;
+        flush_bytes(stream, deadline)?;
     }
     Ok(())
 }

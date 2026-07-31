@@ -17,7 +17,6 @@ pub struct SessionManager<'a, S: StateStore, R: CsRng> {
     replay: ReplayManager<'a, S>,
     rng: R,
     lifecycle: SessionLifecycle,
-    next_sequence: u32,
     failures: u8,
 }
 
@@ -44,7 +43,6 @@ impl<'a, S: StateStore, R: CsRng> SessionManager<'a, S, R> {
             replay: ReplayManager::load(store)?,
             rng,
             lifecycle,
-            next_sequence: 0,
             failures: 0,
         })
     }
@@ -109,8 +107,12 @@ impl<'a, S: StateStore, R: CsRng> SessionManager<'a, S, R> {
         request: RequestContext,
         request_id: RequestId,
     ) -> Result<PendingRequest, SessionError> {
-        let expected = expected_response(request.kind)?;
-        let sequence = self.next_sequence;
+        let success_kind = expected_response(request.kind)?;
+        let mut sequence = self
+            .lifecycle
+            .reserve_sequence(request.session)
+            .map_err(map_lifecycle)?;
+        let current = sequence.current();
         let key = request_tombstone(
             (self.peer, self.epoch, request.session),
             (request_id, request.kind),
@@ -119,9 +121,10 @@ impl<'a, S: StateStore, R: CsRng> SessionManager<'a, S, R> {
             (&key, request_id.bytes()),
             TombstoneTime::new(request.now, self.epoch),
         )?;
-        self.next_sequence = sequence.checked_add(1).ok_or(SessionError::Capacity)?;
+        sequence.commit().map_err(map_lifecycle)?;
+        drop(sequence);
         Ok(PendingRequest::new(
-            (request_id, expected, sequence),
+            (request_id, request.kind, success_kind, current),
             persisted,
         ))
     }

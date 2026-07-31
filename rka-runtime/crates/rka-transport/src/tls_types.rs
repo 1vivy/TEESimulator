@@ -8,7 +8,7 @@ use thiserror::Error;
 const ADMISSION_DOMAIN: &[u8] = b"TEESIM-RKA-V2/ADMISSION\0";
 
 /// Public transcript coordinates bound into reciprocal admission.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct AdmissionBinding {
     /// Deterministic paired-profile identifier.
@@ -30,6 +30,12 @@ impl AdmissionBinding {
         bytes.extend_from_slice(&self.candidate_nonce);
         bytes.extend_from_slice(&self.transcript_hash);
         sha256(&bytes)
+    }
+}
+
+impl fmt::Debug for AdmissionBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AdmissionBinding([redacted transcript coordinates])")
     }
 }
 
@@ -102,7 +108,7 @@ impl ServerPeer {
 }
 
 /// Admission transcript and one absolute I/O budget.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct TlsAdmission {
     pub(crate) binding: AdmissionBinding,
@@ -114,6 +120,12 @@ impl TlsAdmission {
     #[must_use]
     pub const fn new(binding: AdmissionBinding, budget: Duration) -> Self {
         Self { binding, budget }
+    }
+}
+
+impl fmt::Debug for TlsAdmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TlsAdmission([redacted admission state])")
     }
 }
 

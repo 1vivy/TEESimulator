@@ -13,6 +13,7 @@ struct SessionRecord {
     id: SessionId,
     created: u64,
     last_activity: u64,
+    next_sequence: u32,
 }
 
 #[derive(Debug)]
@@ -58,6 +59,7 @@ impl SessionLifecycle {
             id,
             created: now,
             last_activity: now,
+            next_sequence: 0,
         });
         drop(state);
         Ok(LiveSessionLease {
@@ -106,6 +108,47 @@ impl SessionLifecycle {
             .any(|session| session.id == id)
     }
 
+    pub(crate) fn reserve_sequence(
+        &self,
+        id: SessionId,
+    ) -> Result<SequenceReservation<'_>, LifecycleError> {
+        let state = lock(&self.inner);
+        let index = state
+            .sessions
+            .iter()
+            .position(|session| session.id == id)
+            .ok_or(LifecycleError::Missing)?;
+        let current = state
+            .sessions
+            .get(index)
+            .ok_or(LifecycleError::Missing)?
+            .next_sequence;
+        let next = current.checked_add(1).ok_or(LifecycleError::Capacity)?;
+        Ok(SequenceReservation {
+            state,
+            id,
+            current,
+            next,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_next_sequence_for_test(
+        &self,
+        id: SessionId,
+        sequence: u32,
+    ) -> Result<(), LifecycleError> {
+        let mut state = lock(&self.inner);
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == id)
+            .ok_or(LifecycleError::Missing)?;
+        session.next_sequence = sequence;
+        drop(state);
+        Ok(())
+    }
+
     pub(crate) fn start_draining(&self) {
         lock(&self.inner).draining = true;
     }
@@ -123,6 +166,30 @@ impl SessionLifecycle {
         if let Some(index) = state.sessions.iter().position(|session| session.id == id) {
             state.sessions.swap_remove(index);
         }
+    }
+}
+
+pub(crate) struct SequenceReservation<'a> {
+    state: MutexGuard<'a, LifecycleState>,
+    id: SessionId,
+    current: u32,
+    next: u32,
+}
+
+impl SequenceReservation<'_> {
+    pub(crate) const fn current(&self) -> u32 {
+        self.current
+    }
+
+    pub(crate) fn commit(&mut self) -> Result<(), LifecycleError> {
+        let session = self
+            .state
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == self.id)
+            .ok_or(LifecycleError::Missing)?;
+        session.next_sequence = self.next;
+        Ok(())
     }
 }
 

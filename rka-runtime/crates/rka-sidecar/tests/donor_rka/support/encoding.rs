@@ -101,11 +101,3 @@ pub fn envelope(
     writer.unsigned(0);
     writer.finish()
 }
-
-pub fn standard_upstream() -> Vec<u8> {
-    let mut writer = CborWriter::with_capacity(8);
-    writer.map(1);
-    writer.unsigned(0);
-    writer.unsigned(1);
-    writer.finish()
-}

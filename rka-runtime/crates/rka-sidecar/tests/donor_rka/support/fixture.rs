@@ -6,7 +6,7 @@ use rka_sidecar::donor::{
 
 use super::encoding::{
     AAID, ALIAS, CANDIDATE_NONCE, CSR, DONOR_NONCE, IRPC, PEER, PROFILE, PROFILE_EPOCH, SESSION,
-    envelope, identity, request_id, standard_upstream,
+    envelope, identity, request_id,
 };
 
 #[derive(Debug)]
@@ -16,7 +16,6 @@ pub struct Fixture {
     pub(super) envelope: Vec<u8>,
     pub(super) secondary_envelope: Vec<u8>,
     pub(super) mismatched_irpc_envelope: Vec<u8>,
-    pub(super) upstream: Vec<u8>,
 }
 
 impl Fixture {
@@ -35,7 +34,6 @@ impl Fixture {
                 CSR,
                 [0xfa; 32],
             ),
-            upstream: standard_upstream(),
         }
     }
 

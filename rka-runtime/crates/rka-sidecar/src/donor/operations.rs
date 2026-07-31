@@ -4,8 +4,8 @@ use super::{
     service::{BeginResult, DonorRkaService, FinishResult},
 };
 
-const MAX_OPERATIONS: u8 = 4;
-const MAX_SUCCESSFUL_FINISHES: u8 = 1;
+pub(super) const MAX_OPERATIONS: u8 = 4;
+pub(super) const MAX_SUCCESSFUL_FINISHES: u8 = 1;
 
 impl DonorRkaService {
     pub fn begin(

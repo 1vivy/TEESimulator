@@ -9,10 +9,10 @@ use super::{
     validation::{authorize, validate_generate},
 };
 
-const MAX_KEYS: usize = 4;
-const MAX_UPDATES: u16 = 128;
-const MAX_TOTAL_INPUT: usize = 1_048_576;
-const MAX_CHUNK: usize = 65_536;
+pub(super) const MAX_KEYS: usize = 4;
+pub(super) const MAX_UPDATES: u16 = 128;
+pub(super) const MAX_TOTAL_INPUT: usize = 1_048_576;
+pub(super) const MAX_CHUNK: usize = 65_536;
 
 #[derive(Debug)]
 pub(super) struct KeyRecord {
@@ -57,8 +57,8 @@ pub struct FinishResult {
 pub struct DonorRkaService {
     pub(super) policy: PairedPolicy,
     pub(super) keys: HashMap<[u8; 16], KeyRecord>,
-    request_ids: HashSet<[u8; 16]>,
-    candidate_nonces: HashSet<[u8; 32]>,
+    pub(super) request_ids: HashSet<[u8; 16]>,
+    pub(super) candidate_nonces: HashSet<[u8; 32]>,
     remote_keys: HashSet<RemoteKeyHandle>,
     pub(super) operation_tombstones: HashSet<RemoteOperationHandle>,
     pub(super) replay_root: Option<PathBuf>,

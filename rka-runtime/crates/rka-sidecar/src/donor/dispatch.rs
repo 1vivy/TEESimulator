@@ -1,6 +1,6 @@
 use rka_protocol::{
-    Frame, FrameBody, FrameContext, MessageKind, RequestId, decode_frame, encode_frame,
-    encode_frame_without_transcript, transcript_hash,
+    Frame, FrameBody, FrameContext, HashDomain, MessageKind, RequestId, decode_frame, encode_frame,
+    encode_frame_without_transcript, hash_bytes, transcript_hash,
 };
 
 use super::{
@@ -11,8 +11,9 @@ use super::{
         begin_result, boolean_result, encode_envelope, encode_identity, finish_result,
         generate_result, update_result,
     },
+    lease::load_verified_chain,
+    state::PendingTranscript,
 };
-use crate::provisioning_io::{FileStateStore, load_lease_chain};
 
 pub(super) fn dispatch(runtime: &mut DonorRuntime, encoded: &[u8]) -> Result<Vec<u8>, DonorError> {
     let frame = decode_frame(encoded).map_err(|_| DonorError::InvalidFrame)?;
@@ -22,19 +23,36 @@ pub(super) fn dispatch(runtime: &mut DonorRuntime, encoded: &[u8]) -> Result<Vec
     {
         return Err(DonorError::Unpaired);
     }
-    let previous = trust.pair.prior_transcript_hash;
-    let expected = transcript_hash(&previous, &encode_frame_without_transcript(&frame));
+    let previous = runtime
+        .transcript
+        .as_ref()
+        .ok_or(DonorError::Unpaired)?
+        .committed()?;
+    let canonical_request = encode_frame_without_transcript(&frame);
+    let expected = transcript_hash(&previous, &canonical_request);
     if frame.transcript_hash != expected {
         return Err(DonorError::TranscriptMismatch);
     }
+    super::dispatch_preflight::preflight(runtime, &frame, previous)?;
+    runtime
+        .transcript
+        .as_mut()
+        .ok_or(DonorError::Unpaired)?
+        .reserve(PendingTranscript {
+            prior: previous,
+            request_hash: hash_bytes(HashDomain::Frame, &canonical_request),
+            next: expected,
+            peer: trust.pair.peer_spki_hash,
+            epoch: frame.profile_epoch,
+            session: frame.session_id.bytes(),
+            request_id: frame.request_id.bytes(),
+        })?;
     let body = dispatch_body(runtime, &frame, previous)?;
-    let trust = runtime.trust.as_mut().ok_or(DonorError::Unpaired)?;
-    trust.pair.prior_transcript_hash = frame.transcript_hash;
-    let root = runtime.state_root.as_deref().ok_or(DonorError::Storage)?;
-    trust
-        .pair
-        .persist(&FileStateStore::new(root))
-        .map_err(|_| DonorError::Storage)?;
+    runtime
+        .transcript
+        .as_mut()
+        .ok_or(DonorError::Unpaired)?
+        .commit(frame.transcript_hash)?;
     let mut response = Frame::new(
         FrameContext::new(
             (frame.request_id, frame.session_id),
@@ -55,7 +73,7 @@ fn dispatch_body(
     frame: &Frame<'_>,
     previous: [u8; 32],
 ) -> Result<Vec<u8>, DonorError> {
-    let context = access_context(runtime, frame)?;
+    let context = super::dispatch_preflight::access_context(runtime, frame)?;
     match &frame.body {
         FrameBody::Generate {
             identity,
@@ -166,10 +184,8 @@ fn generate(
     }
     let lease = trust.leases.first().ok_or(DonorError::Unpaired)?;
     let root = runtime.state_root.as_deref().ok_or(DonorError::Storage)?;
-    let chain =
-        load_lease_chain(root, lease.remote_handle.as_bytes()).map_err(|_| DonorError::Storage)?;
+    let chain = load_verified_chain(root, lease)?;
     let chain_refs = chain.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    let phase_hashes = lease.phase_hashes;
     runtime.generate(GenerateRequest::new(
         GenerateCoordinates {
             request_id: request_id.bytes(),
@@ -179,9 +195,8 @@ fn generate(
         GenerateEvidence {
             candidate_identity: &identity_bytes,
             envelope: &envelope_bytes,
-            upstream_body: &[],
             ordered_rkp_public_hashes: &ordered,
-            phase_hashes,
+            phase_hashes: lease.phase_hashes,
         },
         GenerateKeyMaterial {
             rkp_handle: RkpKeyHandle::new(*lease.remote_handle.as_bytes()),
@@ -202,40 +217,4 @@ fn generate(
         envelope,
         request.attestation_challenge,
     ))
-}
-
-fn access_context(runtime: &DonorRuntime, frame: &Frame<'_>) -> Result<AccessContext, DonorError> {
-    let pair = runtime
-        .trust
-        .as_ref()
-        .map(|trust| trust.pair)
-        .ok_or(DonorError::Unpaired)?;
-    let uptime = std::fs::read_to_string("/proc/uptime").map_err(|_| DonorError::InvalidFrame)?;
-    let value = uptime
-        .split_ascii_whitespace()
-        .next()
-        .ok_or(DonorError::InvalidFrame)?;
-    let (seconds, fraction) = value.split_once('.').ok_or(DonorError::InvalidFrame)?;
-    let seconds = seconds
-        .parse::<u64>()
-        .map_err(|_| DonorError::InvalidFrame)?;
-    let centiseconds = fraction
-        .get(..2)
-        .ok_or(DonorError::InvalidFrame)?
-        .parse::<u64>()
-        .map_err(|_| DonorError::InvalidFrame)?;
-    let now_ms = seconds
-        .checked_mul(1_000)
-        .and_then(|value| value.checked_add(centiseconds.saturating_mul(10)))
-        .ok_or(DonorError::InvalidFrame)?;
-    Ok(AccessContext {
-        peer_spki_hash: pair.peer_spki_hash,
-        profile_id_hash: pair.profile_id_hash,
-        profile_epoch: pair.profile_epoch,
-        session_id: frame.session_id.bytes(),
-        candidate_nonce: pair.candidate_nonce,
-        donor_nonce: pair.donor_nonce,
-        candidate_identity_hash: pair.candidate_identity_hash,
-        now_ms,
-    })
 }

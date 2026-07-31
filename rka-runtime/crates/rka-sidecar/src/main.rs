@@ -59,7 +59,7 @@ fn run_donor() -> Result<(), Box<dyn Error>> {
     let mut runtime = DonorRuntime::open(&state_root, &broker_socket);
     let ingress = DonorIngress::bind(&state_root)?;
     loop {
-        let _ = ingress.serve_once(&mut runtime);
+        ingress.serve_once(&mut runtime)?;
         dispatch_pending_rotation()?;
         thread::sleep(Duration::from_millis(25));
     }

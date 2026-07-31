@@ -1,26 +1,33 @@
 #![allow(
+    clippy::similar_names,
     missing_docs,
     reason = "closed local ingress types expose only behavior-named constructors and outcomes"
 )]
 
 use std::{
-    fs,
-    io::{Read, Write},
-    os::unix::{
-        fs::{FileTypeExt, MetadataExt, PermissionsExt},
-        net::UnixListener,
+    os::{
+        fd::{AsRawFd, OwnedFd},
+        unix::net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use rustix::net::sockopt::socket_peercred;
+use rustix::{
+    fs::{AtFlags, FileType, Mode, fsync, statat, unlinkat},
+    net::sockopt::socket_peercred,
+    process::{getegid, geteuid},
+};
 use thiserror::Error;
 
-use super::DonorRuntime;
+use super::{
+    DonorRuntime,
+    ingress_io::{read_frame_until, write_response_until},
+    ingress_path::{open_socket_directory, remove_stale_socket},
+};
 
-const MAX_FRAME_BYTES: usize = 1_048_576;
 const IO_DEADLINE: Duration = Duration::from_secs(5);
+pub(super) const SOCKET_NAME: &str = "donor-rka.sock";
 
 #[derive(Debug, Error)]
 pub enum DonorIngressError {
@@ -45,42 +52,64 @@ pub enum ServeOutcome {
 #[derive(Debug)]
 pub struct DonorIngress {
     listener: UnixListener,
+    directory: OwnedFd,
     path: PathBuf,
 }
 
 impl DonorIngress {
     pub fn bind(state_root: &Path) -> Result<Self, DonorIngressError> {
+        if geteuid().as_raw() != 0 || getegid().as_raw() != 0 {
+            return Err(DonorIngressError::Path);
+        }
         Self::bind_for_owner(state_root, 0, 0)
     }
 
-    #[allow(
-        clippy::similar_names,
-        reason = "Unix ownership checks require distinct uid and gid coordinates"
-    )]
+    #[doc(hidden)]
+    pub fn bind_for_owner_policy(
+        state_root: &Path,
+        expected_uid: u32,
+        expected_gid: u32,
+    ) -> Result<Self, DonorIngressError> {
+        Self::bind_for_owner(state_root, expected_uid, expected_gid)
+    }
+
     fn bind_for_owner(
         state_root: &Path,
         expected_uid: u32,
         expected_gid: u32,
     ) -> Result<Self, DonorIngressError> {
-        let directory = state_root.join("run/sockets");
-        private_directory(&directory, expected_uid, expected_gid)?;
-        let path = directory.join("donor-rka.sock");
-        if let Ok(metadata) = fs::symlink_metadata(&path) {
-            if !metadata.file_type().is_socket()
-                || metadata.uid() != expected_uid
-                || metadata.gid() != expected_gid
-            {
-                return Err(DonorIngressError::Path);
-            }
-            fs::remove_file(&path).map_err(|_| DonorIngressError::Io)?;
-        }
+        let directory = open_socket_directory(state_root, expected_uid, expected_gid)?;
+        remove_stale_socket(&directory, expected_uid, expected_gid)?;
+        let path = PathBuf::from(format!(
+            "/proc/self/fd/{}/{}",
+            directory.as_raw_fd(),
+            SOCKET_NAME
+        ));
         let listener = UnixListener::bind(&path).map_err(|_| DonorIngressError::Io)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .map_err(|_| DonorIngressError::Io)?;
+        let socket = statat(&directory, SOCKET_NAME, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|_| DonorIngressError::Path)?;
+        if FileType::from_raw_mode(socket.st_mode) != FileType::Socket
+            || socket.st_uid != expected_uid
+            || socket.st_gid != expected_gid
+        {
+            return Err(DonorIngressError::Path);
+        }
+        rustix::fs::chmodat(
+            &directory,
+            SOCKET_NAME,
+            Mode::RUSR | Mode::WUSR,
+            AtFlags::empty(),
+        )
+        .map_err(|_| DonorIngressError::Io)?;
+        fsync(&directory).map_err(|_| DonorIngressError::Io)?;
         listener
             .set_nonblocking(true)
             .map_err(|_| DonorIngressError::Io)?;
-        Ok(Self { listener, path })
+        Ok(Self {
+            listener,
+            directory,
+            path: state_root.join("run/sockets").join(SOCKET_NAME),
+        })
     }
 
     #[must_use]
@@ -92,7 +121,18 @@ impl DonorIngress {
         &self,
         runtime: &mut DonorRuntime,
     ) -> Result<ServeOutcome, DonorIngressError> {
-        let (mut stream, _) = match self.listener.accept() {
+        self.serve_once_with_policy(runtime, IO_DEADLINE, 0, 0)
+    }
+
+    fn serve_once_with_policy(
+        &self,
+        runtime: &mut DonorRuntime,
+        budget: Duration,
+        expected_uid: u32,
+        expected_gid: u32,
+    ) -> Result<ServeOutcome, DonorIngressError> {
+        let started = Instant::now();
+        let (stream, _) = match self.listener.accept() {
             Ok(value) => value,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 return Ok(ServeOutcome::Idle);
@@ -100,102 +140,44 @@ impl DonorIngress {
             Err(_) => return Err(DonorIngressError::Io),
         };
         let credentials = socket_peercred(&stream).map_err(|_| DonorIngressError::Peer)?;
-        if credentials.uid.as_raw() != 0 || credentials.gid.as_raw() != 0 {
+        if credentials.uid.as_raw() != expected_uid || credentials.gid.as_raw() != expected_gid {
             return Err(DonorIngressError::Peer);
         }
-        stream
-            .set_read_timeout(Some(IO_DEADLINE))
-            .map_err(|_| DonorIngressError::Io)?;
-        stream
-            .set_write_timeout(Some(IO_DEADLINE))
-            .map_err(|_| DonorIngressError::Io)?;
-        let mut length = [0_u8; 4];
-        stream
-            .read_exact(&mut length)
-            .map_err(|_| DonorIngressError::Io)?;
-        let length =
-            usize::try_from(u32::from_be_bytes(length)).map_err(|_| DonorIngressError::Bounds)?;
-        if !(1..=MAX_FRAME_BYTES).contains(&length) {
-            return Err(DonorIngressError::Bounds);
-        }
-        let mut request = vec![0_u8; length];
-        stream
-            .read_exact(&mut request)
-            .map_err(|_| DonorIngressError::Io)?;
+        let request = read_frame_until(
+            stream.try_clone().map_err(|_| DonorIngressError::Io)?,
+            started,
+            budget,
+        )?;
         let response = runtime
             .dispatch_frame(&request)
             .map_err(|_| DonorIngressError::Runtime)?;
-        request.fill(0);
-        let response_length =
-            u32::try_from(response.len()).map_err(|_| DonorIngressError::Bounds)?;
-        stream
-            .write_all(&response_length.to_be_bytes())
-            .and_then(|()| stream.write_all(&response))
-            .map_err(|_| DonorIngressError::Io)?;
+        let mut stream = stream;
+        write_response_until(&mut stream, &response, started, budget)?;
         Ok(ServeOutcome::Dispatched)
+    }
+
+    #[doc(hidden)]
+    pub fn read_frame_with_budget(
+        stream: UnixStream,
+        budget: Duration,
+    ) -> Result<Vec<u8>, DonorIngressError> {
+        read_frame_until(stream, Instant::now(), budget)
+    }
+
+    #[doc(hidden)]
+    pub fn serve_once_for_peer_policy(
+        &self,
+        runtime: &mut DonorRuntime,
+        expected_uid: u32,
+        expected_gid: u32,
+    ) -> Result<ServeOutcome, DonorIngressError> {
+        self.serve_once_with_policy(runtime, IO_DEADLINE, expected_uid, expected_gid)
     }
 }
 
 impl Drop for DonorIngress {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-#[allow(
-    clippy::similar_names,
-    reason = "Unix ownership checks require distinct uid and gid coordinates"
-)]
-fn private_directory(
-    path: &Path,
-    expected_uid: u32,
-    expected_gid: u32,
-) -> Result<(), DonorIngressError> {
-    fs::create_dir_all(path).map_err(|_| DonorIngressError::Io)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .map_err(|_| DonorIngressError::Io)?;
-    let metadata = fs::symlink_metadata(path).map_err(|_| DonorIngressError::Path)?;
-    if !metadata.file_type().is_dir()
-        || metadata.uid() != expected_uid
-        || metadata.gid() != expected_gid
-        || metadata.mode() & 0o077 != 0
-    {
-        return Err(DonorIngressError::Path);
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    #[test]
-    fn stale_owned_socket_is_replaced_with_private_mode_and_cleaned() {
-        // Given
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "rka-ingress-unit-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let sockets = root.join("run/sockets");
-        fs::create_dir_all(&sockets).unwrap();
-        fs::set_permissions(&sockets, fs::Permissions::from_mode(0o700)).unwrap();
-        let path = sockets.join("donor-rka.sock");
-        drop(UnixListener::bind(&path).unwrap());
-        let metadata = fs::metadata(&sockets).unwrap();
-
-        // When
-        let ingress = DonorIngress::bind_for_owner(&root, metadata.uid(), metadata.gid()).unwrap();
-
-        // Then
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        drop(ingress);
-        assert!(!path.exists());
-        fs::remove_dir_all(root).unwrap();
+        let _ = unlinkat(&self.directory, SOCKET_NAME, AtFlags::empty());
+        let _ = fsync(&self.directory);
     }
 }

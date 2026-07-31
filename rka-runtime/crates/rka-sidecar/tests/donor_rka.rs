@@ -107,22 +107,17 @@ fn donor_rka_rejects_policy_epoch_nonce_ttl_and_pair_mismatch() {
 }
 
 #[test]
-fn donor_rka_rejects_envelope_leak_or_broken_hash_binding() {
+fn donor_rka_rejects_broken_hash_binding() {
     // Given
     let fixture = Fixture::new();
 
     // When
-    let leaked = DonorRkaService::new(fixture.policy()).generate(
-        fixture.generate_with_upstream_envelope(1),
-        &mut FakeBroker::default(),
-    );
     let broken = DonorRkaService::new(fixture.policy()).generate(
         fixture.generate_with_broken_csr_hash(1),
         &mut FakeBroker::default(),
     );
 
     // Then
-    assert_eq!(leaked, Err(DonorError::EnvelopeUpstream));
     assert_eq!(broken, Err(DonorError::EnvelopeMismatch));
 }
 

@@ -81,7 +81,6 @@ pub struct GenerateCoordinates {
 pub struct GenerateEvidence<'a> {
     pub candidate_identity: &'a [u8],
     pub envelope: &'a [u8],
-    pub upstream_body: &'a [u8],
     pub ordered_rkp_public_hashes: &'a [[u8; 32]],
     pub phase_hashes: [[u8; 32]; 5],
 }
@@ -103,7 +102,6 @@ pub struct GenerateRequest<'a> {
     pub(crate) alias: [u8; 16],
     pub(crate) candidate_identity: &'a [u8],
     pub(crate) envelope: &'a [u8],
-    pub(crate) upstream_body: &'a [u8],
     pub(crate) rkp_handle: RkpKeyHandle,
     pub(crate) challenge: &'a [u8],
     pub(crate) prior_transcript_hash: [u8; 32],
@@ -124,7 +122,6 @@ impl<'a> GenerateRequest<'a> {
             alias: coordinates.alias,
             candidate_identity: evidence.candidate_identity,
             envelope: evidence.envelope,
-            upstream_body: evidence.upstream_body,
             rkp_handle: key.rkp_handle,
             challenge: key.challenge,
             prior_transcript_hash: key.prior_transcript_hash,
@@ -227,8 +224,6 @@ pub enum DonorError {
     IrpcIdentityMismatch,
     #[error("prior transcript does not match the authenticated frame chain")]
     TranscriptMismatch,
-    #[error("module-only envelope reached the upstream body")]
-    EnvelopeUpstream,
     #[error("a same-handle operation is already live")]
     ConcurrentOperation,
     #[error("successful use limit is exhausted")]

@@ -1,6 +1,4 @@
-use rka_protocol::{
-    HashDomain, decode_candidate_identity, decode_envelope, hash_bytes, validate_upstream_rkp_bytes,
-};
+use rka_protocol::{HashDomain, decode_candidate_identity, decode_envelope, hash_bytes};
 
 use super::{AccessContext, DonorError, GenerateRequest, PairedPolicy};
 
@@ -71,8 +69,6 @@ pub(super) fn validate_generate<'a>(
     if request.context.now_ms > expires {
         return Err(DonorError::Expired);
     }
-    validate_upstream_rkp_bytes(request.upstream_body, request.envelope)
-        .map_err(|_| DonorError::EnvelopeUpstream)?;
     Ok(ValidatedGenerate {
         aaid: candidate.aaid_der,
         envelope_hash: hash_bytes(HashDomain::Envelope, request.envelope),

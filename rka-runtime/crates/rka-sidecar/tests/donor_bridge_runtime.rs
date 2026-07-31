@@ -5,6 +5,7 @@ use rka_sidecar::bridge::{
     encode_frame,
 };
 use rka_sidecar::donor::{DeleteRequest, DonorError, DonorRuntime};
+use rka_state::{PairedActivationRecord, StateError, StateStore};
 
 #[test]
 fn donor_bridge_candidate_command_matches_authenticated_jvm_wire_golden()
@@ -66,4 +67,63 @@ fn donor_runtime_open_requires_both_durable_trust_records() -> Result<(), Box<dy
     assert!(!runtime.is_active());
     std::fs::remove_dir_all(root)?;
     Ok(())
+}
+
+#[test]
+fn donor_runtime_open_rejects_a_pair_without_an_active_lease()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let root = std::env::temp_dir().join(format!("rka-donor-pair-only-{}", std::process::id()));
+    let store = TestStore(root.join("records"));
+    PairedActivationRecord {
+        peer_spki_hash: [1; 32],
+        profile_id_hash: [2; 32],
+        profile_epoch: 3,
+        candidate_identity_hash: [4; 32],
+        session_id: [5; 32],
+        candidate_nonce: [6; 32],
+        donor_nonce: [7; 32],
+        prior_transcript_hash: [8; 32],
+    }
+    .persist(&store)?;
+
+    // When
+    let runtime = DonorRuntime::open(&root, std::path::Path::new("/unused/broker.sock"));
+
+    // Then
+    assert!(!runtime.is_active());
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+struct TestStore(std::path::PathBuf);
+
+impl StateStore for TestStore {
+    fn read(&self, key: &[u8], output: &mut [u8]) -> Result<usize, StateError> {
+        let value = std::fs::read(self.0.join(key_name(key))).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                StateError::Missing
+            } else {
+                StateError::Storage
+            }
+        })?;
+        output
+            .get_mut(..value.len())
+            .ok_or(StateError::Capacity)?
+            .copy_from_slice(&value);
+        Ok(value.len())
+    }
+
+    fn replace(&self, key: &[u8], value: &[u8]) -> Result<(), StateError> {
+        std::fs::create_dir_all(&self.0).map_err(|_| StateError::Storage)?;
+        std::fs::write(self.0.join(key_name(key)), value).map_err(|_| StateError::Storage)
+    }
+}
+
+fn key_name(key: &[u8]) -> String {
+    key.iter().fold(String::new(), |mut output, byte| {
+        use std::fmt::Write as _;
+        let _ = write!(output, "{byte:02x}");
+        output
+    })
 }

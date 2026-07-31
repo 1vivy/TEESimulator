@@ -33,6 +33,7 @@ pub struct DonorRuntime {
     pub(super) broker: BridgeDonorBroker,
     pub(super) trust: Option<RuntimeTrust>,
     pub(super) state_root: Option<PathBuf>,
+    pub(super) transcript: Option<super::state::TranscriptJournal>,
 }
 
 #[derive(Debug)]
@@ -50,6 +51,7 @@ impl DonorRuntime {
             broker: BridgeDonorBroker::new(socket),
             trust: None,
             state_root: None,
+            transcript: None,
         }
     }
 
@@ -87,22 +89,29 @@ impl DonorRuntime {
                     .iter()
                     .map(|entry| *entry.metadata())
                     .collect();
+                let transcript =
+                    super::state::TranscriptJournal::open(state_root, pair.prior_transcript_hash)
+                        .ok()?;
+                transcript.committed().ok()?;
                 Some((
                     service,
                     RuntimeTrust {
                         pair,
                         leases: metadata,
                     },
+                    transcript,
                 ))
             });
-        let (service, trust) = admitted.map_or((None, None), |(service, trust)| {
-            (Some(service), Some(trust))
-        });
+        let (service, trust, transcript) = admitted
+            .map_or((None, None, None), |(service, trust, transcript)| {
+                (Some(service), Some(trust), Some(transcript))
+            });
         Self {
             service,
             broker: BridgeDonorBroker::new(socket),
             trust,
             state_root: Some(state_root.to_path_buf()),
+            transcript,
         }
     }
 

@@ -17,7 +17,6 @@ impl Fixture {
             self.context(),
             ALIAS,
             &self.envelope,
-            &self.upstream,
             CSR,
             [0xc1; 32],
         )
@@ -29,7 +28,6 @@ impl Fixture {
             self.context(),
             alias,
             &self.envelope,
-            &self.upstream,
             CSR,
             [0xc1; 32],
         )
@@ -43,7 +41,6 @@ impl Fixture {
             context,
             [0xa2; 16],
             &self.secondary_envelope,
-            &self.upstream,
             CSR,
             [0xc1; 32],
         )
@@ -52,69 +49,25 @@ impl Fixture {
     pub fn generate_with_epoch(&self, request: u8, epoch: u64) -> GenerateRequest<'_> {
         let mut context = self.context();
         context.profile_epoch = epoch;
-        self.generate_parts(
-            request,
-            context,
-            ALIAS,
-            &self.envelope,
-            &self.upstream,
-            CSR,
-            [0xc1; 32],
-        )
+        self.generate_parts(request, context, ALIAS, &self.envelope, CSR, [0xc1; 32])
     }
 
     pub fn generate_at(&self, request: u8, now_ms: u64) -> GenerateRequest<'_> {
         let mut context = self.context();
         context.now_ms = now_ms;
-        self.generate_parts(
-            request,
-            context,
-            ALIAS,
-            &self.envelope,
-            &self.upstream,
-            CSR,
-            [0xc1; 32],
-        )
+        self.generate_parts(request, context, ALIAS, &self.envelope, CSR, [0xc1; 32])
     }
 
     pub fn generate_with_peer(&self, request: u8, peer: [u8; 32]) -> GenerateRequest<'_> {
         let mut context = self.context();
         context.peer_spki_hash = peer;
-        self.generate_parts(
-            request,
-            context,
-            ALIAS,
-            &self.envelope,
-            &self.upstream,
-            CSR,
-            [0xc1; 32],
-        )
+        self.generate_parts(request, context, ALIAS, &self.envelope, CSR, [0xc1; 32])
     }
 
     pub fn generate_with_nonce(&self, request: u8, nonce: [u8; 32]) -> GenerateRequest<'_> {
         let mut context = self.context();
         context.candidate_nonce = nonce;
-        self.generate_parts(
-            request,
-            context,
-            ALIAS,
-            &self.envelope,
-            &self.upstream,
-            CSR,
-            [0xc1; 32],
-        )
-    }
-
-    pub fn generate_with_upstream_envelope(&self, request: u8) -> GenerateRequest<'_> {
-        self.generate_parts(
-            request,
-            self.context(),
-            ALIAS,
-            &self.envelope,
-            &self.envelope,
-            CSR,
-            [0xc1; 32],
-        )
+        self.generate_parts(request, context, ALIAS, &self.envelope, CSR, [0xc1; 32])
     }
 
     pub fn generate_with_broken_csr_hash(&self, request: u8) -> GenerateRequest<'_> {
@@ -123,7 +76,6 @@ impl Fixture {
             self.context(),
             ALIAS,
             &self.envelope,
-            &self.upstream,
             [0xfe; 32],
             [0xc1; 32],
         )
@@ -136,7 +88,6 @@ impl Fixture {
             self.context(),
             ALIAS,
             &self.mismatched_irpc_envelope,
-            &self.upstream,
             CSR,
             [0xc1; 32],
         )
@@ -152,7 +103,6 @@ impl Fixture {
             self.context(),
             ALIAS,
             &self.envelope,
-            &self.upstream,
             CSR,
             transcript,
         )
@@ -164,7 +114,6 @@ impl Fixture {
         context: AccessContext,
         alias: [u8; 16],
         envelope: &'a [u8],
-        upstream: &'a [u8],
         csr_hash: [u8; 32],
         transcript: [u8; 32],
     ) -> GenerateRequest<'a> {
@@ -177,7 +126,6 @@ impl Fixture {
             GenerateEvidence {
                 candidate_identity: &self.identity,
                 envelope,
-                upstream_body: upstream,
                 ordered_rkp_public_hashes: [RKP_PUBLIC].as_slice(),
                 phase_hashes: [csr_hash, SERVER_BODY, CHALLENGE, RESPONSE, CHAIN],
             },

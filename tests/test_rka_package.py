@@ -271,6 +271,7 @@ class RkaPackageTest(unittest.TestCase):
         self.assertEqual(manifest, {
             "schema": "1", "roles": "LOCAL|DONOR|CANDIDATE", "sidecar_abi": "arm64-v8a",
             "manager_appid_probe": "rka-sidecar:manager-appid",
+            "direct_identity": "rka-sidecar:direct-identity", "direct_probe": "rka-sidecar:direct-probe",
             "activation": "staged-by-installer", "runtime_state": "external-root-only",
             "archive_entries": manifest["archive_entries"], "archive_executables": manifest["archive_executables"],
         })

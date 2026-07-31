@@ -27,6 +27,16 @@ class NoRebootDeployFidelityTest {
     }
 
     @Test
+    fun unavailablePeerRollsBackTheLiveDeployment() {
+        assertPairProbeRollback(FixtureMutation.DIRECT_PROBE_UNAVAILABLE)
+    }
+
+    @Test
+    fun staleDirectProfileRollsBackTheLiveDeployment() {
+        assertPairProbeRollback(FixtureMutation.DIRECT_PROBE_STALE)
+    }
+
+    @Test
     fun rendererWithWrongZygoteParentRollsBackTheLiveDeployment() {
         assertPairProbeRollback(FixtureMutation.ZYGOTE_WRONG_PARENT)
     }

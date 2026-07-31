@@ -4,12 +4,13 @@ use std::{
     env,
     fs::{self, File, OpenOptions},
     io::Write,
-    net::Ipv4Addr,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
 use ring::digest::{SHA256, digest};
+use rka_transport::{TlsError, probe_pinned_tls};
 
 use crate::{LifecycleRole, SidecarError};
 
@@ -20,7 +21,7 @@ const RECEIPT_NAME: &str = "run/direct-profile.receipt";
 #[derive(Debug)]
 struct DirectProfile {
     epoch: u64,
-    _endpoint: Ipv4Addr,
+    endpoint: Ipv4Addr,
     peer_pin: [u8; 32],
 }
 
@@ -65,7 +66,7 @@ impl DirectProfile {
         )?;
         Ok(Self {
             epoch: parsed_epoch,
-            _endpoint: parsed_endpoint,
+            endpoint: parsed_endpoint,
             peer_pin: parsed_pin,
         })
     }
@@ -114,15 +115,61 @@ impl Drop for PendingReceipt {
 
 /// Consumes the fixed direct profile and atomically publishes its redacted receipt.
 pub fn consume(role: LifecycleRole) -> Result<(), SidecarError> {
+    let (state_root, profile, raw) = load(role)?;
+    let receipt_path =
+        PathBuf::from(env::var_os("RKA_PROFILE_RECEIPT_PATH").ok_or(SidecarError::RuntimeContext)?);
+    if receipt_path != state_root.join(RECEIPT_NAME) {
+        return Err(SidecarError::RuntimeContext);
+    }
+    let receipt = startup_receipt(&profile, &raw);
+    commit_receipt(&receipt_path, receipt.as_bytes())
+}
+
+/// Verifies the exact direct profile over TLS 1.3 and commits a redacted receipt.
+pub fn probe() -> Result<String, &'static str> {
+    let role = env::var_os("RKA_DIRECT_PROBE_ROLE")
+        .ok_or("invalid_profile")
+        .and_then(|value| LifecycleRole::parse(&value).map_err(|_| "invalid_profile"))?;
+    let (state_root, profile, raw) = load(role).map_err(|_| "invalid_profile")?;
+    let receipt_path =
+        PathBuf::from(env::var_os("RKA_DIRECT_PROBE_RECEIPT_PATH").ok_or("invalid_profile")?);
+    let transactions = state_root.join("deploy-transactions");
+    let receipt_parent = receipt_path.parent().ok_or("invalid_profile")?;
+    if receipt_path.file_name() != Some(std::ffi::OsStr::new("direct-probe.receipt"))
+        || receipt_parent.parent() != Some(transactions.as_path())
+        || !receipt_parent.is_dir()
+    {
+        return Err("invalid_profile");
+    }
+    let address = SocketAddr::V4(SocketAddrV4::new(profile.endpoint, 37373));
+    probe_pinned_tls(address, profile.peer_pin, std::time::Duration::from_secs(8)).map_err(
+        |error| match error {
+            TlsError::Deadline | TlsError::Io => "unavailable",
+            TlsError::Version => "version_rejected",
+            _ => "peer_rejected",
+        },
+    )?;
+    let profile_hash = digest(&SHA256, &raw);
+    let pin_hash = digest(&SHA256, &profile.peer_pin);
+    let receipt = format!(
+        "version=1\nprotocol=TLSv1.3\nprofile_sha256={}\nprofile_epoch={}\npeer_pin_sha256={}\ntransport=DIRECT\n",
+        hex(profile_hash.as_ref()),
+        profile.epoch,
+        hex(pin_hash.as_ref()),
+    );
+    commit_receipt(&receipt_path, receipt.as_bytes()).map_err(|_| "receipt_failed")?;
+    Ok(format!(
+        "RESULT=DIRECT protocol=TLSv1.3 profile_sha256={}\n",
+        hex(profile_hash.as_ref())
+    ))
+}
+
+fn load(role: LifecycleRole) -> Result<(PathBuf, DirectProfile, Vec<u8>), SidecarError> {
     let state_root =
         PathBuf::from(env::var_os("RKA_STATE_ROOT").ok_or(SidecarError::RuntimeContext)?);
     let profile_path =
         PathBuf::from(env::var_os("RKA_PROFILE_PATH").ok_or(SidecarError::RuntimeContext)?);
-    let receipt_path =
-        PathBuf::from(env::var_os("RKA_PROFILE_RECEIPT_PATH").ok_or(SidecarError::RuntimeContext)?);
-    if profile_path != state_root.join(PROFILE_NAME)
-        || receipt_path != state_root.join(RECEIPT_NAME)
-    {
+    if profile_path != state_root.join(PROFILE_NAME) {
         return Err(SidecarError::RuntimeContext);
     }
     let expected_epoch = env::var("RKA_EXPECTED_PROFILE_EPOCH")
@@ -141,18 +188,25 @@ pub fn consume(role: LifecycleRole) -> Result<(), SidecarError> {
     }
     let raw = fs::read(&profile_path).map_err(|_| SidecarError::RuntimeContext)?;
     let profile = DirectProfile::parse(&raw, role, expected_epoch)?;
-    let profile_hash = digest(&SHA256, &raw);
+    Ok((state_root, profile, raw))
+}
+
+fn startup_receipt(profile: &DirectProfile, raw: &[u8]) -> String {
+    let profile_hash = digest(&SHA256, raw);
     let pin_hash = digest(&SHA256, &profile.peer_pin);
-    let receipt = format!(
+    format!(
         "version=1\nprofile_sha256={}\nprofile_epoch={}\npeer_pin_sha256={}\ntransport=DIRECT\n",
         hex(profile_hash.as_ref()),
         profile.epoch,
         hex(pin_hash.as_ref())
-    );
+    )
+}
+
+fn commit_receipt(receipt_path: &Path, receipt: &[u8]) -> Result<(), SidecarError> {
     let receipt_parent = receipt_path.parent().ok_or(SidecarError::RuntimeContext)?;
     fs::create_dir_all(receipt_parent).map_err(|_| SidecarError::RuntimeContext)?;
     let pending_path = receipt_parent.join(format!(".direct-profile.{}.tmp", std::process::id()));
-    PendingReceipt::create(pending_path)?.commit(receipt.as_bytes(), &receipt_path)
+    PendingReceipt::create(pending_path)?.commit(receipt, receipt_path)
 }
 
 fn decode_pin(encoded: &str) -> Result<[u8; 32], SidecarError> {

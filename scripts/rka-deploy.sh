@@ -225,20 +225,28 @@ preflight)
         [ "$module_tree" = "install restore uninstall enable disable action metamodule list config help" ] || { printf "RESULT=INCOMPATIBLE reason=MODULE_CLI\n"; exit; }
         sepolicy_tree=$(ksud sepolicy help 2>/dev/null | sed -n 's/^  \([a-z][a-z-]*\).*$/\1/p' | tr '\n' ' ' | sed 's/ $//') || :
         [ "$sepolicy_tree" = "patch apply check help" ] || { printf "RESULT=INCOMPATIBLE reason=SEPOLICY_CLI\n"; exit; }
-        for path in /data/adb/modules /data/adb/modules_update; do
-            [ -d "$path" ] && [ ! -L "$path" ] || { printf "RESULT=INCOMPATIBLE reason=MODULE_LAYOUT\n"; exit; }
-        done
+        module_layout=PRESENT_LAYOUT
+        if [ ! -e /data/adb/modules ] && [ ! -L /data/adb/modules ] && [ ! -e /data/adb/modules_update ] && [ ! -L /data/adb/modules_update ]; then
+            [ ! -e "$active" ] && [ ! -L "$active" ] && [ ! -e "$pending" ] && [ ! -L "$pending" ] || { printf "RESULT=INCOMPATIBLE reason=MODULE_LAYOUT\n"; exit; }
+            ! awk -v p="$active" "\$5 == p {found=1} END {exit !found}" /proc/1/mountinfo || { printf "RESULT=INCOMPATIBLE reason=MODULE_LAYOUT\n"; exit; }
+            [ ! -d "$state/run/pids" ] || { printf "RESULT=INCOMPATIBLE reason=MODULE_LAYOUT\n"; exit; }
+            module_layout=FIRST_INSTALL_ABSENT_LAYOUT
+        else
+            for path in /data/adb/modules /data/adb/modules_update; do
+                [ -d "$path" ] && [ ! -L "$path" ] || { printf "RESULT=INCOMPATIBLE reason=MODULE_LAYOUT\n"; exit; }
+            done
+        fi
         if [ -e /data/adb/metamodule ] || [ -L /data/adb/metamodule ]; then
             [ -L /data/adb/metamodule ] || { printf "RESULT=INCOMPATIBLE reason=METAMODULE_LAYOUT\n"; exit; }
             case "$(readlink -f /data/adb/metamodule)" in /data/adb/modules/*) ;; *) printf "RESULT=INCOMPATIBLE reason=METAMODULE_LAYOUT\n"; exit ;; esac
         fi
         init_ns=$(readlink /proc/1/ns/mnt) || { printf "RESULT=INCOMPATIBLE reason=INIT_NAMESPACE\n"; exit; }
         [ -n "$init_ns" ] || { printf "RESULT=INCOMPATIBLE reason=MOUNT_SEMANTICS\n"; exit; }
-        for command in base64 find head lsattr logcat nsenter openssl sha256sum stat timeout toybox xxd; do
+        for command in base64 find head lsattr logcat nsenter sha256sum stat timeout toybox xxd; do
             command -v "$command" >/dev/null 2>&1 || { printf "RESULT=INCOMPATIBLE reason=DEPLOY_TOOLING\n"; exit; }
         done
         boot_hash=$(sha256sum /proc/sys/kernel/random/boot_id | awk "{print \$1}")
-        printf "RESULT=COMPATIBLE profile=KSU_NEXT_330 boot_hash=%s binary_evidence=exact-observed-binary binary_sha256=%s reference_evidence=reference-source reference_commit=%s markers=update,disable,remove metamodule=single-active-symlink\n" "$boot_hash" "$next_sha" "$next_reference"
+        printf "RESULT=COMPATIBLE profile=KSU_NEXT_330 layout=%s boot_hash=%s binary_evidence=exact-observed-binary binary_sha256=%s reference_evidence=reference-source reference_commit=%s markers=update,disable,remove metamodule=single-active-symlink\n" "$module_layout" "$boot_hash" "$next_sha" "$next_reference"
         exit
     fi
     [ "$version" = "$expected_version" ] || { printf "RESULT=INCOMPATIBLE reason=KSUD_VERSION\n"; exit; }
@@ -258,13 +266,16 @@ sepolicy_cli=true" ] || { printf "RESULT=INCOMPATIBLE reason=KSUD_PROVENANCE\n";
     package=$(dumpsys package me.weishu.kernelsu 2>/dev/null) || :
     printf "%s\n" "$package" | grep -Fq "versionName=$expected_manager_version" || { printf "RESULT=INCOMPATIBLE reason=MANAGER_VERSION\n"; exit; }
     printf "%s\n" "$package" | grep -Eq "versionCode=$expected_manager_code([[:space:]]|$)" || { printf "RESULT=INCOMPATIBLE reason=MANAGER_CODE\n"; exit; }
+    for path in /data/adb/modules /data/adb/modules_update; do
+        [ -d "$path" ] && [ ! -L "$path" ] || { printf "RESULT=INCOMPATIBLE reason=MODULE_LAYOUT\n"; exit; }
+    done
     for path in "$active" "$pending"; do [ ! -L "$path" ] || { printf "RESULT=INCOMPATIBLE reason=MODULE_SYMLINK\n"; exit; }; done
     init_ns=$(readlink /proc/1/ns/mnt) || { printf "RESULT=INCOMPATIBLE reason=INIT_NAMESPACE\n"; exit; }
     ksud_pid=$(pidof ksud) || { printf "RESULT=INCOMPATIBLE reason=KSUD_PROCESS\n"; exit; }
     case "$ksud_pid" in *" "*) printf "RESULT=INCOMPATIBLE reason=KSUD_PROCESS\n"; exit ;; esac
     ksud_ns=$(readlink "/proc/$ksud_pid/ns/mnt") || { printf "RESULT=INCOMPATIBLE reason=KSUD_NAMESPACE\n"; exit; }
     [ -n "$init_ns" ] && [ -n "$ksud_ns" ] || { printf "RESULT=INCOMPATIBLE reason=MOUNT_SEMANTICS\n"; exit; }
-    for command in base64 find head lsattr logcat nsenter openssl sha256sum stat timeout toybox xxd; do
+    for command in base64 find head lsattr logcat nsenter sha256sum stat timeout toybox xxd; do
         command -v "$command" >/dev/null 2>&1 || { printf "RESULT=INCOMPATIBLE reason=DEPLOY_TOOLING\n"; exit; }
     done
     if [ -x "$active/rka-control.sh" ]; then
@@ -365,6 +376,12 @@ deploy)
     [ "$(cat "$source_receipt")" = "$expected_source_sha" ] || exit 1
     printf "source_sha=%s\narchive_sha256=%s\n" "$expected_source_sha" "$expected_archive_sha" > "$txn/source.receipt"
     chmod 600 "$txn/source.receipt"
+    if [ ! -e /data/adb/modules ] && [ ! -L /data/adb/modules ] && [ ! -e /data/adb/modules_update ] && [ ! -L /data/adb/modules_update ]; then
+        printf 'FIRST_INSTALL_ABSENT_LAYOUT\n' > "$txn/layout.before"
+    else
+        printf 'PRESENT_LAYOUT\n' > "$txn/layout.before"
+    fi
+    chmod 600 "$txn/layout.before"
     tree_hash "$pending" > "$txn/pending.before"
     metadata_hash "$pending" > "$txn/pending.metadata.before"
     cp -a "$pending" "$txn/pending.tree" 2>/dev/null || [ ! -e "$pending" ]
@@ -400,6 +417,14 @@ deploy)
     if [ -e "$pending" ]; then rm -rf "$pending"; fi
     if ! ksud module install "$archive"; then exit 1; fi
     [ -d "$pending" ] && [ ! -L "$pending" ] || exit 1
+    if [ -f "$state/manager-authorizations/$tx" ]; then
+        for path in /data/adb/modules /data/adb/modules_update "$active" "$pending"; do
+            [ -d "$path" ] && [ ! -L "$path" ] || exit 1
+        done
+        [ -f "$active/update" ] && [ ! -L "$active/update" ] || exit 1
+        [ "$(find "$active" -mindepth 1 -maxdepth 1 -print)" = "$active/update" ] || exit 1
+    fi
+    [ "${RKA_FAKE_FAULT:-}" != after-install ] || exit 1
     (cd "$pending" && sha256sum -c META-INF/rka-artifacts.sha256) > "$txn/staged-manifest.verify" 2>&1
     policy="$pending/sepolicy.rule"
     probe_manifest="$pending/sepolicy.probes"
@@ -436,16 +461,11 @@ deploy)
     nsenter -t 1 -m -- "$active/rka-control.sh" initialize
     mkdir -p "$state/secrets" "$state/trust" "$state/profiles"
     chmod 700 "$state/secrets" "$state/trust" "$state/profiles"
-    if [ ! -s "$state/secrets/transport.key" ]; then
-        command -v openssl >/dev/null
-        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 -subj /CN=teesimulator-rka -keyout "$state/secrets/transport.key" -out "$state/trust/transport-self.pem" >/dev/null 2>&1
-        chmod 600 "$state/secrets/transport.key" "$state/trust/transport-self.pem"
-    fi
-    cp "$state/trust/transport-self.pem" "$state/trust/transport-trust.pem"
-    chmod 600 "$state/trust/transport-trust.pem"
+    identity=$(RKA_STATE_ROOT="$state" nsenter -t 1 -m -- "$active/rka-sidecar" direct-identity) || exit 1
     printf "version=1\naction=PAIR_DIRECT\n" > "$state/profiles/pair.request"
     chmod 600 "$state/profiles/pair.request"
-    pin=$(openssl x509 -in "$state/trust/transport-self.pem" -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | awk "{print \$1}")
+    pin=$(printf %s "$identity" | sed -n 's/^RESULT=IDENTITY spki_sha256=\([0-9a-f]\{64\}\)$/\1/p')
+    [ -n "$pin" ] || exit 1
     active_inode=$(nsenter -t 1 -m -- stat -c %d:%i "$active/module.prop")
     [ "$active_inode" = "$(stat -c %d:%i "$pending/module.prop")" ]
     nsenter -t 1 -m -- cmp -s "$active/module.prop" "$pending/module.prop"
@@ -648,38 +668,19 @@ function process_record(line, fields, identity, pid, process) {
     printf "RESULT=PAIRED profile_sha256=%s graph_hash=%s mount_views_sha256=%s\n" "$profile_sha" "$(sha256sum "$txn/new.graph" | awk "{print \$1}")" "$(sha256sum "$txn/mount-views.receipt" | awk "{print \$1}")"
     ;;
 direct-probe)
-    tx=$1 peer_endpoint=$2 peer_pin=$3
+    tx=$1 role=$2
+    case "$role" in DONOR) runtime_role=donor ;; CANDIDATE) runtime_role=candidate ;; *) exit 2 ;; esac
     txn="$state/deploy-transactions/$tx"
     [ -f "$txn/installed" ] && [ -s "$state/profiles/direct.conf" ] || exit 1
     nsenter -t 1 -m -- "$active/rka-supervisor.sh" status | grep -q "sidecar=RUNNING"
-    ping -c 1 -W 2 "$peer_endpoint" >/dev/null 2>&1
-    tls_transcript="$state/run/tls-transcript.$tx"
-    peer_certificate="$state/run/peer-certificate.$tx.pem"
-    peer_public_key="$state/run/peer-public-key.$tx.pem"
-    peer_public_der="$state/run/peer-public-key.$tx.der"
-    receipt_tmp="$txn/direct-probe.receipt.tmp"
-    cleanup_tls_probe() {
-        rm -f "$tls_transcript" "$peer_certificate" "$peer_public_key" "$peer_public_der" "$receipt_tmp"
-    }
-    cleanup_tls_probe
-    (ulimit -f 128; printf "\n" | timeout 8 openssl s_client -connect "$peer_endpoint:37373" -tls1_3 -showcerts > "$tls_transcript" 2>&1) || { cleanup_tls_probe; exit 1; }
-    chmod 600 "$tls_transcript"
-    [ -s "$tls_transcript" ] && [ "$(wc -c < "$tls_transcript")" -le 65536 ] || { cleanup_tls_probe; exit 1; }
-    grep -Eq '^New, TLSv1\.3, Cipher is [A-Z0-9_-]+$' "$tls_transcript" || { cleanup_tls_probe; exit 1; }
-    openssl x509 -in "$tls_transcript" -out "$peer_certificate" || { cleanup_tls_probe; exit 1; }
-    chmod 600 "$peer_certificate"
-    openssl x509 -in "$peer_certificate" -pubkey -noout > "$peer_public_key" || { cleanup_tls_probe; exit 1; }
-    chmod 600 "$peer_public_key"
-    openssl pkey -pubin -in "$peer_public_key" -outform DER > "$peer_public_der" || { cleanup_tls_probe; exit 1; }
-    chmod 600 "$peer_public_der"
-    observed_pin=$(sha256sum "$peer_public_der" | awk "{print \$1}") || { cleanup_tls_probe; exit 1; }
-    [ "$observed_pin" = "$peer_pin" ] || { cleanup_tls_probe; exit 1; }
-    printf "version=1\nprotocol=TLSv1.3\nobserved_spki_sha256=%s\nexpected_spki_sha256=%s\n" "$observed_pin" "$peer_pin" > "$receipt_tmp" || { cleanup_tls_probe; exit 1; }
-    chmod 600 "$receipt_tmp"
-    mv "$receipt_tmp" "$txn/direct-probe.receipt" || { cleanup_tls_probe; exit 1; }
-    sync "$txn/direct-probe.receipt" || { cleanup_tls_probe; exit 1; }
-    cleanup_tls_probe
-    printf "RESULT=DIRECT tls_protocol=TLSv1.3 observed_spki_sha256=%s\n" "$observed_pin"
+    profile_epoch=$(sed -n '3s/^profile_epoch=//p' "$state/profiles/active.conf") || exit 1
+    case "$profile_epoch" in ""|*[!0-9]*) exit 1 ;; esac
+    RKA_STATE_ROOT="$state" \
+    RKA_PROFILE_PATH="$state/profiles/direct.conf" \
+    RKA_EXPECTED_PROFILE_EPOCH="$profile_epoch" \
+    RKA_DIRECT_PROBE_ROLE="$runtime_role" \
+    RKA_DIRECT_PROBE_RECEIPT_PATH="$txn/direct-probe.receipt" \
+        nsenter -t 1 -m -- "$active/rka-sidecar" direct-probe
     ;;
 verify)
     tx=$1 expected_boot=$2
@@ -722,6 +723,17 @@ rollback)
     [ "$(tree_hash "$pending")" = "$(cat "$txn/pending.before")" ] || exit 1
     [ "$(metadata_hash "$active")" = "$(cat "$txn/active.metadata.before")" ] || exit 1
     [ "$(metadata_hash "$pending")" = "$(cat "$txn/pending.metadata.before")" ] || exit 1
+    if [ "$(cat "$txn/layout.before" 2>/dev/null)" = FIRST_INSTALL_ABSENT_LAYOUT ]; then
+        for parent in /data/adb/modules /data/adb/modules_update; do
+            [ ! -L "$parent" ] || exit 1
+            if [ -e "$parent" ]; then
+                [ -d "$parent" ] || exit 1
+                [ -z "$(find "$parent" -mindepth 1 -maxdepth 1 -print)" ] || exit 1
+                rmdir "$parent" || exit 1
+            fi
+            [ ! -e "$parent" ] && [ ! -L "$parent" ] || exit 1
+        done
+    fi
     if [ "$(cat "$txn/prior.bind" 2>/dev/null)" = true ]; then
         nsenter -t 1 -m -- mount --bind "$pending" "$active"
         [ "$(nsenter -t 1 -m -- stat -c %d:%i "$active/module.prop")" = "$(stat -c %d:%i "$pending/module.prop")" ] || exit 1
@@ -849,8 +861,8 @@ candidate_staged="$(sed -n 's/.* staged_hash=\([0-9a-f]\{64\}\).*/\1/p' <<<"$can
 complete_pair() {
     donor_pair_result="$(remote "$donor_serial" pair "$transaction_id" DONOR "$candidate_pin" "$candidate_endpoint")" || return 1
     candidate_pair_result="$(remote "$candidate_serial" pair "$transaction_id" CANDIDATE "$donor_pin" "$donor_endpoint")" || return 1
-    remote "$donor_serial" direct-probe "$transaction_id" "$candidate_endpoint" "$candidate_pin" >/dev/null || return 1
-    remote "$candidate_serial" direct-probe "$transaction_id" "$donor_endpoint" "$donor_pin" >/dev/null || return 1
+    remote "$donor_serial" direct-probe "$transaction_id" DONOR >/dev/null || return 1
+    remote "$candidate_serial" direct-probe "$transaction_id" CANDIDATE >/dev/null || return 1
     remote "$donor_serial" verify "$transaction_id" "$donor_boot" >/dev/null || return 1
     remote "$candidate_serial" verify "$transaction_id" "$candidate_boot" >/dev/null || return 1
 }

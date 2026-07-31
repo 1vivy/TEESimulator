@@ -9,6 +9,7 @@ pub mod audit_codec;
 #[doc(hidden)]
 pub mod direct_profile;
 mod identity;
+mod probe;
 mod profile;
 #[doc(hidden)]
 pub mod profile_id;
@@ -29,6 +30,7 @@ pub use direct_profile::{
     DirectReachability, DirectReadiness, DirectReadinessStatus,
 };
 pub use identity::{IdentityError, TransportIdentity};
+pub use probe::probe_pinned_tls;
 pub use profile::{
     Endpoint, PairedProfile, ProfileError, ProfileInput, ProfileRotation, Role, TransportKind,
 };

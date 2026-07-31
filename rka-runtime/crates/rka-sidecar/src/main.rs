@@ -42,6 +42,36 @@ fn main() -> ExitCode {
             }
         };
     }
+    if command.as_deref() == Some(OsStr::new("direct-probe")) {
+        return match rka_sidecar::direct_profile::probe() {
+            Ok(receipt) => {
+                if write!(io::stdout().lock(), "{receipt}").is_ok() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(2)
+                }
+            }
+            Err(status) => {
+                let _ = writeln!(io::stderr().lock(), "direct_probe_status={status}");
+                ExitCode::from(2)
+            }
+        };
+    }
+    if command.as_deref() == Some(OsStr::new("direct-identity")) {
+        return match rka_sidecar::direct_identity::initialize() {
+            Ok(receipt) => {
+                if write!(io::stdout().lock(), "{receipt}").is_ok() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(2)
+                }
+            }
+            Err(status) => {
+                let _ = writeln!(io::stderr().lock(), "direct_identity_status={status}");
+                ExitCode::from(2)
+            }
+        };
+    }
     match execute(command.as_deref()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

@@ -4,9 +4,16 @@ import java.nio.file.Files
 
 internal data class DeployResult(val exitCode: Int, val stdout: String, val stderr: String)
 
-internal enum class KernelProfile(val fixtureName: String) {
+internal enum class KernelProfile(
+    val fixtureName: String,
+    val firstInstall: Boolean = false,
+    val systemOpenSsl: Boolean = true,
+) {
     LEGACY("legacy"),
+    LEGACY_FIRST_INSTALL("legacy", firstInstall = true),
     KSU_NEXT_DUAL("ksu-next-dual"),
+    KSU_NEXT_FIRST_INSTALL("ksu-next-dual", firstInstall = true),
+    KSU_NEXT_FIRST_INSTALL_NO_OPENSSL("ksu-next-dual", firstInstall = true, systemOpenSsl = false),
 }
 
 internal enum class FixtureMutation {
@@ -26,6 +33,8 @@ internal enum class FixtureMutation {
     WEBUI_AMBIGUOUS_OWNER,
     WEBUI_MISSING_OWNER,
     TLS12_ONLY,
+    DIRECT_PROBE_UNAVAILABLE,
+    DIRECT_PROBE_STALE,
     ZYGOTE_WRONG_PARENT,
     ZYGOTE_INVALID_IDENTITY,
     ZYGOTE_AMBIGUOUS,
@@ -43,6 +52,13 @@ internal enum class FixtureMutation {
     NEXT_BOOT_DRIFT,
     NEXT_PROBE_HASH_MISMATCH,
     NEXT_PROBE_CLEANUP_FAILURE,
+    NEXT_LAYOUT_ONE_PARENT,
+    NEXT_LAYOUT_FILE,
+    NEXT_LAYOUT_SYMLINK,
+    NEXT_LAYOUT_HIDDEN_MOUNT,
+    AFTER_INSTALL,
+    INSTALL_ONLY_MODULES_PARENT,
+    INSTALL_ONLY_UPDATE_PARENT,
 }
 
 internal data class ModuleSnapshot(
@@ -77,7 +93,10 @@ internal fun applyFixtureMutation(
         FixtureMutation.WEBUI_WRONG_OWNER -> environment["RKA_FAKE_WEBUI_OWNER"] = "wrong"
         FixtureMutation.WEBUI_AMBIGUOUS_OWNER -> environment["RKA_FAKE_WEBUI_OWNER"] = "ambiguous"
         FixtureMutation.WEBUI_MISSING_OWNER -> environment["RKA_FAKE_WEBUI_OWNER"] = "missing"
-        FixtureMutation.TLS12_ONLY -> Unit
+        FixtureMutation.TLS12_ONLY -> environment["RKA_FAKE_TLS_PROTOCOL"] = "TLS1.2"
+        FixtureMutation.DIRECT_PROBE_UNAVAILABLE ->
+            environment["RKA_FAKE_PROBE_STATUS"] = "unavailable"
+        FixtureMutation.DIRECT_PROBE_STALE -> environment["RKA_FAKE_PROBE_STATUS"] = "stale"
         FixtureMutation.ZYGOTE_WRONG_PARENT -> environment["RKA_FAKE_ZYGOTE"] = "wrong-parent"
         FixtureMutation.ZYGOTE_INVALID_IDENTITY ->
             environment["RKA_FAKE_ZYGOTE"] = "invalid-identity"
@@ -103,6 +122,18 @@ internal fun applyFixtureMutation(
             environment["RKA_FAKE_NEXT_MUTATION"] = "probe-hash-mismatch"
         FixtureMutation.NEXT_PROBE_CLEANUP_FAILURE ->
             environment["RKA_FAKE_NEXT_MUTATION"] = "probe-cleanup-failure"
+        FixtureMutation.NEXT_LAYOUT_ONE_PARENT ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "layout-one-parent"
+        FixtureMutation.NEXT_LAYOUT_FILE -> environment["RKA_FAKE_NEXT_MUTATION"] = "layout-file"
+        FixtureMutation.NEXT_LAYOUT_SYMLINK ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "layout-symlink"
+        FixtureMutation.NEXT_LAYOUT_HIDDEN_MOUNT ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "layout-hidden-mount"
+        FixtureMutation.AFTER_INSTALL -> environment["RKA_FAKE_FAULT"] = "after-install"
+        FixtureMutation.INSTALL_ONLY_MODULES_PARENT ->
+            environment["RKA_FAKE_FAULT"] = "install-only-modules-parent"
+        FixtureMutation.INSTALL_ONLY_UPDATE_PARENT ->
+            environment["RKA_FAKE_FAULT"] = "install-only-update-parent"
     }
 }
 
@@ -153,8 +184,10 @@ internal fun Fixture.hasTls13ProbeReceipts(expectedAttempts: Int): Boolean =
                     }
                 facts["version"] == "1" &&
                     facts["protocol"] == "TLSv1.3" &&
-                    facts["observed_spki_sha256"]?.matches(Regex("[0-9a-f]{64}")) == true &&
-                    facts["observed_spki_sha256"] == facts["expected_spki_sha256"]
+                    facts["profile_sha256"]?.matches(Regex("[0-9a-f]{64}")) == true &&
+                    facts["profile_epoch"] == "7" &&
+                    facts["peer_pin_sha256"]?.matches(Regex("[0-9a-f]{64}")) == true &&
+                    facts["transport"] == "DIRECT"
             }
     }
 

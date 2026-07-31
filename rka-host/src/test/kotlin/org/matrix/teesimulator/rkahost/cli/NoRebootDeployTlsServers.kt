@@ -39,6 +39,17 @@ internal class FixtureTlsServers(private val root: Path) : java.io.Closeable {
                     .start()
             generated.inputStream.use { it.readAllBytes() }
             check(generated.waitFor() == 0)
+            val pin =
+                ProcessBuilder(
+                        "bash",
+                        "-c",
+                        "openssl x509 -in \"${identityRoot.resolve("server.pem")}\" -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | awk '{print ${'$'}1}'",
+                    )
+                    .redirectErrorStream(true)
+                    .start()
+            val encodedPin = pin.inputStream.bufferedReader().readText()
+            check(pin.waitFor() == 0)
+            Files.writeString(identityRoot.resolve("server.pin"), encodedPin)
         }
     }
 

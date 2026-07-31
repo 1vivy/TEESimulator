@@ -78,12 +78,18 @@ direct_ready() {
     request=$state/profiles/pair.request
     key=$state/secrets/transport.key
     trust=$state/trust/transport-trust.pem
+    identity_commit=$state/trust/transport-identity.commit
     [ -f "$request" ] && [ ! -L "$request" ] &&
         [ "$(cat "$request")" = "version=1
 action=PAIR_DIRECT" ] || return 1
     [ -f "$key" ] && [ ! -L "$key" ] && [ "$(stat -c '%u:%a' "$key")" = "$(id -u):600" ] ||
         return 1
     [ "$(wc -c < "$key")" -ge 16 ] && [ "$(wc -c < "$key")" -le 16384 ] || return 1
+    [ -f "$identity_commit" ] && [ ! -L "$identity_commit" ] &&
+        [ "$(stat -c '%u:%a' "$identity_commit")" = "$(id -u):600" ] || return 1
+    grep -Eq '^version=1$' "$identity_commit" &&
+        sed -n '2p' "$identity_commit" | grep -Eq '^spki_sha256=[0-9a-f]{64}$' &&
+        [ "$(wc -l < "$identity_commit")" -eq 2 ] || return 1
     [ -f "$trust" ] && [ ! -L "$trust" ] &&
         [ "$(stat -c '%u:%a' "$trust")" = "$(id -u):600" ] || return 1
     [ "$(sed -n '1p' "$trust")" = '-----BEGIN CERTIFICATE-----' ] &&

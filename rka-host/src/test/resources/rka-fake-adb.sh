@@ -54,6 +54,15 @@ fi
 
 mkdir -p "$root"/{data/adb/modules,data/adb/modules_update,data/adb/teesimulator-rka,data/adb/ksu/bin,data/system,dev,etc,proc,shim,tmp,usr,bin,lib,lib64,run}
 chmod 700 "$root/data/adb/teesimulator-rka"
+if [ "${RKA_FAKE_FIRST_INSTALL:-false}" = true ] && [ ! -e "$root/data/adb/modules/tricky_store" ] && [ ! -e "$root/data/adb/modules_update/tricky_store" ]; then
+    rm -rf "$root/data/adb/modules" "$root/data/adb/modules_update"
+    case "${RKA_FAKE_NEXT_MUTATION:-}" in
+        layout-one-parent) mkdir -p "$root/data/adb/modules" ;;
+        layout-file) : > "$root/data/adb/modules" ;;
+        layout-symlink) ln -s /data/adb/elsewhere "$root/data/adb/modules" ;;
+        layout-hidden-mount) : > "$root/data/adb/teesimulator-rka/.bound" ;;
+    esac
+fi
 
 write_shim() {
     local name=$1
@@ -74,6 +83,8 @@ case "${1-} ${2-}" in
   "--version ") printf "%s\n" "3.2.5-12-g824f2f23 (uapi: 2)" ;;
   "module --help"|"sepolicy --help"|"sepolicy check"|"sepolicy apply") exit 0 ;;
   "module install")
+    if [ "${RKA_FAKE_FAULT:-}" = install-only-modules-parent ]; then mkdir -p /data/adb/modules; exit 1; fi
+    if [ "${RKA_FAKE_FAULT:-}" = install-only-update-parent ]; then mkdir -p /data/adb/modules_update; exit 1; fi
     rm -rf /data/adb/modules_update/tricky_store
     mkdir -p /data/adb/modules_update/tricky_store
     /usr/bin/unzip -q "$3" -d /data/adb/modules_update/tricky_store
@@ -92,8 +103,11 @@ case "${1-} ${2-}" in
   "sepolicy help") printf '%s\n' 'Commands:' '  patch' '  apply' '  check' '  help' ;;
   "sepolicy check"|"sepolicy apply") exit 0 ;;
   "module install")
+    if [ "${RKA_FAKE_FAULT:-}" = install-only-modules-parent ]; then mkdir -p /data/adb/modules; exit 1; fi
+    if [ "${RKA_FAKE_FAULT:-}" = install-only-update-parent ]; then mkdir -p /data/adb/modules_update; exit 1; fi
     rm -rf /data/adb/modules_update/tricky_store
-    mkdir -p /data/adb/modules_update/tricky_store
+    mkdir -p /data/adb/modules/tricky_store /data/adb/modules_update/tricky_store
+    : > /data/adb/modules/tricky_store/update
     /usr/bin/unzip -q "$3" -d /data/adb/modules_update/tricky_store ;;
   *) exit 1 ;;
 esac
@@ -301,23 +315,6 @@ if [ "${1-}" = -c ]; then
   esac
 fi
 exec /usr/bin/head "$@"'
-write_shim openssl '
-if [ "${1-}" = req ]; then
-  keyout= output=
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      -keyout) keyout=$2; shift 2 ;;
-      -out) output=$2; shift 2 ;;
-      *) shift ;;
-    esac
-  done
-  [ -n "$keyout" ] && [ -n "$output" ] || exit 1
-  cp "/tls-fixture/$RKA_FAKE_SERIAL/server.key" "$keyout"
-  cp "/tls-fixture/$RKA_FAKE_SERIAL/server.pem" "$output"
-else
-  exec /usr/bin/openssl "$@"
-fi'
-
 mkdir -p "$root/data/adb/ksu/.metadata"
 cat > "$root/data/adb/ksu/.metadata/ksud.provenance" <<'EOF'
 version=1
@@ -358,8 +355,12 @@ exec bwrap \
     --setenv PATH "$([ "${RKA_FAKE_KSU_PROFILE:-legacy}" = ksu-next-dual ] && printf /data/adb/ksu/bin:/shim:/usr/bin:/bin || printf /shim:/usr/bin:/bin)" \
     --setenv RKA_FAKE_SERIAL "$serial" \
     --setenv RKA_FAKE_KSU_PROFILE "${RKA_FAKE_KSU_PROFILE:-legacy}" \
+    --setenv RKA_FAKE_FIRST_INSTALL "${RKA_FAKE_FIRST_INSTALL:-false}" \
+    --setenv RKA_FAKE_SYSTEM_OPENSSL "${RKA_FAKE_SYSTEM_OPENSSL:-true}" \
     --setenv RKA_FAKE_NEXT_MUTATION "${RKA_FAKE_NEXT_MUTATION:-}" \
     --setenv RKA_FAKE_MISMATCH_PIN "$([ "${RKA_FAKE_MISMATCH_SERIAL:-}" = "$serial" ] && printf true || printf false)" \
+    --setenv RKA_FAKE_TLS_PROTOCOL "${RKA_FAKE_TLS_PROTOCOL:-TLS1.3}" \
+    --setenv RKA_FAKE_PROBE_STATUS "${RKA_FAKE_PROBE_STATUS:-}" \
     --setenv RKA_FAKE_FAULT "${RKA_FAKE_FAULT:-}" \
     --setenv RKA_FAKE_WEBUI_OWNER "${RKA_FAKE_WEBUI_OWNER:-}" \
     --setenv RKA_FAKE_ZYGOTE "${RKA_FAKE_ZYGOTE:-}" \

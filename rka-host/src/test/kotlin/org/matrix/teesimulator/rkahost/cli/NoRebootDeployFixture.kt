@@ -56,6 +56,34 @@ if [ "${'$'}{1-}" = manager-appid ]; then
   case "${'$'}{RKA_FAKE_SERIAL-}" in DONOR_A) printf '10123\n' ;; CANDIDATE_B) printf '10124\n' ;; *) exit 2 ;; esac
   exit 0
 fi
+if [ "${'$'}{1-}" = direct-identity ]; then
+  mkdir -p "${'$'}RKA_STATE_ROOT/secrets" "${'$'}RKA_STATE_ROOT/trust"
+  cp "/tls-fixture/${'$'}RKA_FAKE_SERIAL/server.key" "${'$'}RKA_STATE_ROOT/secrets/transport.key"
+  cp "/tls-fixture/${'$'}RKA_FAKE_SERIAL/server.pem" "${'$'}RKA_STATE_ROOT/trust/transport-self.pem"
+  cp "/tls-fixture/${'$'}RKA_FAKE_SERIAL/server.pem" "${'$'}RKA_STATE_ROOT/trust/transport-trust.pem"
+  cp "/tls-fixture/${'$'}RKA_FAKE_SERIAL/server.pin" "${'$'}RKA_STATE_ROOT/trust/transport.pin"
+  printf 'version=1\nspki_sha256=%s\n' "${'$'}(cat "/tls-fixture/${'$'}RKA_FAKE_SERIAL/server.pin")" > "${'$'}RKA_STATE_ROOT/trust/transport-identity.commit"
+  chmod 600 "${'$'}RKA_STATE_ROOT/secrets/transport.key" "${'$'}RKA_STATE_ROOT/trust/transport-self.pem" "${'$'}RKA_STATE_ROOT/trust/transport-trust.pem" "${'$'}RKA_STATE_ROOT/trust/transport.pin" "${'$'}RKA_STATE_ROOT/trust/transport-identity.commit"
+  printf 'RESULT=IDENTITY spki_sha256=%s\n' "${'$'}(cat "${'$'}RKA_STATE_ROOT/trust/transport.pin")"
+  exit 0
+fi
+if [ "${'$'}{1-}" = direct-probe ]; then
+  [ "${'$'}{RKA_FAKE_PROBE_STATUS-}" != unavailable ] || exit 2
+  if [ "${'$'}{RKA_FAKE_PROBE_STATUS-}" = stale ]; then
+    sed -i 's/^profile_epoch=7${'$'}/profile_epoch=6/' "${'$'}RKA_PROFILE_PATH"
+  fi
+  [ "${'$'}{RKA_FAKE_TLS_PROTOCOL-}" != TLS1.2 ] || exit 2
+  [ "${'$'}{RKA_FAKE_MISMATCH_PIN-false}" != true ] || exit 2
+  profile_sha=${'$'}(sha256sum "${'$'}RKA_PROFILE_PATH" | awk '{print ${'$'}1}')
+  epoch=${'$'}(sed -n '3s/^profile_epoch=//p' "${'$'}RKA_PROFILE_PATH")
+  [ "${'$'}epoch" = "${'$'}RKA_EXPECTED_PROFILE_EPOCH" ] || exit 2
+  pin=${'$'}(sed -n '5s/^peer_spki_sha256=//p' "${'$'}RKA_PROFILE_PATH")
+  pin_sha=${'$'}(printf %s "${'$'}pin" | xxd -r -p | sha256sum | awk '{print ${'$'}1}')
+  printf 'version=1\nprotocol=TLSv1.3\nprofile_sha256=%s\nprofile_epoch=%s\npeer_pin_sha256=%s\ntransport=DIRECT\n' "${'$'}profile_sha" "${'$'}epoch" "${'$'}pin_sha" > "${'$'}RKA_DIRECT_PROBE_RECEIPT_PATH"
+  chmod 600 "${'$'}RKA_DIRECT_PROBE_RECEIPT_PATH"
+  printf 'RESULT=DIRECT protocol=TLSv1.3 profile_sha256=%s\n' "${'$'}profile_sha"
+  exit 0
+fi
 exit 0
 """,
         )
@@ -138,6 +166,10 @@ exit 0
                         environment()["RKA_FAKE_DEVICE_ROOT"] = devices.toString()
                         environment()["RKA_FAKE_TLS_ROOT"] = root.resolve("tls").toString()
                         environment()["RKA_FAKE_KSU_PROFILE"] = kernelProfile.fixtureName
+                        environment()["RKA_FAKE_FIRST_INSTALL"] =
+                            kernelProfile.firstInstall.toString()
+                        environment()["RKA_FAKE_SYSTEM_OPENSSL"] =
+                            kernelProfile.systemOpenSsl.toString()
                         environment()["PATH"] = "$tools:${environment()["PATH"]}"
                         applyFixtureMutation(environment(), activeMutation)
                     }
@@ -259,6 +291,39 @@ os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zi
         listOf("DONOR_A", "CANDIDATE_B").all { serial ->
             val probes = devices.resolve(serial).resolve("root/data/adb/teesimulator-rka/probes")
             !Files.exists(probes) || Files.list(probes).use { it.findAny().isEmpty }
+        }
+
+    fun hasFirstInstallReceipts(): Boolean =
+        listOf("DONOR_A", "CANDIDATE_B").all { serial ->
+            val transaction = latestTransaction(serial)
+            Files.readString(transaction.resolve("layout.before")).trim() ==
+                "FIRST_INSTALL_ABSENT_LAYOUT" &&
+                Files.isRegularFile(
+                    devices
+                        .resolve(serial)
+                        .resolve("root/data/adb/teesimulator-rka/active-underlay/update")
+                ) &&
+                Files.isRegularFile(
+                    devices
+                        .resolve(serial)
+                        .resolve("root/data/adb/modules_update/tricky_store/module.prop")
+                )
+        }
+
+    fun firstInstallFacts(): String =
+        listOf("DONOR_A", "CANDIDATE_B").joinToString(";") { serial ->
+            val transaction = latestTransaction(serial)
+            val adbRoot = devices.resolve(serial).resolve("root/data/adb")
+            "$serial:layout=${Files.readString(transaction.resolve("layout.before")).trim()}," +
+                "active=${Files.exists(adbRoot.resolve("teesimulator-rka/active-underlay/update"))}," +
+                "pending=${Files.exists(adbRoot.resolve("modules_update/tricky_store/module.prop"))}"
+        }
+
+    fun moduleParentsAbsent(): Boolean =
+        listOf("DONOR_A", "CANDIDATE_B").all { serial ->
+            val adbRoot = devices.resolve(serial).resolve("root/data/adb")
+            !Files.exists(adbRoot.resolve("modules")) &&
+                !Files.exists(adbRoot.resolve("modules_update"))
         }
 
     fun hasKsuNextManagerSurfaceReceipts(): Boolean {

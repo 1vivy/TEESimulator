@@ -101,7 +101,9 @@ class NoRebootDeployCommandContractTest {
         assertTrue(pair.contains("peer_spki_sha256"))
         assertTrue(pair.contains("transport=DIRECT"))
         assertTrue(pair.contains("direct-profile.receipt"))
-        assertTrue(script.contains("-tls1_3"))
+        assertTrue(script.contains("\"\$active/rka-sidecar\" direct-probe"))
+        assertTrue(script.contains("\"\$active/rka-sidecar\" direct-identity"))
+        assertFalse(script.contains("openssl"))
     }
 
     @Test

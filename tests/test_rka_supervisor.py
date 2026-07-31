@@ -59,6 +59,29 @@ class RkaSupervisorTest(unittest.TestCase):
         )
         os.chmod(path, 0o600)
 
+    def write_direct_identity(self, state: Path, committed: bool) -> None:
+        secrets = state / "secrets"
+        trust = state / "trust"
+        profiles = state / "profiles"
+        secrets.mkdir(parents=True, exist_ok=True)
+        trust.mkdir(parents=True, exist_ok=True)
+        profiles.mkdir(parents=True, exist_ok=True)
+        key = secrets / "transport.key"
+        certificate = trust / "transport-trust.pem"
+        request = profiles / "pair.request"
+        key.write_text("transport-private-material\n", encoding="ascii")
+        certificate.write_text(
+            "-----BEGIN CERTIFICATE-----\nYWJj\n-----END CERTIFICATE-----\n",
+            encoding="ascii",
+        )
+        request.write_text("version=1\naction=PAIR_DIRECT\n", encoding="ascii")
+        for path in (key, certificate, request):
+            os.chmod(path, 0o600)
+        if committed:
+            marker = trust / "transport-identity.commit"
+            marker.write_text(f"version=1\nspki_sha256={'ab' * 32}\n", encoding="ascii")
+            os.chmod(marker, 0o600)
+
     def fixture(self, role: str | None) -> tuple[TemporaryDirectory[str], Path, Path]:
         temporary = TemporaryDirectory()
         root = Path(temporary.name) / "root"
@@ -114,6 +137,24 @@ class RkaSupervisorTest(unittest.TestCase):
             child_log = (root / "children.log").read_text(encoding="utf-8")
             self.assertIn("--rka-role CANDIDATE", child_log)
             self.assertIn("candidate", child_log)
+        finally:
+            self.clean(root, state)
+            temporary.cleanup()
+
+    def test_direct_runtime_requires_committed_identity_set(self) -> None:
+        temporary, root, state = self.fixture("CANDIDATE")
+        environment = {"RKA_REQUIRE_DIRECT_READY": "true"}
+        try:
+            self.write_direct_identity(state, committed=False)
+            self.assertNotEqual(
+                self.command(root, state, "start", environment=environment).returncode,
+                0,
+            )
+            self.write_direct_identity(state, committed=True)
+            self.assertEqual(
+                self.command(root, state, "start", environment=environment).returncode,
+                0,
+            )
         finally:
             self.clean(root, state)
             temporary.cleanup()

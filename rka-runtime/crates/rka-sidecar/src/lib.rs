@@ -9,6 +9,7 @@ use std::{
 
 use thiserror::Error;
 
+pub mod direct_identity;
 pub mod direct_profile;
 mod provision_activation;
 mod provisioning;

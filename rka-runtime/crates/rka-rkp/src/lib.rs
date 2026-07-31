@@ -47,6 +47,9 @@ pub const fn validate_request(request: &[u8]) -> Result<(), ProvisioningError> {
     Ok(())
 }
 
+pub mod challenge;
+pub mod config;
+
 #[cfg(test)]
 mod tests {
     use super::{MAX_PROVISIONING_BYTES, ProvisioningError, validate_request};

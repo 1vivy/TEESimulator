@@ -1,0 +1,660 @@
+//! Closed HTTP request construction and challenge/configuration state machine.
+
+use std::fs::File;
+use std::io::Read;
+
+use thiserror::Error;
+
+use crate::MAX_PROVISIONING_BYTES;
+use crate::config::{BaseUrl, ConfigError, ProvisioningInfo, parse_fetch_response};
+
+const MAX_CHALLENGE_BYTES: usize = 64;
+
+/// A closed POST request. The transport must not follow redirects.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct HttpRequest<'a> {
+    /// Exact HTTPS URL.
+    pub url: &'a str,
+    /// Exact request headers.
+    pub headers: &'a [(&'a str, &'a str)],
+    /// Bounded request body.
+    pub body: &'a [u8],
+}
+
+/// Owned response returned without redirect processing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct HttpResponse {
+    /// HTTP status code.
+    pub status: u16,
+    /// Response headers.
+    pub headers: Vec<(String, String)>,
+    /// Bounded response body.
+    pub body: Vec<u8>,
+}
+
+impl HttpResponse {
+    #[cfg(test)]
+    const fn ok(body: Vec<u8>) -> Self {
+        Self {
+            status: 200,
+            headers: Vec::new(),
+            body,
+        }
+    }
+}
+
+/// Closed transport abstraction with redirect handling disabled.
+pub trait HttpTransport {
+    /// Sends one POST.
+    fn post(&mut self, request: HttpRequest<'_>) -> Result<HttpResponse, ClientError>;
+}
+
+/// Root-owned storage for the effective provisioning base.
+pub trait EffectiveBaseStore {
+    /// Loads a previously accepted override.
+    fn load(&self) -> Option<BaseUrl>;
+    /// Durably stores an accepted override.
+    fn store(&mut self, base: &BaseUrl) -> Result<(), ClientError>;
+}
+
+/// Entropy used to create a fresh request identifier.
+pub trait EntropySource {
+    /// Fills exactly 128 random bits.
+    fn fill_uuid(&mut self, output: &mut [u8; 16]) -> Result<(), ClientError>;
+}
+
+/// Durable uniqueness journal written before every upload.
+pub trait AttemptJournal {
+    /// Returns false when the identifier was already recorded.
+    fn record(&mut self, request_id: &str) -> Result<bool, ClientError>;
+}
+
+/// Production entropy sourced directly from the kernel.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct OsEntropy;
+
+impl EntropySource for OsEntropy {
+    fn fill_uuid(&mut self, output: &mut [u8; 16]) -> Result<(), ClientError> {
+        File::open("/dev/urandom")
+            .and_then(|mut file| file.read_exact(output))
+            .map_err(|_| ClientError::Entropy)
+    }
+}
+
+/// Parsed bounded challenge and effective base for a provisioning batch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct FetchConfiguration {
+    /// Server freshness challenge.
+    pub challenge: Vec<u8>,
+    /// Effective base after applying a valid override.
+    pub effective_base: BaseUrl,
+}
+
+/// Redacted provisioning client failure.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[non_exhaustive]
+pub enum ClientError {
+    /// The configured base was not a canonical HTTPS root.
+    #[error("invalid provisioning base URL")]
+    InvalidBaseUrl,
+    /// The Task-18 body crossed the fixed boundary.
+    #[error("provisioning request is too large")]
+    RequestTooLarge,
+    /// A response crossed the fixed boundary.
+    #[error("provisioning response is too large")]
+    ResponseTooLarge,
+    /// A challenge was outside 16..=64 bytes.
+    #[error("invalid provisioning challenge")]
+    ChallengeSize,
+    /// A response did not have the exact bounded CBOR shape.
+    #[error("invalid provisioning response")]
+    InvalidResponse,
+    /// A redirect or Location header was returned.
+    #[error("provisioning redirect rejected")]
+    Redirect,
+    /// The response status was not successful.
+    #[error("provisioning server returned failure")]
+    HttpStatus,
+    /// The closed transport failed.
+    #[error("provisioning transport failed")]
+    Transport,
+    /// Kernel or injected entropy failed.
+    #[error("request identifier entropy failed")]
+    Entropy,
+    /// Durable journaling failed.
+    #[error("request identifier journal failed")]
+    Journal,
+    /// Effective-base persistence failed.
+    #[error("effective provisioning base persistence failed")]
+    Store,
+    /// The generated identifier was already journaled.
+    #[error("request identifier collision")]
+    RequestIdCollision,
+}
+
+impl From<ConfigError> for ClientError {
+    fn from(error: ConfigError) -> Self {
+        match error {
+            ConfigError::InvalidValue | ConfigError::InvalidResponse => Self::InvalidResponse,
+            ConfigError::InvalidBaseUrl => Self::InvalidBaseUrl,
+            ConfigError::ChallengeSize => Self::ChallengeSize,
+        }
+    }
+}
+
+/// Provisioning request state machine over injected closed boundaries.
+#[derive(Debug)]
+pub struct ProvisioningHttpClient<T, S, E, J> {
+    snapshot_base: BaseUrl,
+    effective_base: BaseUrl,
+    transport: T,
+    store: S,
+    entropy: E,
+    journal: J,
+}
+
+impl<T: HttpTransport, S: EffectiveBaseStore, E: EntropySource, J: AttemptJournal>
+    ProvisioningHttpClient<T, S, E, J>
+{
+    /// Creates a client, honoring only a previously validated module-owned base.
+    pub fn new(snapshot_base: BaseUrl, boundaries: (T, S, E, J)) -> Self {
+        let (transport, store, entropy, journal) = boundaries;
+        let effective_base = store.load().unwrap_or_else(|| snapshot_base.clone());
+        Self {
+            snapshot_base,
+            effective_base,
+            transport,
+            store,
+            entropy,
+            journal,
+        }
+    }
+
+    /// Fetches a challenge/configuration from the snapshotted donor base.
+    pub fn fetch(&mut self, info: &ProvisioningInfo) -> Result<FetchConfiguration, ClientError> {
+        let url = format!("{}/:fetchEekChain", self.snapshot_base);
+        let body = info.to_cbor()?;
+        let response = self.transport.post(HttpRequest {
+            url: &url,
+            headers: &[
+                ("Accept", "application/cbor"),
+                ("Content-Type", "application/cbor"),
+            ],
+            body: &body,
+        })?;
+        validate_response(&response)?;
+        let (challenge, override_url) = parse_fetch_response(&response.body)?;
+        if let Some(base) = override_url {
+            self.store.store(&base).map_err(|_| ClientError::Store)?;
+            self.effective_base = base;
+        }
+        Ok(FetchConfiguration {
+            challenge,
+            effective_base: self.effective_base.clone(),
+        })
+    }
+
+    /// Posts one Task-18 body after durably recording a fresh `UUIDv4`.
+    pub fn sign(&mut self, body: &[u8], challenge: &[u8]) -> Result<HttpResponse, ClientError> {
+        if body.len() > MAX_PROVISIONING_BYTES {
+            return Err(ClientError::RequestTooLarge);
+        }
+        if !(16..=MAX_CHALLENGE_BYTES).contains(&challenge.len()) {
+            return Err(ClientError::ChallengeSize);
+        }
+        let mut random = [0_u8; 16];
+        self.entropy.fill_uuid(&mut random)?;
+        random[6] = (random[6] & 0x0f) | 0x40;
+        random[8] = (random[8] & 0x3f) | 0x80;
+        let request_id = uuid(&random);
+        if !self
+            .journal
+            .record(&request_id)
+            .map_err(|_| ClientError::Journal)?
+        {
+            return Err(ClientError::RequestIdCollision);
+        }
+        let url = format!(
+            "{}/:signCertificates?challenge={}&request_id={request_id}",
+            self.effective_base,
+            base64_url(challenge)
+        );
+        let response = self.transport.post(HttpRequest {
+            url: &url,
+            headers: &[
+                ("Accept", "application/cbor"),
+                ("Content-Type", "application/cbor"),
+            ],
+            body,
+        })?;
+        validate_response(&response)?;
+        Ok(response)
+    }
+
+    #[cfg(test)]
+    const fn transport(&self) -> &T {
+        &self.transport
+    }
+    #[cfg(test)]
+    const fn store(&self) -> &S {
+        &self.store
+    }
+}
+
+fn validate_response(response: &HttpResponse) -> Result<(), ClientError> {
+    if (300..400).contains(&response.status)
+        || response
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("location"))
+    {
+        return Err(ClientError::Redirect);
+    }
+    if !(200..300).contains(&response.status) {
+        return Err(ClientError::HttpStatus);
+    }
+    if response.body.len() > MAX_PROVISIONING_BYTES {
+        return Err(ClientError::ResponseTooLarge);
+    }
+    Ok(())
+}
+
+fn uuid(bytes: &[u8; 16]) -> String {
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
+}
+
+fn base64_url(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut output = String::new();
+    for chunk in input.chunks(3) {
+        let value = (u32::from(*chunk.first().unwrap_or(&0)) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        output.push(char::from(
+            *TABLE.get(((value >> 18) & 63) as usize).unwrap_or(&b'A'),
+        ));
+        output.push(char::from(
+            *TABLE.get(((value >> 12) & 63) as usize).unwrap_or(&b'A'),
+        ));
+        if chunk.len() > 1 {
+            output.push(char::from(
+                *TABLE.get(((value >> 6) & 63) as usize).unwrap_or(&b'A'),
+            ));
+        }
+        if chunk.len() > 2 {
+            output.push(char::from(
+                *TABLE.get((value & 63) as usize).unwrap_or(&b'A'),
+            ));
+        }
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use super::*;
+    use crate::config::{BaseUrl, ProvisioningInfo};
+
+    #[test]
+    fn challenge_builds_pinned_fetch_and_sign_requests() {
+        let order = Rc::new(RefCell::new(Vec::new()));
+        let transport = FakeTransport::with_order(
+            vec![
+                HttpResponse::ok(fetch_response(
+                    &[0xfb; 16],
+                    Some("https://override.example"),
+                )),
+                HttpResponse::ok(fetch_response(&[0xfb; 16], None)),
+                HttpResponse::ok(Vec::new()),
+            ],
+            Rc::clone(&order),
+        );
+        let mut client = ProvisioningHttpClient::new(
+            BaseUrl::parse("https://snapshot.example").unwrap(),
+            (
+                transport,
+                MemoryStore::default(),
+                FixedEntropy::new([0; 16]),
+                MemoryJournal::with_order(Rc::clone(&order)),
+            ),
+        );
+
+        client
+            .fetch(&ProvisioningInfo::new("fp", 42, 16).unwrap())
+            .unwrap();
+        let fetched = client
+            .fetch(&ProvisioningInfo::new("fp", 42, 16).unwrap())
+            .unwrap();
+        order.borrow_mut().clear();
+        client.sign(&[1, 2, 3], &fetched.challenge).unwrap();
+
+        let calls = client.transport().calls();
+        let [fetch_one, fetch_two, sign] = calls else {
+            panic!("expected two fetches and one signing upload");
+        };
+        assert_eq!(fetch_one.url, "https://snapshot.example/:fetchEekChain");
+        assert_eq!(
+            fetch_one.headers,
+            vec![
+                ("Accept".into(), "application/cbor".into()),
+                ("Content-Type".into(), "application/cbor".into()),
+            ]
+        );
+        assert_eq!(
+            sign.url,
+            "https://override.example/:signCertificates?challenge=-_v7-_v7-_v7-_v7-_v7-w&request_id=00000000-0000-4000-8000-000000000000"
+        );
+        assert_eq!(fetch_two.url, "https://snapshot.example/:fetchEekChain");
+        assert_eq!(sign.body, vec![1, 2, 3]);
+        assert_eq!(
+            client.store().loaded().unwrap().as_str(),
+            "https://override.example"
+        );
+        assert_eq!(&*order.borrow(), &["journal", "upload"]);
+    }
+
+    #[test]
+    fn challenge_generates_fresh_uuid_and_rejects_collision_before_upload() {
+        let mut entropy = FixedEntropy::new([1; 16]);
+        entropy.push([2; 16]);
+        entropy.push([2; 16]);
+        let mut client = ProvisioningHttpClient::new(
+            BaseUrl::parse("https://rkp.example").unwrap(),
+            (
+                FakeTransport::new(vec![
+                    HttpResponse::ok(Vec::new()),
+                    HttpResponse::ok(Vec::new()),
+                ]),
+                MemoryStore::default(),
+                entropy,
+                MemoryJournal::default(),
+            ),
+        );
+        let challenge = [3; 16];
+
+        client.sign(&[], &challenge).unwrap();
+        client.sign(&[], &challenge).unwrap();
+        let error = client.sign(&[], &challenge).unwrap_err();
+
+        assert_eq!(error, ClientError::RequestIdCollision);
+        let [first, second] = client.transport().calls() else {
+            panic!("expected exactly two uploads");
+        };
+        assert_ne!(first.url, second.url);
+    }
+
+    #[test]
+    fn reject_redirect_downgrade() {
+        let redirect = HttpResponse {
+            status: 302,
+            headers: vec![("Location".into(), "http://attacker.example".into())],
+            body: Vec::new(),
+        };
+        let mut client = ProvisioningHttpClient::new(
+            BaseUrl::parse("https://rkp.example").unwrap(),
+            (
+                FakeTransport::new(vec![redirect]),
+                MemoryStore::default(),
+                FixedEntropy::new([0; 16]),
+                MemoryJournal::default(),
+            ),
+        );
+
+        let error = client
+            .fetch(&ProvisioningInfo::new("fp", 42, 16).unwrap())
+            .unwrap_err();
+
+        assert_eq!(error, ClientError::Redirect);
+        assert!(client.store().loaded().is_none());
+    }
+
+    #[test]
+    fn invalid_override_is_closed_without_store_mutation() {
+        let response = fetch_response(&[4; 16], Some("http://rkp.example"));
+        let mut client = ProvisioningHttpClient::new(
+            BaseUrl::parse("https://rkp.example").unwrap(),
+            (
+                FakeTransport::new(vec![HttpResponse::ok(response)]),
+                MemoryStore::default(),
+                FixedEntropy::new([0; 16]),
+                MemoryJournal::default(),
+            ),
+        );
+
+        assert_eq!(
+            client
+                .fetch(&ProvisioningInfo::new("fp", 42, 16).unwrap())
+                .unwrap_err(),
+            ClientError::InvalidBaseUrl
+        );
+        assert!(client.store().loaded().is_none());
+    }
+
+    #[test]
+    fn challenge_and_body_bounds_are_enforced() {
+        let mut client = ProvisioningHttpClient::new(
+            BaseUrl::parse("https://rkp.example").unwrap(),
+            (
+                FakeTransport::new(Vec::new()),
+                MemoryStore::default(),
+                FixedEntropy::new([0; 16]),
+                MemoryJournal::default(),
+            ),
+        );
+        assert_eq!(client.sign(&[], &[0; 15]), Err(ClientError::ChallengeSize));
+        assert_eq!(
+            client.sign(&vec![0; crate::MAX_PROVISIONING_BYTES + 1], &[0; 16]),
+            Err(ClientError::RequestTooLarge)
+        );
+        assert!(client.transport().calls().is_empty());
+    }
+
+    #[test]
+    fn journal_failure_prevents_upload() {
+        let mut client = ProvisioningHttpClient::new(
+            BaseUrl::parse("https://rkp.example").unwrap(),
+            (
+                FakeTransport::new(Vec::new()),
+                MemoryStore::default(),
+                FixedEntropy::new([0; 16]),
+                FailingJournal,
+            ),
+        );
+
+        assert_eq!(client.sign(&[], &[0; 16]), Err(ClientError::Journal));
+        assert!(client.transport().calls().is_empty());
+    }
+
+    #[test]
+    fn response_policy_rejects_location_status_and_oversize() {
+        for response in [
+            HttpResponse {
+                status: 200,
+                headers: vec![("location".into(), "https://other.example".into())],
+                body: Vec::new(),
+            },
+            HttpResponse {
+                status: 500,
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: vec![0; crate::MAX_PROVISIONING_BYTES + 1],
+            },
+        ] {
+            let mut client = ProvisioningHttpClient::new(
+                BaseUrl::parse("https://rkp.example").unwrap(),
+                (
+                    FakeTransport::new(vec![response]),
+                    MemoryStore::default(),
+                    FixedEntropy::new([0; 16]),
+                    MemoryJournal::default(),
+                ),
+            );
+            assert!(
+                client
+                    .fetch(&ProvisioningInfo::new("fp", 42, 16).unwrap())
+                    .is_err()
+            );
+            assert!(client.store().loaded().is_none());
+        }
+    }
+
+    fn fetch_response(challenge: &[u8], url: Option<&str>) -> Vec<u8> {
+        let mut body = vec![if url.is_some() { 0x83 } else { 0x82 }, 0x80];
+        body.push(u8::try_from(challenge.len()).unwrap() | 0x40);
+        body.extend_from_slice(challenge);
+        if let Some(url) = url {
+            body.push(0xa1);
+            body.push(0x70);
+            body.extend_from_slice(b"provisioning_url");
+            body.extend_from_slice(&[0x78, u8::try_from(url.len()).unwrap()]);
+            body.extend_from_slice(url.as_bytes());
+        }
+        body
+    }
+
+    #[derive(Default)]
+    struct MemoryStore(Option<BaseUrl>);
+    impl EffectiveBaseStore for MemoryStore {
+        fn load(&self) -> Option<BaseUrl> {
+            self.0.clone()
+        }
+        fn store(&mut self, base: &BaseUrl) -> Result<(), ClientError> {
+            self.0 = Some(base.clone());
+            Ok(())
+        }
+    }
+    impl MemoryStore {
+        fn loaded(&self) -> Option<BaseUrl> {
+            self.load()
+        }
+    }
+
+    #[derive(Default)]
+    struct MemoryJournal {
+        ids: Vec<String>,
+        order: Option<Rc<RefCell<Vec<&'static str>>>>,
+    }
+    impl AttemptJournal for MemoryJournal {
+        fn record(&mut self, id: &str) -> Result<bool, ClientError> {
+            if let Some(order) = &self.order {
+                order.borrow_mut().push("journal");
+            }
+            if self.ids.iter().any(|seen| seen == id) {
+                return Ok(false);
+            }
+            self.ids.push(id.to_owned());
+            Ok(true)
+        }
+    }
+    struct FailingJournal;
+    impl AttemptJournal for FailingJournal {
+        fn record(&mut self, _id: &str) -> Result<bool, ClientError> {
+            Err(ClientError::Journal)
+        }
+    }
+    impl MemoryJournal {
+        fn with_order(order: Rc<RefCell<Vec<&'static str>>>) -> Self {
+            Self {
+                ids: Vec::new(),
+                order: Some(order),
+            }
+        }
+    }
+
+    struct FixedEntropy(Vec<[u8; 16]>);
+    impl FixedEntropy {
+        fn new(bytes: [u8; 16]) -> Self {
+            Self(vec![bytes])
+        }
+        fn push(&mut self, bytes: [u8; 16]) {
+            self.0.insert(0, bytes);
+        }
+    }
+    impl EntropySource for FixedEntropy {
+        fn fill_uuid(&mut self, output: &mut [u8; 16]) -> Result<(), ClientError> {
+            *output = self.0.pop().ok_or(ClientError::Entropy)?;
+            Ok(())
+        }
+    }
+
+    struct FakeTransport {
+        responses: Vec<HttpResponse>,
+        calls: Vec<OwnedRequest>,
+        order: Option<Rc<RefCell<Vec<&'static str>>>>,
+    }
+    impl FakeTransport {
+        fn new(mut responses: Vec<HttpResponse>) -> Self {
+            responses.reverse();
+            Self {
+                responses,
+                calls: Vec::new(),
+                order: None,
+            }
+        }
+        fn with_order(
+            mut responses: Vec<HttpResponse>,
+            order: Rc<RefCell<Vec<&'static str>>>,
+        ) -> Self {
+            responses.reverse();
+            Self {
+                responses,
+                calls: Vec::new(),
+                order: Some(order),
+            }
+        }
+        fn calls(&self) -> &[OwnedRequest] {
+            &self.calls
+        }
+    }
+    impl HttpTransport for FakeTransport {
+        fn post(&mut self, request: HttpRequest<'_>) -> Result<HttpResponse, ClientError> {
+            if let Some(order) = &self.order {
+                order.borrow_mut().push("upload");
+            }
+            self.calls.push(OwnedRequest {
+                url: request.url.to_owned(),
+                headers: request
+                    .headers
+                    .iter()
+                    .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                    .collect(),
+                body: request.body.to_vec(),
+            });
+            self.responses.pop().ok_or(ClientError::Transport)
+        }
+    }
+    struct OwnedRequest {
+        url: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+}

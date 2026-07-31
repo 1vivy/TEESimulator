@@ -1,10 +1,14 @@
 use super::*;
 use crate::{
-    ValidatedChainClaims, ValidatedChainReceipt, ValidatedReceiptStore,
+    ValidatedChainClaims, ValidatedChainReceipt, ValidatedReceiptRegistry,
     verify_validated_chain_receipts,
 };
 use ring::signature::{Ed25519KeyPair, KeyPair};
-use std::{cell::RefCell, collections::HashSet};
+use std::{
+    cell::RefCell,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 struct MemoryStore {
     fail: bool,
@@ -27,17 +31,6 @@ impl StateStore for MemoryStore {
         }
         self.value.replace(value.to_vec());
         Ok(())
-    }
-}
-
-#[derive(Default)]
-struct ReceiptStore {
-    consumed: RefCell<HashSet<[u8; 32]>>,
-}
-
-impl ValidatedReceiptStore for ReceiptStore {
-    fn consume_once(&self, receipt_identity: &[u8; 32]) -> Result<bool, StateError> {
-        Ok(self.consumed.borrow_mut().insert(*receipt_identity))
     }
 }
 
@@ -93,15 +86,24 @@ fn receipt(order: u8, seed: u8) -> ValidatedChainReceipt {
     ValidatedChainReceipt::new(claims, signature.as_ref().try_into().unwrap())
 }
 
+fn registry() -> (PathBuf, ValidatedReceiptRegistry) {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "rka-lease-receipts-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let registry = ValidatedReceiptRegistry::for_test(&root).unwrap();
+    (root, registry)
+}
+
 #[test]
 fn activation_is_ordered_and_persisted() {
     let batch = RkpLeaseBatch::new(vec![lease(0), lease(1)]).unwrap();
-    let token = verify_validated_chain_receipts(
-        &batch,
-        &[receipt(0, 42), receipt(1, 42)],
-        &ReceiptStore::default(),
-    )
-    .unwrap();
+    let (root, registry) = registry();
+    let token =
+        verify_validated_chain_receipts(&batch, &[receipt(0, 42), receipt(1, 42)], &registry)
+            .unwrap();
     let store = MemoryStore {
         fail: false,
         value: RefCell::new(Vec::new()),
@@ -122,6 +124,7 @@ fn activation_is_ordered_and_persisted() {
             .all(|lease| lease.state == LeaseState::Active)
     );
     assert!(!store.value.borrow().is_empty());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -139,9 +142,8 @@ fn duplicate_and_reordered_batches_are_rejected() {
 #[test]
 fn storage_failure_prevents_activation_exposure() {
     let batch = RkpLeaseBatch::new(vec![lease(0)]).unwrap();
-    let token =
-        verify_validated_chain_receipts(&batch, &[receipt(0, 42)], &ReceiptStore::default())
-            .unwrap();
+    let (root, registry) = registry();
+    let token = verify_validated_chain_receipts(&batch, &[receipt(0, 42)], &registry).unwrap();
     let store = MemoryStore {
         fail: true,
         value: RefCell::new(Vec::new()),
@@ -150,62 +152,7 @@ fn storage_failure_prevents_activation_exposure() {
         batch.activate(token, &store),
         Err(RkpLeaseError::State(StateError::Storage))
     );
-}
-
-#[test]
-fn signed_receipt_mutations_and_wrong_validator_are_rejected() {
-    let batch = RkpLeaseBatch::new(vec![lease(0), lease(1)]).unwrap();
-    let store = ReceiptStore::default();
-    let reordered = [receipt(1, 42), receipt(0, 42)];
-    assert!(matches!(
-        verify_validated_chain_receipts(&batch, &reordered, &store),
-        Err(RkpLeaseError::Certification)
-    ));
-    let mut wrong_spki = claims(1);
-    wrong_spki.leaf_spki_hash = SpkiHash::new([99; 32]);
-    let signature = validator(42).sign(&wrong_spki.canonical_bytes());
-    let wrong_spki = ValidatedChainReceipt::new(wrong_spki, signature.as_ref().try_into().unwrap());
-    assert!(matches!(
-        verify_validated_chain_receipts(&batch, &[receipt(0, 42), wrong_spki], &store),
-        Err(RkpLeaseError::Certification)
-    ));
-    assert!(matches!(
-        verify_validated_chain_receipts(&batch, &[receipt(0, 43), receipt(1, 43)], &store),
-        Err(RkpLeaseError::Certification)
-    ));
-}
-
-#[test]
-fn forged_signature_and_cross_lease_replay_are_rejected() {
-    let batch = RkpLeaseBatch::new(vec![lease(0)]).unwrap();
-    let store = ReceiptStore::default();
-    let forged = ValidatedChainReceipt::new(claims(0), [0; 64]);
-    assert_eq!(
-        verify_validated_chain_receipts(&batch, &[forged], &store).unwrap_err(),
-        RkpLeaseError::Certification
-    );
-
-    let mut replay_target = lease(0);
-    replay_target.metadata.lease_id = LeaseId::new([88; 16]);
-    let replay_target = RkpLeaseBatch::new(vec![replay_target]).unwrap();
-    assert_eq!(
-        verify_validated_chain_receipts(&replay_target, &[receipt(0, 42)], &store).unwrap_err(),
-        RkpLeaseError::Certification
-    );
-}
-
-#[test]
-fn exact_receipt_set_replay_is_rejected() {
-    let receipts = [receipt(0, 42)];
-    let first = RkpLeaseBatch::new(vec![lease(0)]).unwrap();
-    let equivalent = RkpLeaseBatch::new(vec![lease(0)]).unwrap();
-    let store = ReceiptStore::default();
-
-    assert!(verify_validated_chain_receipts(&first, &receipts, &store).is_ok());
-    assert_eq!(
-        verify_validated_chain_receipts(&equivalent, &receipts, &store).unwrap_err(),
-        RkpLeaseError::Certification
-    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 fn public_boundary_is_safe(source: &str) -> bool {

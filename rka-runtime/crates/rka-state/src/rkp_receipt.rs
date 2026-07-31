@@ -6,9 +6,16 @@ use ring::{
     digest::{Context, SHA256, digest},
     signature::{ED25519, UnparsedPublicKey},
 };
+use std::{
+    fs::{File, OpenOptions},
+    io::{ErrorKind, Write},
+    os::unix::fs::OpenOptionsExt,
+    path::{Path, PathBuf},
+};
 
 const DOMAIN: &[u8] = b"RKA-VALIDATED-CHAIN-v1\0";
 const CONSUMPTION_DOMAIN: &[u8] = b"RKA-CONSUMED-RECEIPTS-v1\0";
+const RECEIPT_ROOT: &str = "/data/adb/modules/tricky_store/rka/validated-receipts";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(
@@ -68,8 +75,54 @@ pub struct ValidatedCertificationToken {
     pub(crate) binding_hash: [u8; 32],
 }
 
-pub trait ValidatedReceiptStore {
-    fn consume_once(&self, receipt_identity: &[u8; 32]) -> Result<bool, StateError>;
+#[derive(Debug)]
+pub struct ValidatedReceiptRegistry {
+    root: PathBuf,
+}
+
+impl ValidatedReceiptRegistry {
+    /// Opens the module-owned durable receipt-consumption registry.
+    ///
+    /// # Errors
+    /// Returns a storage error if the fixed registry directory cannot be opened or created.
+    pub fn open() -> Result<Self, StateError> {
+        Self::at(Path::new(RECEIPT_ROOT))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(root: &Path) -> Result<Self, StateError> {
+        Self::at(root)
+    }
+
+    fn at(root: &Path) -> Result<Self, StateError> {
+        std::fs::create_dir_all(root).map_err(|_| StateError::Storage)?;
+        File::open(root)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| StateError::Storage)?;
+        Ok(Self {
+            root: root.to_path_buf(),
+        })
+    }
+
+    fn consume_once(&self, receipt_identity: &[u8; 32]) -> Result<bool, StateError> {
+        let path = self.root.join(hex(receipt_identity)?);
+        let mut tombstone = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => return Ok(false),
+            Err(_) => return Err(StateError::Storage),
+        };
+        tombstone
+            .write_all(receipt_identity)
+            .and_then(|()| tombstone.sync_all())
+            .and_then(|()| File::open(&self.root)?.sync_all())
+            .map_err(|_| StateError::Storage)?;
+        Ok(true)
+    }
 }
 
 impl ValidatedCertificationToken {
@@ -92,7 +145,7 @@ impl ValidatedCertificationToken {
 pub fn verify_validated_chain_receipts(
     pending: &RkpLeaseBatch,
     receipts: &[ValidatedChainReceipt],
-    store: &dyn ValidatedReceiptStore,
+    registry: &ValidatedReceiptRegistry,
 ) -> Result<ValidatedCertificationToken, RkpLeaseError> {
     if receipts.len() != pending.leases.len() || receipts.is_empty() {
         return Err(RkpLeaseError::Certification);
@@ -122,7 +175,7 @@ pub fn verify_validated_chain_receipts(
         .first()
         .ok_or(RkpLeaseError::Certification)?
         .metadata();
-    if !store.consume_once(&receipt_set_identity(receipts))? {
+    if !registry.consume_once(&receipt_set_identity(receipts))? {
         return Err(RkpLeaseError::Certification);
     }
     Ok(ValidatedCertificationToken {
@@ -130,6 +183,15 @@ pub fn verify_validated_chain_receipts(
         chain_hash: first.chain.chain_hash,
         binding_hash: batch_binding(pending),
     })
+}
+
+fn hex(bytes: &[u8]) -> Result<String, StateError> {
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from_digit(u32::from(byte >> 4), 16).ok_or(StateError::Storage)?);
+        encoded.push(char::from_digit(u32::from(byte & 0x0f), 16).ok_or(StateError::Storage)?);
+    }
+    Ok(encoded)
 }
 
 fn receipt_set_identity(receipts: &[ValidatedChainReceipt]) -> [u8; 32] {
@@ -161,3 +223,7 @@ fn batch_binding(batch: &RkpLeaseBatch) -> [u8; 32] {
     hash.copy_from_slice(digest(&SHA256, &bytes).as_ref());
     hash
 }
+
+#[cfg(test)]
+#[path = "rkp_receipt_tests.rs"]
+mod tests;

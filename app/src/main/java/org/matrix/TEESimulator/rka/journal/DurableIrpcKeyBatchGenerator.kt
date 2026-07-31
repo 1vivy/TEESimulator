@@ -30,8 +30,9 @@ class DurableIrpcKeyBatchGenerator(
                     intent,
                     outcome.value.publicKeys().zip(outcome.value.spkiPublicKeys()),
                 )
-            val owner = outcome.value.retain(entries.map { it.handle.copyBytes() })
-            journal.record(intent, entries, owner::clear)
+            outcome.value.retainForJournal(entries.map { it.handle.copyBytes() }) { clear ->
+                journal.record(intent, entries, clear)
+            }
         } else {
             journal.quarantine(intent)
         }

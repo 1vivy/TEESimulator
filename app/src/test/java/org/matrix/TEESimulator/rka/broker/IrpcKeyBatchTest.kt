@@ -37,18 +37,14 @@ class IrpcKeyBatchTest {
     @Test
     fun retainedBlobIsWipedAndRemovedOnClear() {
         val wiped = mutableListOf<ByteArray>()
-        val owner = BrokerKeyBlobOwner { wiped += it }
         val batch =
             IrpcKeyBatch(
                 testIrpcIdentity(),
                 listOf(IrpcGeneratedKey(byteArrayOf(1), testSpki(), byteArrayOf(81, 82, 83, 84))),
-                owner,
+                { wiped += it },
             )
-        batch.retain(listOf(ByteArray(32) { 7 }))
+        batch.retainForJournal(listOf(ByteArray(32) { 7 })) { clear -> clear() }
 
-        owner.clear()
-
-        assertTrue(owner.isEmpty())
         assertTrue(wiped.single().all { it == 0.toByte() })
         assertFalse(batch.toString().toByteArray().containsSubsequence(byteArrayOf(81, 82, 83, 84)))
     }

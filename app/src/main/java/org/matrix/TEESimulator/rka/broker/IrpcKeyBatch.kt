@@ -43,7 +43,7 @@ internal data class IrpcResolvedIdentity(
     }
 }
 
-internal class BrokerKeyBlobOwner(private val onWipe: (ByteArray) -> Unit = {}) : AutoCloseable {
+private class BrokerKeyBlobOwner(private val onWipe: (ByteArray) -> Unit) : AutoCloseable {
     private val blobs = mutableMapOf<String, ByteArray>()
 
     fun retain(handle: ByteArray, key: IrpcGeneratedKey) {
@@ -72,9 +72,10 @@ class IrpcKeyBatch
 internal constructor(
     internal val identity: IrpcResolvedIdentity,
     keys: List<IrpcGeneratedKey>,
-    private val owner: BrokerKeyBlobOwner = BrokerKeyBlobOwner(),
+    onWipe: (ByteArray) -> Unit = {},
 ) {
     private val keys = keys.toList()
+    private val owner = BrokerKeyBlobOwner(onWipe)
 
     init {
         require(keys.size in 1..RkpKeyCount.MAX)
@@ -92,11 +93,11 @@ internal constructor(
 
     fun publicKeyHashes(): List<ByteArray> = publicKeys().map(::sha256)
 
-    internal fun retain(handles: List<ByteArray>): BrokerKeyBlobOwner {
+    internal fun retainForJournal(handles: List<ByteArray>, record: (clear: () -> Unit) -> Unit) {
         require(handles.size == keys.size)
-        return try {
+        try {
             handles.zip(keys).forEach { (handle, key) -> owner.retain(handle, key) }
-            owner
+            record(owner::clear)
         } catch (failure: RuntimeException) {
             wipe()
             throw failure

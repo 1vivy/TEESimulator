@@ -29,7 +29,7 @@ pub use rkp_lease::{
 };
 pub use rkp_receipt::{
     ValidatedCertificationToken, ValidatedChainClaims, ValidatedChainReceipt,
-    ValidatedReceiptStore, verify_validated_chain_receipts,
+    ValidatedReceiptRegistry, verify_validated_chain_receipts,
 };
 pub use sensitive::SensitiveStateStore;
 

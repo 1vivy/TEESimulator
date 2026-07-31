@@ -9,6 +9,7 @@ description = "Separate Android sidecar executable for TEESimulator RKA."
 publish = false
 
 [dependencies]
+rka-ksu-manager = { version = "=0.1.0", path = "../rka-ksu-manager" }
 rka-protocol = { version = "=0.1.0", path = "../rka-protocol" }
 rka-rkp = { version = "=0.1.0", path = "../rka-rkp" }
 rka-state = { version = "=0.1.0", path = "../rka-state" }

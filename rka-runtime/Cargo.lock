@@ -994,6 +994,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rka-ksu-manager"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rustix",
+ "thiserror",
+]
+
+[[package]]
 name = "rka-protocol"
 version = "0.1.0"
 dependencies = [
@@ -1020,6 +1029,7 @@ name = "rka-sidecar"
 version = "0.1.0"
 dependencies = [
  "ring",
+ "rka-ksu-manager",
  "rka-protocol",
  "rka-rkp",
  "rka-state",

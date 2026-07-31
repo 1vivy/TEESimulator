@@ -4,6 +4,11 @@ import java.nio.file.Files
 
 internal data class DeployResult(val exitCode: Int, val stdout: String, val stderr: String)
 
+internal enum class KernelProfile(val fixtureName: String) {
+    LEGACY("legacy"),
+    KSU_NEXT_DUAL("ksu-next-dual"),
+}
+
 internal enum class FixtureMutation {
     INCOMPATIBLE_CANDIDATE,
     FAIL_DONOR_DEPLOY,
@@ -25,6 +30,17 @@ internal enum class FixtureMutation {
     ZYGOTE_INVALID_IDENTITY,
     ZYGOTE_AMBIGUOUS,
     ZYGOTE_MISSING,
+    NEXT_APPID_ZERO,
+    NEXT_APPID_AMBIGUOUS,
+    NEXT_PACKAGES_MALICIOUS,
+    NEXT_COMPONENT_WRONG,
+    NEXT_SIGNING_WRONG,
+    NEXT_HELP_DRIFT,
+    NEXT_BINARY_DRIFT,
+    NEXT_VERSION_DRIFT,
+    NEXT_APPID_ERROR,
+    NEXT_UID_MISMATCH,
+    NEXT_BOOT_DRIFT,
 }
 
 internal data class ModuleSnapshot(
@@ -65,6 +81,22 @@ internal fun applyFixtureMutation(
             environment["RKA_FAKE_ZYGOTE"] = "invalid-identity"
         FixtureMutation.ZYGOTE_AMBIGUOUS -> environment["RKA_FAKE_ZYGOTE"] = "ambiguous"
         FixtureMutation.ZYGOTE_MISSING -> environment["RKA_FAKE_ZYGOTE"] = "missing"
+        FixtureMutation.NEXT_APPID_ZERO -> environment["RKA_FAKE_NEXT_MUTATION"] = "appid-zero"
+        FixtureMutation.NEXT_APPID_AMBIGUOUS ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "appid-ambiguous"
+        FixtureMutation.NEXT_PACKAGES_MALICIOUS ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "packages-malicious"
+        FixtureMutation.NEXT_COMPONENT_WRONG ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "component-wrong"
+        FixtureMutation.NEXT_SIGNING_WRONG ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "signing-wrong"
+        FixtureMutation.NEXT_HELP_DRIFT -> environment["RKA_FAKE_NEXT_MUTATION"] = "help-drift"
+        FixtureMutation.NEXT_BINARY_DRIFT -> environment["RKA_FAKE_NEXT_MUTATION"] = "binary-drift"
+        FixtureMutation.NEXT_VERSION_DRIFT ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "version-drift"
+        FixtureMutation.NEXT_APPID_ERROR -> environment["RKA_FAKE_NEXT_MUTATION"] = "appid-error"
+        FixtureMutation.NEXT_UID_MISMATCH -> environment["RKA_FAKE_NEXT_MUTATION"] = "uid-mismatch"
+        FixtureMutation.NEXT_BOOT_DRIFT -> environment["RKA_FAKE_NEXT_MUTATION"] = "boot-drift"
     }
 }
 

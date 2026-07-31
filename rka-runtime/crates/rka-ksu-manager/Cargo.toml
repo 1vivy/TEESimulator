@@ -1,0 +1,36 @@
+[package]
+name = "rka-ksu-manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Read-only KernelSU manager appid probe."
+publish = false
+
+[features]
+default = ["android-syscall-skip-miri"]
+android-syscall-skip-miri = []
+
+[dependencies]
+libc.workspace = true
+rustix.workspace = true
+thiserror.workspace = true
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+print_stderr = "warn"
+print_stdout = "warn"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+unused_must_use = "deny"

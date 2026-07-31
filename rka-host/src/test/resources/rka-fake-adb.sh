@@ -36,7 +36,7 @@ if [ "$mode" = deploy ] && [ "${RKA_FAKE_FAIL_DEPLOY:-}" = "$serial" ]; then
     exit 1
 fi
 
-mkdir -p "$root"/{data/adb/modules,data/adb/modules_update,data/adb/teesimulator-rka,dev,etc,proc,shim,tmp,usr,bin,lib,lib64,run}
+mkdir -p "$root"/{data/adb/modules,data/adb/modules_update,data/adb/teesimulator-rka,data/adb/ksu/bin,data/system,dev,etc,proc,shim,tmp,usr,bin,lib,lib64,run}
 chmod 700 "$root/data/adb/teesimulator-rka"
 
 write_shim() {
@@ -47,6 +47,7 @@ write_shim() {
 }
 
 write_shim id 'if [ "${1-}" = -u ]; then printf "0\n"; else /usr/bin/id "$@"; fi'
+write_shim chown 'exit 0'
 write_shim ksud '
 case "${1-} ${2-}" in
   "--version ") printf "%s\n" "3.2.5-12-g824f2f23 (uapi: 2)" ;;
@@ -58,20 +59,67 @@ case "${1-} ${2-}" in
     ;;
   *) exit 1 ;;
 esac'
+if [ "${RKA_FAKE_KSU_PROFILE:-legacy}" = ksu-next-dual ]; then
+    cat > "$root/data/adb/ksud" <<'EOF'
+#!/bin/sh
+case "${1-} ${2-}" in
+  "--version ")
+    if [ "${RKA_FAKE_NEXT_MUTATION:-}" = version-drift ]; then printf '%s\n' 'ksud 3.3.1 (uapi: 2)'; else printf '%s\n' 'ksud 3.3.0 (uapi: 2)'; fi ;;
+  "module help")
+    printf '%s\n' 'Commands:' '  install' '  restore' '  uninstall' '  enable' '  disable' '  action' '  metamodule' '  list' '  config'
+    [ "${RKA_FAKE_NEXT_MUTATION:-}" = help-drift ] || printf '%s\n' '  help' ;;
+  "sepolicy help") printf '%s\n' 'Commands:' '  patch' '  apply' '  check' '  help' ;;
+  "sepolicy check"|"sepolicy apply") exit 0 ;;
+  "module install")
+    rm -rf /data/adb/modules_update/tricky_store
+    mkdir -p /data/adb/modules_update/tricky_store
+    /usr/bin/unzip -q "$3" -d /data/adb/modules_update/tricky_store ;;
+  *) exit 1 ;;
+esac
+EOF
+    chmod 755 "$root/data/adb/ksud"
+    ln -sfn /data/adb/ksud "$root/data/adb/ksu/bin/ksud"
+fi
 write_shim sha256sum '
-if [ "${1-}" = /shim/ksud ]; then
+if [ "${1-}" = /proc/sys/kernel/random/boot_id ] && [ "${RKA_FAKE_NEXT_MUTATION:-}" = boot-drift ] && [ -f /data/adb/teesimulator-rka/.boot-drift ]; then
+  printf "%s  %s\n" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "$1"
+elif [ "${1-}" = /data/adb/ksud ]; then
+  if [ "${RKA_FAKE_NEXT_MUTATION:-}" = binary-drift ]; then digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; else digest=f4359553a597955956b97e86277e08bc426f644de0dba5ff13da562fba29c55d; fi
+  printf "%s  %s\n" "$digest" "$1"
+elif [ "${1-}" = /shim/ksud ]; then
   printf "%s  %s\n" a75099ef6dd9eb5f528df2fdf1aaa2eaa080af3df70b6c69216d28778a8c66c9 "$1"
 else
   exec /usr/bin/sha256sum "$@"
 fi'
-write_shim cmd 'printf "%s\n" me.weishu.kernelsu/.ui.MainActivity'
+write_shim cmd '
+if [ "${RKA_FAKE_KSU_PROFILE:-legacy}" = ksu-next-dual ]; then
+  printf "%s\n" com.rifsxd.ksunext/.ui.MainActivity
+else
+  printf "%s\n" me.weishu.kernelsu/.ui.MainActivity
+fi'
 write_shim dumpsys '
+if [ "${1-} ${2-}" = "package com.rifsxd.ksunext" ]; then
+  if [ "${RKA_FAKE_NEXT_MUTATION:-}" = uid-mismatch ]; then package_uid=10125; else package_uid=10123; fi
+  printf "%s\n" "versionName=v3.3.0" "versionCode=33214" "  userId=$package_uid"
+  [ "${RKA_FAKE_NEXT_MUTATION:-}" = signing-wrong ] || printf "%s\n" "  signingDetails=SigningDetails{fixture-donor}"
+  if [ "${RKA_FAKE_NEXT_MUTATION:-}" = component-wrong ]; then exported=false; else exported=true; fi
+  printf "%s\n" "  activity com.rifsxd.ksunext/.ui.MainActivity exported=$exported" "  activity com.rifsxd.ksunext/.ui.webui.WebUIActivity exported=false"
+  exit 0
+fi
+if [ "${1-} ${2-}" = "package org.example.headless" ]; then
+  printf "%s\n" "versionName=fixture" "versionCode=1" "  userId=10124" "  signingDetails=SigningDetails{fixture-candidate}"
+  exit 0
+fi
 if [ "${1-} ${2-}" = "package me.weishu.kernelsu" ]; then
   printf "%s\n" "versionName=v3.2.5-12-g824f2f23" "versionCode=32537"
   exit 0
 fi
 [ "${1-} ${2-} ${3-}" = "activity -a services" ] || exit 1
-client="201:me.weishu.kernelsu/u0a123"
+if [ "${RKA_FAKE_KSU_PROFILE:-legacy}" = ksu-next-dual ]; then
+  client="201:com.rifsxd.ksunext/u0a123"
+else
+  client="201:me.weishu.kernelsu/u0a123"
+fi
 case "${RKA_FAKE_WEBUI_OWNER:-}" in
   wrong) client="211:com.example.unrelated/u0a124" ;;
   missing) client= ;;
@@ -93,12 +141,13 @@ if [ "${RKA_FAKE_WEBUI_OWNER:-}" = ambiguous ]; then
     "    processName=com.google.android.webview:sandboxed_process0" \
     "    isolatedProc=ProcessRecord{eee 302:com.google.android.webview:sandboxed_process0/u0i2}" \
     "    Bindings:" \
-    "      * Client AppBindRecord{ggg ProcessRecord{fff 201:me.weishu.kernelsu/u0a123}}"
+    "      * Client AppBindRecord{ggg ProcessRecord{fff 201:${client#*:}}}"
 fi'
 write_shim pidof '
 case "${1-}" in
   ksud) printf "101\n" ;;
   me.weishu.kernelsu) printf "201\n" ;;
+  com.rifsxd.ksunext) printf "201\n" ;;
   com.google.android.webview:sandboxed_process0)
     if [ "${RKA_FAKE_WEBUI_OWNER:-}" = ambiguous ]; then printf "301 302\n"; else printf "301\n"; fi ;;
   webview_zygote)
@@ -149,6 +198,10 @@ write_shim stat '
 last=
 for value in "$@"; do last=$value; done
 case "$last" in
+  /data/adb/teesimulator-rka/probes/*.manager-appid)
+    if [ "${1-}" = -c ] && [ "${2-}" = %u:%g:%a ]; then printf "0:0:700\n"; exit 0; fi ;;
+  /data/adb/ksud)
+    if [ "${1-}" = -c ] && [ "${2-}" = %u:%g:%a ]; then printf "0:0:755\n"; exit 0; fi ;;
   /data/adb/ksu/.metadata/ksud.provenance)
     if [ "${1-}" = -c ] && [ "${2-}" = %u:%a ]; then printf "0:600\n"; exit 0; fi ;;
   /data/adb/modules/tricky_store/module.prop|/data/adb/modules_update/tricky_store/module.prop)
@@ -165,6 +218,12 @@ case "$last" in
     fi ;;
 esac
 exec /usr/bin/stat "$@"'
+write_shim ls '
+if [ "${1-}" = -Zd ] && [ "${2-}" = /data/adb/ksud ]; then
+  printf "u:object_r:ksu_file:s0 %s\n" "$2"
+else
+  exec /usr/bin/ls "$@"
+fi'
 write_shim cp '
 if [ "${RKA_FAKE_FAULT:-}" = active-copy ] && [ "${1-}" = -a ] && [ "${2-}" = /data/adb/modules/tricky_store ]; then exit 1; fi
 exec /usr/bin/cp "$@"'
@@ -195,7 +254,8 @@ case "${1-}" in
 esac'
 write_shim cat '
 case "${1-}" in
-  /proc/201/cmdline) printf "me.weishu.kernelsu\\0" ;;
+  /proc/201/cmdline)
+    if [ "${RKA_FAKE_KSU_PROFILE:-legacy}" = ksu-next-dual ]; then printf "com.rifsxd.ksunext\\0"; else printf "me.weishu.kernelsu\\0"; fi ;;
   /proc/301/cmdline|/proc/302/cmdline) printf "com.google.android.webview:sandboxed_process0\\0" ;;
   *) exec /usr/bin/cat "$@" ;;
 esac'
@@ -248,6 +308,18 @@ sepolicy_cli=true
 EOF
 chmod 600 "$root/data/adb/ksu/.metadata/ksud.provenance"
 
+if [ "${RKA_FAKE_KSU_PROFILE:-legacy}" = ksu-next-dual ]; then
+    if [ "$serial" = DONOR_A ]; then
+        printf 'com.rifsxd.ksunext 10123 0 /data/user/0/com.rifsxd.ksunext default:targetSdkVersion=36 none 0 0 1\n' > "$root/data/system/packages.list"
+    else
+        printf 'org.example.headless 10124 0 /data/user/0/org.example.headless default:targetSdkVersion=36 none 0 0 1\n' > "$root/data/system/packages.list"
+    fi
+    case "${RKA_FAKE_NEXT_MUTATION:-}" in
+        appid-ambiguous) printf 'org.example.second 110123 0 /data/user/0/org.example.second default none 0 0 1\n' >> "$root/data/system/packages.list" ;;
+        packages-malicious) printf '../evil 10123\n' >> "$root/data/system/packages.list" ;;
+    esac
+fi
+
 shift 7
 exec bwrap \
     --bind "$root" / \
@@ -262,8 +334,10 @@ exec bwrap \
     --dev /dev \
     --unshare-all \
     --share-net \
-    --setenv PATH /shim:/usr/bin:/bin \
+    --setenv PATH "$([ "${RKA_FAKE_KSU_PROFILE:-legacy}" = ksu-next-dual ] && printf /data/adb/ksu/bin:/shim:/usr/bin:/bin || printf /shim:/usr/bin:/bin)" \
     --setenv RKA_FAKE_SERIAL "$serial" \
+    --setenv RKA_FAKE_KSU_PROFILE "${RKA_FAKE_KSU_PROFILE:-legacy}" \
+    --setenv RKA_FAKE_NEXT_MUTATION "${RKA_FAKE_NEXT_MUTATION:-}" \
     --setenv RKA_FAKE_MISMATCH_PIN "$([ "${RKA_FAKE_MISMATCH_SERIAL:-}" = "$serial" ] && printf true || printf false)" \
     --setenv RKA_FAKE_FAULT "${RKA_FAKE_FAULT:-}" \
     --setenv RKA_FAKE_WEBUI_OWNER "${RKA_FAKE_WEBUI_OWNER:-}" \

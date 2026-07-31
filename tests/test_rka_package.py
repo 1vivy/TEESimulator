@@ -270,6 +270,7 @@ class RkaPackageTest(unittest.TestCase):
         manifest = self.parse_manifest(RUNTIME_MANIFEST)
         self.assertEqual(manifest, {
             "schema": "1", "roles": "LOCAL|DONOR|CANDIDATE", "sidecar_abi": "arm64-v8a",
+            "manager_appid_probe": "rka-sidecar:manager-appid",
             "activation": "staged-by-installer", "runtime_state": "external-root-only",
             "archive_entries": manifest["archive_entries"], "archive_executables": manifest["archive_executables"],
         })

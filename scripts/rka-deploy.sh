@@ -6,6 +6,7 @@ umask 077
 
 readonly REMOTE_ZIP='/data/adb/teesimulator-rka/upload/role-neutral-release.zip'
 readonly STATE_ROOT='/data/adb/teesimulator-rka'
+readonly KSU_NEXT_PROFILE='KSU_NEXT_330'
 
 fail() {
     printf 'RESULT=%s\n' "$1" >&2
@@ -130,6 +131,12 @@ expected_manager_version=v3.2.5-12-g824f2f23
 expected_manager_code=32537
 expected_ksud_sha=a75099ef6dd9eb5f528df2fdf1aaa2eaa080af3df70b6c69216d28778a8c66c9
 expected_source=824f2f235d37dac7f06b31869a138ee7a9309a43
+next_version="ksud 3.3.0 (uapi: 2)"
+next_sha=f4359553a597955956b97e86277e08bc426f644de0dba5ff13da562fba29c55d
+next_reference=3b18216f71df189ab3d1b1ce0bdb21be1268e771
+next_manager=com.rifsxd.ksunext
+next_activity=com.rifsxd.ksunext/.ui.MainActivity
+next_webui=com.rifsxd.ksunext/.ui.webui.WebUIActivity
 tree_hash() {
     path=$1
     if [ ! -e "$path" ] && [ ! -L "$path" ]; then printf ABSENT; return; fi
@@ -208,6 +215,32 @@ preflight)
     [ "$(id -u)" = 0 ] || { printf "RESULT=INCOMPATIBLE reason=ROOT\n"; exit; }
     ksud=$(command -v ksud) || { printf "RESULT=INCOMPATIBLE reason=KSUD_MISSING\n"; exit; }
     version=$(ksud --version 2>/dev/null | head -n 1) || :
+    if [ "$version" = "$next_version" ]; then
+        [ "$ksud" = /data/adb/ksu/bin/ksud ] || { printf "RESULT=INCOMPATIBLE reason=KSUD_LAUNCHER\n"; exit; }
+        [ "$(readlink -f "$ksud")" = /data/adb/ksud ] || { printf "RESULT=INCOMPATIBLE reason=KSUD_PATH\n"; exit; }
+        [ "$(stat -c %u:%g:%a /data/adb/ksud)" = 0:0:755 ] || { printf "RESULT=INCOMPATIBLE reason=KSUD_METADATA\n"; exit; }
+        [ "$(ls -Zd /data/adb/ksud | awk '{print $1}')" = u:object_r:ksu_file:s0 ] || { printf "RESULT=INCOMPATIBLE reason=KSUD_CONTEXT\n"; exit; }
+        [ "$(sha256sum /data/adb/ksud | awk '{print $1}')" = "$next_sha" ] || { printf "RESULT=INCOMPATIBLE reason=KSUD_BINARY\n"; exit; }
+        module_tree=$(ksud module help 2>/dev/null | sed -n 's/^  \([a-z][a-z-]*\).*$/\1/p' | tr '\n' ' ' | sed 's/ $//') || :
+        [ "$module_tree" = "install restore uninstall enable disable action metamodule list config help" ] || { printf "RESULT=INCOMPATIBLE reason=MODULE_CLI\n"; exit; }
+        sepolicy_tree=$(ksud sepolicy help 2>/dev/null | sed -n 's/^  \([a-z][a-z-]*\).*$/\1/p' | tr '\n' ' ' | sed 's/ $//') || :
+        [ "$sepolicy_tree" = "patch apply check help" ] || { printf "RESULT=INCOMPATIBLE reason=SEPOLICY_CLI\n"; exit; }
+        for path in /data/adb/modules /data/adb/modules_update; do
+            [ -d "$path" ] && [ ! -L "$path" ] || { printf "RESULT=INCOMPATIBLE reason=MODULE_LAYOUT\n"; exit; }
+        done
+        if [ -e /data/adb/metamodule ] || [ -L /data/adb/metamodule ]; then
+            [ -L /data/adb/metamodule ] || { printf "RESULT=INCOMPATIBLE reason=METAMODULE_LAYOUT\n"; exit; }
+            case "$(readlink -f /data/adb/metamodule)" in /data/adb/modules/*) ;; *) printf "RESULT=INCOMPATIBLE reason=METAMODULE_LAYOUT\n"; exit ;; esac
+        fi
+        init_ns=$(readlink /proc/1/ns/mnt) || { printf "RESULT=INCOMPATIBLE reason=INIT_NAMESPACE\n"; exit; }
+        [ -n "$init_ns" ] || { printf "RESULT=INCOMPATIBLE reason=MOUNT_SEMANTICS\n"; exit; }
+        for command in base64 find head lsattr logcat nsenter openssl sha256sum stat timeout toybox xxd; do
+            command -v "$command" >/dev/null 2>&1 || { printf "RESULT=INCOMPATIBLE reason=DEPLOY_TOOLING\n"; exit; }
+        done
+        boot_hash=$(sha256sum /proc/sys/kernel/random/boot_id | awk "{print \$1}")
+        printf "RESULT=COMPATIBLE profile=KSU_NEXT_330 boot_hash=%s binary_evidence=exact-observed-binary binary_sha256=%s reference_evidence=reference-source reference_commit=%s markers=update,disable,remove metamodule=single-active-symlink\n" "$boot_hash" "$next_sha" "$next_reference"
+        exit
+    fi
     [ "$version" = "$expected_version" ] || { printf "RESULT=INCOMPATIBLE reason=KSUD_VERSION\n"; exit; }
     [ "$(sha256sum "$ksud" | awk "{print \$1}")" = "$expected_ksud_sha" ] || { printf "RESULT=INCOMPATIBLE reason=KSUD_BINARY\n"; exit; }
     ksud module --help >/dev/null 2>&1 || { printf "RESULT=INCOMPATIBLE reason=MODULE_CLI\n"; exit; }
@@ -246,6 +279,66 @@ sepolicy_cli=true" ] || { printf "RESULT=INCOMPATIBLE reason=KSUD_PROVENANCE\n";
     fi
     boot_hash=$(sha256sum /proc/sys/kernel/random/boot_id | awk "{print \$1}")
     printf "RESULT=COMPATIBLE boot_hash=%s active_hash=%s pending_hash=%s bind_hash=%s\n" "$boot_hash" "$(tree_hash "$active")" "$(tree_hash "$pending")" "$(awk -v p="$active" "\$5 == p {print \$1 \"|\" \$4}" /proc/1/mountinfo | sha256sum | awk "{print \$1}")"
+    ;;
+READ_ONLY_PROBE_TRANSFER)
+    tx=$1 probe=$2 expected_probe_sha=$3 role=$4
+    case "$tx$expected_probe_sha" in *[!A-Za-z0-9._-]*) exit 2 ;; esac
+    case "$role" in DONOR|CANDIDATE) ;; *) exit 2 ;; esac
+    [ "$probe" = "$state/probes/$tx.$role.manager-appid" ] || exit 2
+    [ -f "$probe" ] && [ ! -L "$probe" ] || exit 1
+    chown 0:0 "$probe"
+    chmod 700 "$probe"
+    [ "$(sha256sum "$probe" | awk '{print $1}')" = "$expected_probe_sha" ] || { rm -f "$probe"; exit 1; }
+    printf 'RESULT=READ_ONLY_PROBE_TRANSFER sha256=%s\n' "$expected_probe_sha"
+    ;;
+manager-probe)
+    tx=$1 probe=$2 expected_probe_sha=$3 expected_boot=$4 role=$5
+    case "$tx$expected_probe_sha" in *[!A-Za-z0-9._-]*) exit 2 ;; esac
+    case "$role" in DONOR|CANDIDATE) ;; *) exit 2 ;; esac
+    [ "$(printf %s "$expected_probe_sha" | wc -c)" -eq 64 ] || exit 2
+    expected_probe="$state/probes/$tx.$role.manager-appid"
+    [ "$probe" = "$expected_probe" ] && [ -f "$probe" ] && [ ! -L "$probe" ] || exit 1
+    cleanup_probe() { rm -f "$probe"; }
+    trap cleanup_probe EXIT HUP INT TERM
+    [ "$(stat -c %u:%g:%a "$probe")" = 0:0:700 ] || exit 1
+    [ "$(sha256sum "$probe" | awk '{print $1}')" = "$expected_probe_sha" ] || exit 1
+    [ "$(sha256sum /proc/sys/kernel/random/boot_id | awk '{print $1}')" = "$expected_boot" ] || exit 1
+    appid=$($probe manager-appid 2>/dev/null) || { printf "RESULT=INCOMPATIBLE reason=MANAGER_APPID_PROBE\n"; exit; }
+    case "$appid" in 0|*[!0-9]*) printf "RESULT=INCOMPATIBLE reason=MANAGER_APPID_INVALID\n"; exit ;; esac
+    [ "$appid" -lt 100000 ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_APPID_INVALID\n"; exit; }
+    packages=/data/system/packages.list
+    [ -f "$packages" ] && [ ! -L "$packages" ] && [ "$(wc -c < "$packages")" -le 1048576 ] || { printf "RESULT=INCOMPATIBLE reason=PACKAGES_LIST\n"; exit; }
+    awk 'NF < 2 || $1 !~ /^[A-Za-z0-9._]+$/ || $2 !~ /^[0-9]+$/ {exit 1}' "$packages" || { printf "RESULT=INCOMPATIBLE reason=PACKAGES_LIST\n"; exit; }
+    matches=$(awk -v appid="$appid" 'NF >= 2 && $1 ~ /^[A-Za-z0-9._]+$/ && $2 ~ /^[0-9]+$/ && ($2 % 100000) == appid {print $1 "|" $2}' "$packages") || :
+    [ "$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l)" -eq 1 ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_PACKAGE_AMBIGUOUS\n"; exit; }
+    package=${matches%%|*}; package_uid=${matches#*|}
+    [ $((package_uid % 100000)) -eq "$appid" ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_UID_MISMATCH\n"; exit; }
+    package_dump=$(dumpsys package "$package" 2>/dev/null) || :
+    package_dump_uid=$(printf '%s\n' "$package_dump" | sed -n 's/^ *userId=//p')
+    [ "$package_dump_uid" = "$package_uid" ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_UID_MISMATCH\n"; exit; }
+    signing=$(printf '%s\n' "$package_dump" | sed -n -e 's/^ *signatures=//p' -e 's/^ *signingDetails=//p')
+    [ -n "$signing" ] && [ "$(printf '%s\n' "$signing" | wc -l)" -eq 1 ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_SIGNING_METADATA\n"; exit; }
+    signing_sha=$(printf %s "$signing" | sha256sum | awk '{print $1}')
+    surface=HEADLESS_AUTHORIZED_MANAGER
+    if [ "$package" = "$next_manager" ]; then
+        activity=$(cmd package resolve-activity --brief "$next_activity" 2>/dev/null | tail -n 1) || :
+        [ "$activity" = "$next_activity" ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_ACTIVITY\n"; exit; }
+        printf '%s\n' "$package_dump" | grep -Fq 'versionName=v3.3.0' || { printf "RESULT=INCOMPATIBLE reason=MANAGER_VERSION\n"; exit; }
+        printf '%s\n' "$package_dump" | grep -Eq 'versionCode=33214([[:space:]]|$)' || { printf "RESULT=INCOMPATIBLE reason=MANAGER_CODE\n"; exit; }
+        printf '%s\n' "$package_dump" | grep -Fqx '  activity com.rifsxd.ksunext/.ui.MainActivity exported=true' || { printf "RESULT=INCOMPATIBLE reason=MANAGER_COMPONENT\n"; exit; }
+        printf '%s\n' "$package_dump" | grep -Fqx '  activity com.rifsxd.ksunext/.ui.webui.WebUIActivity exported=false' || { printf "RESULT=INCOMPATIBLE reason=WEBUI_COMPONENT\n"; exit; }
+        surface=KSU_NEXT_MANAGER
+    fi
+    [ "$(sha256sum /proc/sys/kernel/random/boot_id | awk '{print $1}')" = "$expected_boot" ] || { printf "RESULT=INCOMPATIBLE reason=BOOT_ID_DRIFT\n"; exit; }
+    receipt="$state/manager-authorizations/$tx"
+    mkdir -p "$state/manager-authorizations"
+    chmod 700 "$state/manager-authorizations"
+    printf 'version=1\nprofile=KSU_NEXT_330\nsurface=%s\npackage=%s\nuid=%s\nappid=%s\nsigning_metadata_sha256=%s\nprobe_transfer=READ_ONLY_PROBE_TRANSFER\nprobe_cleanup=REMOVED\nbinary_evidence=exact-observed-binary\nbinary_sha256=%s\nreference_evidence=reference-source\nreference_commit=%s\n' "$surface" "$package" "$package_uid" "$appid" "$signing_sha" "$next_sha" "$next_reference" > "$receipt"
+    chmod 600 "$receipt"
+    cleanup_probe
+    trap - EXIT HUP INT TERM
+    [ ! -e "$probe" ] && [ ! -L "$probe" ] || exit 1
+    printf 'RESULT=AUTHORIZED surface=%s appid=%s package=%s probe_cleanup=REMOVED\n' "$surface" "$appid" "$package"
     ;;
 network)
     endpoint=$(ip -o -4 addr show up scope global 2>/dev/null | awk "\$2 ~ /^(tailscale|wlan)/ {split(\$4, value, \"/\"); print value[1]}" | head -n 1)
@@ -401,20 +494,56 @@ profile_epoch=$profile_epoch
 peer_pin_sha256=$peer_pin_sha
 transport=DIRECT" ] || exit 1
     init_ns=$(readlink /proc/1/ns/mnt) || exit 1
-    ksud_pid=$(pidof ksud) || exit 1
-    manager_pid=$(pidof me.weishu.kernelsu) || exit 1
-    case "$ksud_pid$manager_pid" in *" "*|*[!0-9]*) exit 1 ;; esac
+    manager_process=me.weishu.kernelsu
+    include_ksud=true
+    authorization="$state/manager-authorizations/$tx"
+    if [ -f "$authorization" ] && [ ! -L "$authorization" ]; then
+        [ "$(sed -n '2s/^profile=//p' "$authorization")" = KSU_NEXT_330 ] || exit 1
+        surface=$(sed -n '3s/^surface=//p' "$authorization") || exit 1
+        manager_process=$(sed -n '4s/^package=//p' "$authorization") || exit 1
+        include_ksud=false
+        if [ "$surface" = HEADLESS_AUTHORIZED_MANAGER ]; then
+            [ -n "$manager_process" ] || exit 1
+            nsenter -t 1 -m -- cmp -s "$active/webroot/index.html" "$pending/webroot/index.html" || exit 1
+            printf 'surface=HEADLESS_AUTHORIZED_MANAGER\nauthorized_package=%s\nomitted_views=manager,webui\nreason=NO_MANAGER_COMPONENT\n' "$manager_process" > "$txn/webui-owner.receipt"
+            chmod 600 "$txn/webui-owner.receipt"
+            active_inode=$(nsenter -t 1 -m -- stat -c %d:%i "$active/module.prop") || exit 1
+            printf "init=%s\n" "$init_ns" > "$txn/mount-views.receipt"
+            for name in broker sidecar; do
+                record="$state/run/pids/$name.pid"
+                [ -f "$record" ] || exit 1
+                pid=$(awk "{print \$1}" "$record")
+                ns=$(readlink "/proc/$pid/ns/mnt") || exit 1
+                inode=$(nsenter -t "$pid" -m -- stat -c %d:%i "$active/module.prop") || exit 1
+                [ "$inode" = "$active_inode" ] || exit 1
+                printf "%s=%s|%s\n" "$name" "$ns" "$inode" >> "$txn/mount-views.receipt"
+            done
+            chmod 600 "$txn/mount-views.receipt"
+            printf "RESULT=PAIRED profile_sha256=%s graph_hash=%s mount_views_sha256=%s surface=HEADLESS_AUTHORIZED_MANAGER\n" "$profile_sha" "$(sha256sum "$txn/new.graph" | awk "{print \$1}")" "$(sha256sum "$txn/mount-views.receipt" | awk "{print \$1}")"
+            exit 0
+        fi
+        [ "$surface" = KSU_NEXT_MANAGER ] && [ "$manager_process" = com.rifsxd.ksunext ] || exit 1
+    fi
+    if [ "$include_ksud" = true ]; then
+        ksud_pid=$(pidof ksud) || exit 1
+        case "$ksud_pid" in *" "*|*[!0-9]*) exit 1 ;; esac
+    fi
+    manager_pid=$(pidof "$manager_process") || exit 1
+    case "$manager_pid" in *" "*|*[!0-9]*) exit 1 ;; esac
     manager_command=$(cat "/proc/$manager_pid/cmdline" | tr '\0' '\n' | head -n 1) || exit 1
-    [ "$manager_command" = me.weishu.kernelsu ] || exit 1
+    [ "$manager_command" = "$manager_process" ] || exit 1
     manager_uid=$(awk '/^Uid:/ {print $2; exit}' "/proc/$manager_pid/status") || exit 1
     case "$manager_uid" in ""|*[!0-9]*) exit 1 ;; esac
+    if [ -f "$authorization" ]; then
+        [ "$manager_uid" = "$(sed -n '5s/^uid=//p' "$authorization")" ] || exit 1
+    fi
     webui_pids=$(pidof com.google.android.webview:sandboxed_process0) || exit 1
     services_dump="$state/run/activity-services.$tx"
     rm -f "$services_dump"
     dumpsys activity -a services com.google.android.webview > "$services_dump" || { rm -f "$services_dump"; exit 1; }
     chmod 600 "$services_dump"
     [ "$(wc -c < "$services_dump")" -le 1048576 ] && [ "$(wc -l < "$services_dump")" -le 4096 ] || { rm -f "$services_dump"; exit 1; }
-    ownership_records=$(awk -v manager_pid="$manager_pid" -v candidates="$webui_pids" '
+    ownership_records=$(awk -v manager_pid="$manager_pid" -v manager_process="$manager_process" -v candidates="$webui_pids" '
 function process_record(line, fields, identity, pid, process) {
     sub(/^.*ProcessRecord\{/, "", line)
     split(line, fields, " ")
@@ -447,7 +576,7 @@ function process_record(line, fields, identity, pid, process) {
         hosting ~ /^com.google.android.webview\/.*SandboxedProcessService/ &&
         index(" " candidates " ", " " renderer_fields[1] " ") > 0 &&
         renderer_fields[2] == "com.google.android.webview:sandboxed_process0" &&
-        client_fields[1] == manager_pid && client_fields[2] == "me.weishu.kernelsu" &&
+        client_fields[1] == manager_pid && client_fields[2] == manager_process &&
         !seen[key]++) {
         print renderer_fields[1] "|" renderer_fields[3] "|" client_fields[3] "|" hosting
     }
@@ -488,11 +617,17 @@ function process_record(line, fields, identity, pid, process) {
     zygote_command=$(tr '\0' '\n' < "$zygote_cmdline" | sed -n '1p') || { rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"; exit 1; }
     rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"
     [ "$zygote_command" = webview_zygote ] || exit 1
-    printf "manager_pid=%s\nmanager_uid=%s\nmanager_process=me.weishu.kernelsu\nmanager_record=%s\nrenderer_pid=%s\nrenderer_uid=%s\nrenderer_process=com.google.android.webview:sandboxed_process0\nrenderer_record=%s\nrenderer_parent_pid=%s\nzygote_pid=%s\nzygote_name=%s\nzygote_uid=%s\nzygote_command=%s\nprovider_package=com.google.android.webview\nhosting_record=%s\n" "$manager_pid" "$manager_uid" "$manager_record" "$webui_pid" "$webui_uid" "$renderer_record" "$renderer_parent_pid" "$zygote_pid" "$zygote_name" "$zygote_uid" "$zygote_command" "$hosting_record" > "$txn/webui-owner.receipt"
+    if [ -n "${surface:-}" ]; then
+        printf "surface=%s\nmanager_pid=%s\nmanager_uid=%s\nmanager_process=%s\nmanager_record=%s\nrenderer_pid=%s\nrenderer_uid=%s\nrenderer_process=com.google.android.webview:sandboxed_process0\nrenderer_record=%s\nrenderer_parent_pid=%s\nzygote_pid=%s\nzygote_name=%s\nzygote_uid=%s\nzygote_command=%s\nprovider_package=com.google.android.webview\nhosting_record=%s\n" "$surface" "$manager_pid" "$manager_uid" "$manager_process" "$manager_record" "$webui_pid" "$webui_uid" "$renderer_record" "$renderer_parent_pid" "$zygote_pid" "$zygote_name" "$zygote_uid" "$zygote_command" "$hosting_record" > "$txn/webui-owner.receipt"
+    else
+        printf "manager_pid=%s\nmanager_uid=%s\nmanager_process=me.weishu.kernelsu\nmanager_record=%s\nrenderer_pid=%s\nrenderer_uid=%s\nrenderer_process=com.google.android.webview:sandboxed_process0\nrenderer_record=%s\nrenderer_parent_pid=%s\nzygote_pid=%s\nzygote_name=%s\nzygote_uid=%s\nzygote_command=%s\nprovider_package=com.google.android.webview\nhosting_record=%s\n" "$manager_pid" "$manager_uid" "$manager_record" "$webui_pid" "$webui_uid" "$renderer_record" "$renderer_parent_pid" "$zygote_pid" "$zygote_name" "$zygote_uid" "$zygote_command" "$hosting_record" > "$txn/webui-owner.receipt"
+    fi
     chmod 600 "$txn/webui-owner.receipt"
     active_inode=$(nsenter -t 1 -m -- stat -c %d:%i "$active/module.prop") || exit 1
     printf "init=%s\n" "$init_ns" > "$txn/mount-views.receipt"
-    for process in "ksud:$ksud_pid" "manager:$manager_pid" "webui:$webui_pid"; do
+    process_views="manager:$manager_pid webui:$webui_pid"
+    if [ "$include_ksud" = true ]; then process_views="ksud:$ksud_pid $process_views"; fi
+    for process in $process_views; do
         name=${process%%:*}
         pid=${process#*:}
         ns=$(readlink "/proc/$pid/ns/mnt") || exit 1
@@ -629,7 +764,44 @@ donor_preflight="$(preflight_one "$donor_serial")"
 candidate_preflight="$(preflight_one "$candidate_serial")"
 donor_boot="$(sed -n 's/.* boot_hash=\([0-9a-f]\{64\}\).*/\1/p' <<<"$donor_preflight")"
 candidate_boot="$(sed -n 's/.* boot_hash=\([0-9a-f]\{64\}\).*/\1/p' <<<"$candidate_preflight")"
+donor_ksu_profile="$(sed -n 's/.* profile=\([A-Z0-9_]*\).*/\1/p' <<<"$donor_preflight")"
+candidate_ksu_profile="$(sed -n 's/.* profile=\([A-Z0-9_]*\).*/\1/p' <<<"$candidate_preflight")"
 [[ -n "$donor_boot" && -n "$candidate_boot" ]] || fail KSU_PREFLIGHT_INVALID 3
+
+authorize_next_manager() {
+    local serial="$1" role="$2" boot="$3" profile="$4"
+    [[ "$profile" == "$KSU_NEXT_PROFILE" ]] || return 0
+    local remote_probe="$STATE_ROOT/probes/$transaction_id.$role.manager-appid"
+    "$adb_command" -s "$serial" shell su 0 sh -c "mkdir -p '$STATE_ROOT/probes' && chmod 700 '$STATE_ROOT' '$STATE_ROOT/probes'" >/dev/null
+    "$adb_command" -s "$serial" push "$local_probe" "$remote_probe" >/dev/null
+    remote "$serial" READ_ONLY_PROBE_TRANSFER "$transaction_id" "$remote_probe" "$probe_sha" "$role" >/dev/null || {
+        "$adb_command" -s "$serial" shell su 0 rm -f "$remote_probe" >/dev/null 2>&1 || true
+        fail KSU_MANAGER_AUTHORIZATION_FAILED 3
+    }
+    local result
+    result="$(remote "$serial" manager-probe "$transaction_id" "$remote_probe" "$probe_sha" "$boot" "$role")" || {
+        "$adb_command" -s "$serial" shell su 0 rm -f "$remote_probe" >/dev/null 2>&1 || true
+        fail KSU_MANAGER_AUTHORIZATION_FAILED 3
+    }
+    [[ "$result" == RESULT=AUTHORIZED\ *probe_cleanup=REMOVED ]] || fail KSU_MANAGER_AUTHORIZATION_FAILED 3
+}
+
+if [[ "$donor_ksu_profile" == "$KSU_NEXT_PROFILE" || "$candidate_ksu_profile" == "$KSU_NEXT_PROFILE" ]]; then
+    probe_sha="$(unzip -p -- "$zip_path" META-INF/rka-artifacts.sha256 | awk '$2 == "rka-sidecar" {print $1}')"
+    [[ "$probe_sha" =~ ^[0-9a-f]{64}$ ]] || fail ARCHIVE_INVALID
+    probe_parent="${evidence%/*}"
+    [[ "$probe_parent" != "$evidence" ]] || probe_parent=.
+    mkdir -p -- "$probe_parent"
+    local_probe="$(mktemp "$probe_parent/.rka-manager-probe.XXXXXX")"
+    trap 'rm -f -- "$local_probe"' EXIT
+    unzip -p -- "$zip_path" rka-sidecar > "$local_probe"
+    chmod 700 "$local_probe"
+    [[ "$(sha256sum -- "$local_probe" | awk '{print $1}')" == "$probe_sha" ]] || fail ARCHIVE_INVALID
+    authorize_next_manager "$donor_serial" DONOR "$donor_boot" "$donor_ksu_profile"
+    authorize_next_manager "$candidate_serial" CANDIDATE "$candidate_boot" "$candidate_ksu_profile"
+    rm -f -- "$local_probe"
+    trap - EXIT
+fi
 donor_network="$(remote "$donor_serial" network)" || fail DIRECT_PATH_UNAVAILABLE 3
 candidate_network="$(remote "$candidate_serial" network)" || fail DIRECT_PATH_UNAVAILABLE 3
 donor_endpoint="${donor_network##* endpoint=}"

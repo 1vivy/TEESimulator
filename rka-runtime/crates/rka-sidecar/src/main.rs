@@ -7,6 +7,7 @@ use std::{
     fs,
     io::{self, Write as _},
     path::PathBuf,
+    process::ExitCode,
     thread,
     time::Duration,
 };
@@ -19,22 +20,52 @@ use rka_sidecar::{
 
 const BROKER_SOCKET: &str = "/data/adb/teesimulator-rka/run/sockets/broker.sock";
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> ExitCode {
     let command = env::args_os().nth(1);
-    if command.as_deref() == Some(OsStr::new("provision")) {
+    if command.as_deref() == Some(OsStr::new("manager-appid")) {
+        return match rka_ksu_manager::probe_manager_appid() {
+            Ok(appid) => {
+                if writeln!(io::stdout().lock(), "{appid}").is_ok() {
+                    ExitCode::SUCCESS
+                } else {
+                    let _ = writeln!(io::stderr().lock(), "manager_appid_status=output_error");
+                    ExitCode::from(2)
+                }
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    io::stderr().lock(),
+                    "manager_appid_status={}",
+                    error.status()
+                );
+                ExitCode::from(2)
+            }
+        };
+    }
+    match execute(command.as_deref()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            report_error(&*error);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn execute(command: Option<&OsStr>) -> Result<(), Box<dyn Error>> {
+    if command == Some(OsStr::new("provision")) {
         run(OsStr::new("donor"), &mut io::stdout().lock())?;
         provision_once()?;
         return Ok(());
     }
-    if command.as_deref() == Some(OsStr::new("rotate-roots")) {
+    if command == Some(OsStr::new("rotate-roots")) {
         dispatch_rotation()?;
         return Ok(());
     }
-    if command.as_deref() == Some(OsStr::new("trust-epoch")) {
+    if command == Some(OsStr::new("trust-epoch")) {
         writeln!(io::stdout().lock(), "{}", committed_profile_epoch()?)?;
         return Ok(());
     }
-    let role = command.as_deref().map_or_else(
+    let role = command.map_or_else(
         || run(OsStr::new("health"), &mut io::stdout().lock()),
         |selected| run(selected, &mut io::stdout().lock()),
     )?;
@@ -48,6 +79,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+#[expect(
+    clippy::use_debug,
+    reason = "preserves the established sidecar CLI error surface"
+)]
+fn report_error(error: &dyn Error) {
+    let _ = writeln!(io::stderr().lock(), "Error: {error:?}");
 }
 
 fn run_donor() -> Result<(), Box<dyn Error>> {

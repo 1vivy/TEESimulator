@@ -5,7 +5,10 @@ import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.Base64
 
-internal class Fixture(private val mutation: FixtureMutation? = null) : java.io.Closeable {
+internal class Fixture(
+    private val mutation: FixtureMutation? = null,
+    private val kernelProfile: KernelProfile = KernelProfile.LEGACY,
+) : java.io.Closeable {
     private val root = Files.createTempDirectory("no-reboot-deploy-")
     private val log = root.resolve("adb.log")
     private val pair = root.resolve("device-pair.json")
@@ -43,7 +46,19 @@ internal class Fixture(private val mutation: FixtureMutation? = null) : java.io.
         Files.createDirectories(archiveRoot.resolve("webroot"))
         Files.writeString(archiveRoot.resolve("module.prop"), "id=tricky_store\nversion=fixture\n")
         Files.writeString(archiveRoot.resolve("rka-runtime.manifest"), "version=1\n")
-        Files.writeString(archiveRoot.resolve("rka-sidecar"), "#!/bin/sh\nexit 0\n")
+        Files.writeString(
+            archiveRoot.resolve("rka-sidecar"),
+            """#!/bin/sh
+if [ "${'$'}{1-}" = manager-appid ]; then
+  if [ "${'$'}{RKA_FAKE_NEXT_MUTATION-}" = appid-zero ]; then printf '0\n'; exit 0; fi
+  if [ "${'$'}{RKA_FAKE_NEXT_MUTATION-}" = appid-error ]; then exit 2; fi
+  if [ "${'$'}{RKA_FAKE_NEXT_MUTATION-}" = boot-drift ]; then : > /data/adb/teesimulator-rka/.boot-drift; fi
+  case "${'$'}{RKA_FAKE_SERIAL-}" in DONOR_A) printf '10123\n' ;; CANDIDATE_B) printf '10124\n' ;; *) exit 2 ;; esac
+  exit 0
+fi
+exit 0
+""",
+        )
         Files.writeString(archiveRoot.resolve("sepolicy.probes"), "")
         Files.writeString(archiveRoot.resolve("sepolicy.rule"), "")
         Files.writeString(archiveRoot.resolve("webroot/index.html"), "fixture\n")
@@ -122,6 +137,7 @@ exit 0
                         environment()["RKA_FAKE_LOG"] = log.toString()
                         environment()["RKA_FAKE_DEVICE_ROOT"] = devices.toString()
                         environment()["RKA_FAKE_TLS_ROOT"] = root.resolve("tls").toString()
+                        environment()["RKA_FAKE_KSU_PROFILE"] = kernelProfile.fixtureName
                         environment()["PATH"] = "$tools:${environment()["PATH"]}"
                         applyFixtureMutation(environment(), activeMutation)
                     }
@@ -238,6 +254,43 @@ os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zi
     }
 
     fun trace(): List<String> = if (Files.exists(log)) Files.readAllLines(log) else emptyList()
+
+    fun probeArtifactsAbsent(): Boolean =
+        listOf("DONOR_A", "CANDIDATE_B").all { serial ->
+            val probes = devices.resolve(serial).resolve("root/data/adb/teesimulator-rka/probes")
+            !Files.exists(probes) || Files.list(probes).use { it.findAny().isEmpty }
+        }
+
+    fun hasKsuNextManagerSurfaceReceipts(): Boolean {
+        val donor = latestTransaction("DONOR_A")
+        val candidate = latestTransaction("CANDIDATE_B")
+        val donorOwner = Files.readString(donor.resolve("webui-owner.receipt"))
+        val candidateOwner = Files.readString(candidate.resolve("webui-owner.receipt"))
+        val donorViews = Files.readAllLines(donor.resolve("mount-views.receipt"))
+        val candidateViews = Files.readAllLines(candidate.resolve("mount-views.receipt"))
+        val transaction = donor.fileName.toString()
+        val donorAuthorization =
+            Files.readString(
+                devices
+                    .resolve("DONOR_A/root/data/adb/teesimulator-rka/manager-authorizations")
+                    .resolve(transaction)
+            )
+        return "surface=KSU_NEXT_MANAGER" in donorOwner &&
+            "manager_process=com.rifsxd.ksunext" in donorOwner &&
+            "binary_evidence=exact-observed-binary" in donorAuthorization &&
+            "reference_evidence=reference-source" in donorAuthorization &&
+            "surface=HEADLESS_AUTHORIZED_MANAGER" in candidateOwner &&
+            "omitted_views=manager,webui" in candidateOwner &&
+            donorViews.map { it.substringBefore('=') } ==
+                listOf("init", "manager", "webui", "broker", "sidecar") &&
+            candidateViews.map { it.substringBefore('=') } == listOf("init", "broker", "sidecar")
+    }
+
+    private fun latestTransaction(serial: String): Path {
+        val transactions =
+            devices.resolve(serial).resolve("root/data/adb/teesimulator-rka/deploy-transactions")
+        return Files.list(transactions).use { it.findFirst().orElseThrow() }
+    }
 
     fun redactedOrder(): String =
         trace().joinToString(",") { line ->

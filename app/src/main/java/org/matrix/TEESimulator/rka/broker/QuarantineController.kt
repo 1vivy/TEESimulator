@@ -26,6 +26,20 @@ private constructor(
         return digest.digest()
     }
 
+    internal fun receiptKey(): ByteArray {
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.update("TEESimulator-RS quarantine receipt key v1\u0000".toByteArray())
+        digest.update(
+            ByteBuffer.allocate(Long.SIZE_BYTES)
+                .order(ByteOrder.BIG_ENDIAN)
+                .putLong(requestId.value)
+                .array()
+        )
+        digest.update(batchId)
+        actionIds.forEach(digest::update)
+        return digest.digest()
+    }
+
     override fun close() {
         batchId.fill(0)
         handles.forEach { it.fill(0) }
@@ -96,18 +110,25 @@ private constructor(
 }
 
 internal interface QuarantineReceiptStore {
-    fun read(): ByteArray?
+    fun read(key: ByteArray): ByteArray?
 
-    fun replace(receipt: ByteArray)
+    fun create(key: ByteArray, receipt: ByteArray): Boolean
 }
 
 private class MemoryQuarantineReceiptStore : QuarantineReceiptStore {
-    private var receipt: ByteArray? = null
+    private val receipts = linkedMapOf<String, ByteArray>()
 
-    override fun read(): ByteArray? = receipt?.copyOf()
+    override fun read(key: ByteArray): ByteArray? = receipts[key.hex()]?.copyOf()
 
-    override fun replace(receipt: ByteArray) {
-        this.receipt = receipt.copyOf()
+    override fun create(key: ByteArray, receipt: ByteArray): Boolean {
+        val name = key.hex()
+        if (name in receipts || receipts.size >= MAX_RECEIPTS) return false
+        receipts[name] = receipt.copyOf()
+        return true
+    }
+
+    private companion object {
+        const val MAX_RECEIPTS = 64
     }
 }
 
@@ -115,6 +136,7 @@ enum class QuarantineResult {
     QUARANTINED,
     HANDLE_MISMATCH,
     ALREADY_QUARANTINED,
+    CLEANUP_INCOMPLETE,
 }
 
 class QuarantineController
@@ -125,56 +147,99 @@ internal constructor(
     private val wipe: (ByteArray) -> Unit = {},
     private val receipts: QuarantineReceiptStore = MemoryQuarantineReceiptStore(),
     private val expectedBatch: () -> ByteArray? = { null },
+    private val complete: (ByteArray) -> Boolean = { true },
+    private val requireActiveBatch: Boolean = false,
 ) {
-    private var terminalRequest: RequestId? = null
+    private val terminalRequests = mutableSetOf<RequestId>()
+    private var allActivationClosed = false
     private var retained = false
 
     @Synchronized
     fun quarantine(request: AuthenticatedQuarantineRequest): QuarantineResult =
         request.use {
+            val key = request.receiptKey()
+            val receipt = request.receipt()
+            val stored = receipts.read(key)
+            if (stored != null) {
+                val result = replayResult(stored, receipt)
+                stored.fill(0)
+                receipt.fill(0)
+                key.fill(0)
+                if (result == null) return QuarantineResult.HANDLE_MISMATCH
+                if (!complete(request.batchId)) {
+                    return QuarantineResult.CLEANUP_INCOMPLETE
+                }
+                return result
+            }
             val expected = expectedBatch()
+            if (expected == null && requireActiveBatch) {
+                receipt.fill(0)
+                key.fill(0)
+                return QuarantineResult.HANDLE_MISMATCH
+            }
             if (expected != null) {
                 val matches = expected.contentEquals(request.batchId)
                 expected.fill(0)
-                if (!matches) return QuarantineResult.HANDLE_MISMATCH
-            }
-            val receipt = request.receipt()
-            val stored = receipts.read()
-            if (stored != null) {
-                val replay =
-                    stored.size == receipt.size + 1 &&
-                        stored.copyOfRange(1, stored.size).contentEquals(receipt)
-                val outcome = stored.firstOrNull()
-                stored.fill(0)
-                receipt.fill(0)
-                if (!replay) return QuarantineResult.HANDLE_MISMATCH
-                return if (outcome == 1.toByte()) {
-                    QuarantineResult.QUARANTINED
-                } else {
-                    QuarantineResult.HANDLE_MISMATCH
+                if (!matches) {
+                    receipt.fill(0)
+                    key.fill(0)
+                    return QuarantineResult.HANDLE_MISMATCH
                 }
             }
             val handles = request.copyHandles()
             try {
                 val exact = exactQuarantine(handles)
                 retained = true
-                terminalRequest = request.requestId
+                if (terminalRequests.size < MAX_TERMINAL_REQUESTS) {
+                    terminalRequests += request.requestId
+                } else {
+                    terminalRequests.clear()
+                    allActivationClosed = true
+                }
                 cancel()
                 handles.forEach { handle ->
                     discard(handle.copyOf())
                     wipe(handle)
                     handle.fill(0)
                 }
-                receipts.replace(byteArrayOf(if (exact) 1 else 0) + receipt)
-                if (exact) QuarantineResult.QUARANTINED else QuarantineResult.HANDLE_MISMATCH
+                val storedReceipt = byteArrayOf(if (exact) 1 else 0) + receipt
+                val created = receipts.create(key, storedReceipt)
+                storedReceipt.fill(0)
+                if (!created) return QuarantineResult.CLEANUP_INCOMPLETE
+                if (!complete(request.batchId)) return QuarantineResult.CLEANUP_INCOMPLETE
+                return if (exact) {
+                    QuarantineResult.QUARANTINED
+                } else {
+                    QuarantineResult.HANDLE_MISMATCH
+                }
             } finally {
                 receipt.fill(0)
+                key.fill(0)
                 handles.forEach { it.fill(0) }
             }
         }
 
+    private fun replayResult(stored: ByteArray, receipt: ByteArray): QuarantineResult? {
+        val replay =
+            stored.size == receipt.size + 1 &&
+                stored.copyOfRange(1, stored.size).contentEquals(receipt)
+        if (!replay) return null
+        return if (stored.firstOrNull() == 1.toByte()) {
+            QuarantineResult.QUARANTINED
+        } else {
+            QuarantineResult.HANDLE_MISMATCH
+        }
+    }
+
     @Synchronized
-    fun activationAllowed(requestId: RequestId): Boolean = terminalRequest != requestId
+    fun activationAllowed(requestId: RequestId): Boolean =
+        !allActivationClosed && requestId !in terminalRequests
 
     @Synchronized fun quarantineRetained(): Boolean = retained
+
+    private companion object {
+        const val MAX_TERMINAL_REQUESTS = 64
+    }
 }
+
+private fun ByteArray.hex(): String = joinToString("") { "%02x".format(it) }

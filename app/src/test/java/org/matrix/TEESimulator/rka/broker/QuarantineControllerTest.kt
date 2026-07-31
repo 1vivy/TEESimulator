@@ -72,10 +72,12 @@ class QuarantineControllerTest {
         var durable: ByteArray? = null
         val receipts =
             object : QuarantineReceiptStore {
-                override fun read(): ByteArray? = durable?.copyOf()
+                override fun read(key: ByteArray): ByteArray? = durable?.copyOf()
 
-                override fun replace(receipt: ByteArray) {
+                override fun create(key: ByteArray, receipt: ByteArray): Boolean {
+                    if (durable != null) return false
                     durable = receipt.copyOf()
+                    return true
                 }
             }
         fun controller() =
@@ -120,6 +122,77 @@ class QuarantineControllerTest {
             batchId.close()
             hashes.forEach(Hash32::close)
         }
+    }
+
+    @Test
+    fun twoDistinctValidBatchesEachExecuteOnceAndKeepIndependentReceipts() {
+        val batchA = ByteArray(16) { 10 }
+        val batchB = ByteArray(16) { 20 }
+        val handleA = ByteArray(32) { 30 }
+        val handleB = ByteArray(32) { 40 }
+        var activeBatch = batchA
+        var effects = 0
+        val controller =
+            QuarantineController(
+                exactQuarantine = { true },
+                cancel = { effects++ },
+                discard = { effects++ },
+                wipe = { effects++ },
+                expectedBatch = { activeBatch.copyOf() },
+            )
+
+        assertEquals(
+            QuarantineResult.QUARANTINED,
+            controller.quarantine(request(101, batchA, handleA)),
+        )
+        activeBatch = batchB
+        assertEquals(
+            QuarantineResult.QUARANTINED,
+            controller.quarantine(request(202, batchB, handleB)),
+        )
+        assertEquals(6, effects)
+        assertFalse(controller.activationAllowed(RequestId(101)))
+        assertFalse(controller.activationAllowed(RequestId(202)))
+        assertEquals(
+            QuarantineResult.QUARANTINED,
+            controller.quarantine(request(101, batchA, handleA)),
+        )
+        assertEquals(
+            QuarantineResult.QUARANTINED,
+            controller.quarantine(request(202, batchB, handleB)),
+        )
+        assertEquals(6, effects)
+    }
+
+    @Test
+    fun tamperedReceiptCannotCompleteTheActiveJournal() {
+        val batch = ByteArray(16) { 50 }
+        val handle = ByteArray(32) { 60 }
+        var completions = 0
+        val controller =
+            QuarantineController(
+                exactQuarantine = { throw AssertionError("effects must not execute") },
+                cancel = {},
+                receipts =
+                    object : QuarantineReceiptStore {
+                        override fun read(key: ByteArray): ByteArray = ByteArray(33) { 70 }
+
+                        override fun create(key: ByteArray, receipt: ByteArray): Boolean =
+                            throw AssertionError("receipt must not be replaced")
+                    },
+                expectedBatch = { batch.copyOf() },
+                complete = {
+                    completions++
+                    true
+                },
+                requireActiveBatch = true,
+            )
+
+        assertEquals(
+            QuarantineResult.HANDLE_MISMATCH,
+            controller.quarantine(request(505, batch, handle)),
+        )
+        assertEquals(0, completions)
     }
 
     private fun request(

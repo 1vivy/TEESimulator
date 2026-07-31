@@ -3,6 +3,7 @@ package org.matrix.TEESimulator.rka.journal
 import java.nio.file.Path
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -197,6 +198,31 @@ class RkpJournalTest {
         assertEquals(1, clears)
     }
 
+    @Test
+    fun completedQuarantineDeletesOnlyTheActiveRecordAndAdmitsAFreshBatch() {
+        val store = MemoryJournalStore()
+        val journal = RkpJournal(store)
+        val first = journal.begin(count(1), identity(), RkpBatchId.from(ByteArray(16) { 1 }))
+        journal.quarantineCurrent()
+
+        assertTrue(journal.completeQuarantine(first.batchId.copyBytes()))
+
+        assertNull(store.read())
+        val second = journal.begin(count(1), identity(), RkpBatchId.from(ByteArray(16) { 2 }))
+        assertFalse(second.batchId.matches(first.batchId))
+    }
+
+    @Test
+    fun fileJournalClearDeletesTheValidatedRecordBeforeParentFsync() {
+        val order = mutableListOf<String>()
+        val path = Path.of("/journal/rkp")
+        val store = FileRkpJournalStore(path, RecordingClearSyncOps(order))
+
+        store.clear()
+
+        assertEquals(listOf("validate:$path", "delete:$path", "fsync:/journal"), order)
+    }
+
     private fun count(value: Int): RkpKeyCount =
         (RkpKeyCount.parse(value) as org.matrix.TEESimulator.rka.broker.BrokerOutcome.Success).value
 
@@ -226,6 +252,10 @@ private class MemoryJournalStore(private val fail: Boolean = false) : RkpJournal
     override fun replace(value: ByteArray) {
         if (fail) throw IllegalStateException("storage")
         writes += value.copyOf()
+    }
+
+    override fun clear() {
+        writes.clear()
     }
 }
 
@@ -261,6 +291,30 @@ private class RecordingSyncOps(private val order: MutableList<String>) : Journal
     }
 
     override fun deleteIfExists(path: Path) {}
+}
+
+private class RecordingClearSyncOps(private val order: MutableList<String>) : JournalSyncOps {
+    override fun validateTarget(path: Path) {
+        order += "validate:$path"
+    }
+
+    override fun read(path: Path): ByteArray? = throw AssertionError("unexpected read")
+
+    override fun createPrivateTemp(parent: Path): Path = throw AssertionError("unexpected temp")
+
+    override fun write(path: Path, value: ByteArray) = throw AssertionError("unexpected write")
+
+    override fun fsyncFile(path: Path) = throw AssertionError("unexpected file fsync")
+
+    override fun atomicMove(source: Path, target: Path) = throw AssertionError("unexpected move")
+
+    override fun fsyncDirectory(path: Path) {
+        order += "fsync:$path"
+    }
+
+    override fun deleteIfExists(path: Path) {
+        order += "delete:$path"
+    }
 }
 
 private fun ByteArray.containsSubsequence(candidate: ByteArray): Boolean =

@@ -10,7 +10,6 @@ import org.matrix.TEESimulator.rka.broker.BrokerDeadline
 import org.matrix.TEESimulator.rka.broker.BrokerOutcome
 import org.matrix.TEESimulator.rka.broker.IrpcClient
 import org.matrix.TEESimulator.rka.broker.QuarantineController
-import org.matrix.TEESimulator.rka.broker.QuarantineReceiptStore
 import org.matrix.TEESimulator.rka.broker.QuarantineResult
 import org.matrix.TEESimulator.rka.broker.RkpKeyCount
 import org.matrix.TEESimulator.rka.donor.AndroidDonorKeyMintDevice
@@ -18,6 +17,7 @@ import org.matrix.TEESimulator.rka.donor.DonorBridgeDispatcher
 import org.matrix.TEESimulator.rka.donor.DonorKeyMintBackend
 import org.matrix.TEESimulator.rka.journal.DurableIrpcKeyBatchGenerator
 import org.matrix.TEESimulator.rka.journal.FileHalCsrJournal
+import org.matrix.TEESimulator.rka.journal.FileQuarantineReceiptRegistry
 import org.matrix.TEESimulator.rka.journal.FileRkpJournalStore
 import org.matrix.TEESimulator.rka.journal.RkpBatchId
 import org.matrix.TEESimulator.rka.journal.RkpCertification
@@ -31,14 +31,7 @@ object DonorProvisioningRuntime {
     private val client by lazy(IrpcClient::android)
     private val journal by lazy { RkpJournal(FileRkpJournalStore.production(root)) }
     private val csrJournal by lazy { FileHalCsrJournal(root) }
-    private val quarantineReceiptStore by lazy {
-        val durable = FileRkpJournalStore(root.resolve("rka/journal/quarantine.receipt"))
-        object : QuarantineReceiptStore {
-            override fun read(): ByteArray? = durable.read()
-
-            override fun replace(receipt: ByteArray) = durable.replace(receipt)
-        }
-    }
+    private val quarantineReceiptStore by lazy { FileQuarantineReceiptRegistry.production(root) }
     private val donorBackend = lazy {
         val device = AndroidDonorKeyMintDevice.resolve()
         DonorKeyMintBackend(device, journal).also {
@@ -53,6 +46,8 @@ object DonorProvisioningRuntime {
             cancel = { activeRequestId = null },
             receipts = quarantineReceiptStore,
             expectedBatch = { journal.recover()?.batchId?.copyBytes() },
+            complete = journal::completeQuarantine,
+            requireActiveBatch = true,
         )
     }
 

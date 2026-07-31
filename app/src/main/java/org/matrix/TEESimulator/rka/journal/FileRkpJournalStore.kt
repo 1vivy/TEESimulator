@@ -47,6 +47,12 @@ internal constructor(private val path: Path, private val ops: JournalSyncOps = R
         }
     }
 
+    override fun clear() {
+        ops.validateTarget(path)
+        ops.deleteIfExists(path)
+        ops.fsyncDirectory(requireNotNull(path.parent))
+    }
+
     companion object {
         private const val MAX_BYTES = 131_072
 

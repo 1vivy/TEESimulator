@@ -159,6 +159,8 @@ data class RkpJournalRecord(
         require(
             state == RkpJournalState.RKP_KEY_GENERATING ||
                 state == RkpJournalState.QUARANTINED ||
+                state == RkpJournalState.TERMINAL ||
+                state == RkpJournalState.DELETE ||
                 entries.isNotEmpty()
         )
         require(entries.map { it.order } == entries.indices.toList())
@@ -184,6 +186,10 @@ interface RkpJournalStore {
     fun read(): ByteArray?
 
     fun replace(value: ByteArray)
+
+    fun clear() {
+        throw IllegalStateException("journal clear is unsupported")
+    }
 }
 
 class RkpJournal(private val store: RkpJournalStore) {
@@ -290,9 +296,30 @@ class RkpJournal(private val store: RkpJournalStore) {
                 handles.zip(expected).all { (actual, retained) ->
                     actual.contentEquals(retained) && resolveBrokerBlob?.invoke(actual) == true
                 }
-        clearRetainedBlobs()
         persist(current.copy(state = RkpJournalState.QUARANTINED))
         return exact
+    }
+
+    fun completeQuarantine(batchId: ByteArray): Boolean {
+        require(batchId.size == 16)
+        var current = store.read()?.let(RkpJournalCodec::decode) ?: return true
+        if (!current.batchId.copyBytes().contentEquals(batchId)) return true
+        current =
+            when (current.state) {
+                RkpJournalState.QUARANTINED -> transition(current, RkpJournalState.TERMINAL)
+                RkpJournalState.TERMINAL -> current
+                RkpJournalState.DELETE -> {
+                    clearRetainedBlobs()
+                    store.clear()
+                    return true
+                }
+                else -> return false
+            }
+        if (current.state == RkpJournalState.TERMINAL) {
+            transition(current, RkpJournalState.DELETE)
+            store.clear()
+        }
+        return store.read() == null
     }
 
     fun certifyCurrent(certification: RkpCertification): Boolean {
@@ -316,12 +343,7 @@ class RkpJournal(private val store: RkpJournalStore) {
             persist(current.copy(state = RkpJournalState.QUARANTINED))
             return false
         }
-        persist(
-            current.copy(
-                state = RkpJournalState.RKP_CERTIFIED,
-                certification = certification,
-            )
-        )
+        persist(current.copy(state = RkpJournalState.RKP_CERTIFIED, certification = certification))
         return true
     }
 
@@ -412,9 +434,9 @@ class RkpJournal(private val store: RkpJournalStore) {
             RkpJournalState.APP_KEY_RECORDED -> RkpJournalState.EXPOSED
             RkpJournalState.EXPOSED -> RkpJournalState.TERMINAL
             RkpJournalState.TERMINAL -> RkpJournalState.DELETE
+            RkpJournalState.QUARANTINED -> RkpJournalState.TERMINAL
             RkpJournalState.POST_AMBIGUOUS,
-            RkpJournalState.DELETE,
-            RkpJournalState.QUARANTINED -> throw IllegalStateException("terminal journal state")
+            RkpJournalState.DELETE -> throw IllegalStateException("terminal journal state")
         }
 }
 

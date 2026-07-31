@@ -6,6 +6,7 @@ use rka_sidecar::donor::{
 #[derive(Debug, Default)]
 pub struct FakeBroker {
     pub generated_requests: usize,
+    pub prior_transcripts: Vec<[u8; 32]>,
     pub begin_calls: usize,
     pub abort_calls: usize,
     pub finish_calls: usize,
@@ -20,12 +21,12 @@ pub struct FakeBroker {
 impl DonorBroker for FakeBroker {
     fn generate(&mut self, request: BrokerGenerate<'_>) -> Result<GeneratedKey, BrokerFailure> {
         self.generated_requests += 1;
+        self.prior_transcripts.push(request.prior_transcript_hash);
         if self.fail_generate {
             return Err(BrokerFailure::Rejected);
         }
         assert_eq!(request.rkp_handle, RkpKeyHandle::new([0xb1; 32]));
         assert_ne!(request.envelope_hash, [0; 32]);
-        assert_eq!(request.prior_transcript_hash, [0xc1; 32]);
         let suffix = u8::try_from(self.generated_requests).map_err(|_| BrokerFailure::Rejected)?;
         Ok(GeneratedKey::new(
             self.forced_key

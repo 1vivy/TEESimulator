@@ -58,7 +58,6 @@ pub struct DonorRkaService {
     pub(super) policy: PairedPolicy,
     pub(super) keys: HashMap<[u8; 16], KeyRecord>,
     pub(super) request_ids: HashSet<[u8; 16]>,
-    pub(super) candidate_nonces: HashSet<[u8; 32]>,
     remote_keys: HashSet<RemoteKeyHandle>,
     pub(super) operation_tombstones: HashSet<RemoteOperationHandle>,
     pub(super) replay_root: Option<PathBuf>,
@@ -72,7 +71,6 @@ impl DonorRkaService {
             policy,
             keys: HashMap::new(),
             request_ids: HashSet::new(),
-            candidate_nonces: HashSet::new(),
             remote_keys: HashSet::new(),
             operation_tombstones: HashSet::new(),
             replay_root: None,
@@ -100,12 +98,6 @@ impl DonorRkaService {
         self.admit_request(request.request_id)?;
         let validated = validate_generate(self.policy, &request)?;
         if self.keys.contains_key(&request.alias) {
-            return Err(DonorError::Replay);
-        }
-        if !self
-            .candidate_nonces
-            .insert(request.context.candidate_nonce)
-        {
             return Err(DonorError::Replay);
         }
         let generated = broker

@@ -20,11 +20,7 @@ impl DonorRkaService {
             return Err(DonorError::Replay);
         }
         validate_generate(self.policy, request)?;
-        if self.keys.contains_key(&request.alias)
-            || self
-                .candidate_nonces
-                .contains(&request.context.candidate_nonce)
-        {
+        if self.keys.contains_key(&request.alias) {
             return Err(DonorError::Replay);
         }
         Ok(())

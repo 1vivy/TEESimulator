@@ -108,10 +108,9 @@ fn slow_drip_cannot_reset_the_absolute_frame_deadline() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn real_uds_frame_reaches_the_production_runtime_dispatch() -> Result<(), Box<dyn std::error::Error>>
-{
+fn malformed_uds_frame_reaches_runtime_rejection() -> Result<(), Box<dyn std::error::Error>> {
     // Given
-    let root = unique_root();
+    let root = unique_system_root();
     fs::create_dir_all(&root)?;
     let metadata = fs::metadata(&root)?;
     let ingress = DonorIngress::bind_for_owner_policy(&root, metadata.uid(), metadata.gid())?;
@@ -129,6 +128,15 @@ fn real_uds_frame_reaches_the_production_runtime_dispatch() -> Result<(), Box<dy
     drop(ingress);
     fs::remove_dir_all(root)?;
     Ok(())
+}
+
+fn unique_system_root() -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    PathBuf::from("/tmp").join(format!(
+        "rka-donor-ingress-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 fn unique_root() -> PathBuf {

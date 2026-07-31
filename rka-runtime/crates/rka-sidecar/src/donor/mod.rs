@@ -10,6 +10,9 @@
 
 mod broker;
 mod broker_bridge;
+#[cfg(test)]
+mod broker_bridge_test;
+mod broker_characteristics;
 mod collision;
 mod dispatch;
 mod dispatch_codec;

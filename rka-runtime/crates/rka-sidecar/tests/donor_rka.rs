@@ -174,7 +174,7 @@ fn donor_rka_peer_death_and_policy_failure_are_terminal() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn donor_rejects_same_session_candidate_nonce_before_second_generate()
+fn donor_accepts_same_authenticated_session_nonce_for_distinct_generates()
 -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let fixture = Fixture::new();
@@ -183,11 +183,11 @@ fn donor_rejects_same_session_candidate_nonce_before_second_generate()
     donor.generate(fixture.generate(1), &mut broker)?;
 
     // When
-    let replayed = donor.generate(fixture.generate_with_alias(2, [0xa2; 16]), &mut broker);
+    let generated = donor.generate(fixture.generate_with_alias(2, [0xa2; 16]), &mut broker);
 
     // Then
-    assert_eq!(replayed, Err(DonorError::Replay));
-    assert_eq!(broker.generated_requests, 1);
+    assert!(generated.is_ok());
+    assert_eq!(broker.generated_requests, 2);
     Ok(())
 }
 
@@ -263,18 +263,18 @@ fn donor_rejects_authoritative_irpc_mismatch_without_broker_generate() {
 }
 
 #[test]
-fn donor_rejects_prior_transcript_mismatch_without_broker_generate() {
+fn donor_forwards_the_dispatch_selected_transcript_to_the_broker() {
     // Given
     let fixture = Fixture::new();
     let mut broker = FakeBroker::default();
     let mut donor = DonorRkaService::new(fixture.policy());
 
     // When
-    let mismatch = donor.generate(fixture.generate_with_transcript(1, [0xfa; 32]), &mut broker);
+    let generated = donor.generate(fixture.generate_with_transcript(1, [0xfa; 32]), &mut broker);
 
     // Then
-    assert_eq!(mismatch, Err(DonorError::TranscriptMismatch));
-    assert_eq!(broker.generated_requests, 0);
+    assert!(generated.is_ok());
+    assert_eq!(broker.prior_transcripts, vec![[0xfa; 32]]);
 }
 
 #[test]

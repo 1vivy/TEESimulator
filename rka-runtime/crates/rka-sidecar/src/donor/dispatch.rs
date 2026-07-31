@@ -48,11 +48,6 @@ pub(super) fn dispatch(runtime: &mut DonorRuntime, encoded: &[u8]) -> Result<Vec
             request_id: frame.request_id.bytes(),
         })?;
     let body = dispatch_body(runtime, &frame, previous)?;
-    runtime
-        .transcript
-        .as_mut()
-        .ok_or(DonorError::Unpaired)?
-        .commit(frame.transcript_hash)?;
     let mut response = Frame::new(
         FrameContext::new(
             (frame.request_id, frame.session_id),
@@ -65,6 +60,11 @@ pub(super) fn dispatch(runtime: &mut DonorRuntime, encoded: &[u8]) -> Result<Vec
         &frame.transcript_hash,
         &encode_frame_without_transcript(&response),
     );
+    runtime
+        .transcript
+        .as_mut()
+        .ok_or(DonorError::Unpaired)?
+        .commit_result(frame.transcript_hash, response.transcript_hash)?;
     Ok(encode_frame(&response))
 }
 

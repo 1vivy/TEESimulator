@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use rka_protocol::{CborWriter, HashDomain, hash_bytes, hash_cbor};
+use rka_protocol::{HashDomain, hash_bytes};
 
 use crate::bridge::{
     BridgeMessage, BrokerOperation, CandidateBridgeOperation, PublicBytes, RequestId, RoleExecutor,
@@ -18,6 +18,8 @@ pub struct BridgeDonorBroker {
     socket: PathBuf,
     executor: RoleExecutor,
     next_request: u64,
+    #[cfg(test)]
+    pub(super) local_codec: bool,
 }
 
 impl BridgeDonorBroker {
@@ -28,6 +30,8 @@ impl BridgeDonorBroker {
             socket: socket.to_path_buf(),
             executor: RoleExecutor::new(SidecarRole::Donor),
             next_request: 1,
+            #[cfg(test)]
+            local_codec: false,
         }
     }
 
@@ -46,6 +50,18 @@ impl BridgeDonorBroker {
             operation,
             PublicBytes::bounded(payload, 0, 1_048_571).map_err(|_| BrokerFailure::Rejected)?,
         );
+        #[cfg(test)]
+        let response = if self.local_codec {
+            super::broker_bridge_test::local_exchange(&self.socket, &request)?
+        } else {
+            self.executor
+                .dispatch(BrokerOperation::Donor {
+                    socket_path: &self.socket,
+                    request: &request,
+                })
+                .map_err(|_| BrokerFailure::Unavailable)?
+        };
+        #[cfg(not(test))]
         let response = self
             .executor
             .dispatch(BrokerOperation::Donor {
@@ -177,7 +193,7 @@ fn decode_public_key(response: &[u8]) -> Result<GeneratedKey, BrokerFailure> {
         handle,
         chain,
         hash_bytes(HashDomain::RkpPublic, &spki),
-        exact_characteristics_hash(),
+        super::broker_characteristics::exact_characteristics_hash(),
     )
     .with_transcript_signature(transcript_signature))
 }
@@ -188,28 +204,6 @@ fn decode_update(response: &[u8]) -> Result<(usize, Vec<u8>), BrokerFailure> {
     let output = cursor.bytes(0, 65_536)?;
     cursor.finish()?;
     Ok((consumed, output))
-}
-
-fn exact_characteristics_hash() -> [u8; 32] {
-    let mut writer = CborWriter::with_capacity(32);
-    writer.map(8);
-    for (key, value) in [(0, 1), (1, 3), (2, 1)] {
-        writer.unsigned(key);
-        writer.unsigned(value);
-    }
-    writer.unsigned(3);
-    writer.array(1);
-    writer.unsigned(2);
-    writer.unsigned(4);
-    writer.array(1);
-    writer.unsigned(4);
-    writer.unsigned(5);
-    writer.unsigned(0);
-    writer.unsigned(6);
-    writer.boolean(true);
-    writer.unsigned(7);
-    writer.boolean(false);
-    hash_cbor(HashDomain::Profile, &writer.finish())
 }
 
 fn put_bytes(output: &mut Vec<u8>, value: &[u8]) -> Result<(), BrokerFailure> {

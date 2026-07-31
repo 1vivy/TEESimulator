@@ -65,19 +65,23 @@ impl TranscriptJournal {
         Ok(())
     }
 
-    pub(super) fn commit(&mut self, next: [u8; 32]) -> Result<(), DonorError> {
+    pub(super) fn commit_result(
+        &mut self,
+        request_head: [u8; 32],
+        result_head: [u8; 32],
+    ) -> Result<(), DonorError> {
         let TranscriptState::Pending(pending) = self.state else {
             return Err(DonorError::Storage);
         };
-        if pending.next != next {
+        if pending.next != request_head {
             return Err(DonorError::Storage);
         }
         let mut encoded = Vec::with_capacity(COMMITTED_BYTES);
         encoded.extend_from_slice(MAGIC);
         encoded.push(COMMITTED);
-        encoded.extend_from_slice(&next);
+        encoded.extend_from_slice(&result_head);
         atomic_replace(&self.path, &encoded).map_err(|_| DonorError::Storage)?;
-        self.state = TranscriptState::Committed(next);
+        self.state = TranscriptState::Committed(result_head);
         Ok(())
     }
 }
@@ -171,16 +175,19 @@ mod tests {
         // Given
         let root = root();
         let mut journal = TranscriptJournal::open(&root, [1; 32]).unwrap();
-        assert_eq!(journal.commit([3; 32]), Err(DonorError::Storage));
+        assert_eq!(
+            journal.commit_result([3; 32], [8; 32]),
+            Err(DonorError::Storage)
+        );
         journal.reserve(pending()).unwrap();
 
         // When
-        journal.commit([3; 32]).unwrap();
+        journal.commit_result([3; 32], [8; 32]).unwrap();
 
         // Then
         assert_eq!(
             TranscriptJournal::open(&root, [1; 32]).unwrap().committed(),
-            Ok([3; 32])
+            Ok([8; 32])
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -196,7 +203,7 @@ mod tests {
         fs::write(&root, b"blocks-parent-directory").unwrap();
 
         // When
-        let result = journal.commit([3; 32]);
+        let result = journal.commit_result([3; 32], [8; 32]);
 
         // Then
         assert_eq!(result, Err(DonorError::Storage));

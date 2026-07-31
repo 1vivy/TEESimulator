@@ -47,13 +47,22 @@ fn lease(order: u8) -> RkpLease {
     .unwrap()
 }
 
+fn evidence(order: u8) -> CertifiedKeyEvidence {
+    let lease = lease(order);
+    CertifiedKeyEvidence {
+        batch_id: lease.metadata.batch_id,
+        order,
+        public_key_hash: lease.metadata.public_key_hash,
+        leaf_spki_hash: lease.metadata.spki_hash,
+        certificate_count: lease.metadata.chain.certificate_count,
+        chain_hash: lease.metadata.chain.chain_hash,
+    }
+}
+
 #[test]
 fn activation_is_ordered_and_persisted() {
     let batch = RkpLeaseBatch::new(vec![lease(0), lease(1)]).unwrap();
-    let token = ValidatedCertificationToken {
-        batch_id: BatchId::new([7; 16]),
-        chain_hash: ChainHash::new([9; 32]),
-    };
+    let token = verify_certified_evidence(&batch, &[evidence(0), evidence(1)]).unwrap();
     let store = MemoryStore {
         fail: false,
         value: RefCell::new(Vec::new()),
@@ -91,10 +100,7 @@ fn duplicate_and_reordered_batches_are_rejected() {
 #[test]
 fn storage_failure_prevents_activation_exposure() {
     let batch = RkpLeaseBatch::new(vec![lease(0)]).unwrap();
-    let token = ValidatedCertificationToken {
-        batch_id: BatchId::new([7; 16]),
-        chain_hash: ChainHash::new([9; 32]),
-    };
+    let token = verify_certified_evidence(&batch, &[evidence(0)]).unwrap();
     let store = MemoryStore {
         fail: true,
         value: RefCell::new(Vec::new()),
@@ -106,10 +112,34 @@ fn storage_failure_prevents_activation_exposure() {
 }
 
 #[test]
-fn serialized_boundary_has_no_private_material_field() {
+fn certification_evidence_mutations_are_rejected() {
+    let batch = RkpLeaseBatch::new(vec![lease(0), lease(1)]).unwrap();
+    let reordered = [evidence(1), evidence(0)];
+    assert!(matches!(
+        verify_certified_evidence(&batch, &reordered),
+        Err(RkpLeaseError::Certification)
+    ));
+    let mut wrong_spki = [evidence(0), evidence(1)];
+    wrong_spki[1].leaf_spki_hash = SpkiHash::new([99; 32]);
+    assert!(matches!(
+        verify_certified_evidence(&batch, &wrong_spki),
+        Err(RkpLeaseError::Certification)
+    ));
+}
+
+fn public_boundary_is_safe(source: &str) -> bool {
+    let forbidden_names = ["keyBlob", "private_bytes", "Binder", "alias"];
+    !forbidden_names.iter().any(|name| source.contains(name))
+        && !source.lines().any(|line| {
+            line.trim_start().starts_with("pub ")
+                && (line.contains("Vec<u8>") || line.contains("HashMap"))
+        })
+}
+
+#[test]
+fn production_public_boundary_rejects_secret_fields_and_mutation() {
     let source = include_str!("rkp_lease.rs");
-    let forbidden = ["key", "Blob"].concat();
-    assert!(!source.contains(&forbidden));
-    let forbidden_private = ["private", "_bytes"].concat();
-    assert!(!source.contains(&forbidden_private));
+    assert!(public_boundary_is_safe(source));
+    let mutated = format!("{source}\npub keyBlob: Vec<u8>,");
+    assert!(!public_boundary_is_safe(&mutated));
 }

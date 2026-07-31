@@ -62,9 +62,9 @@ internal class FakeIrpcEndpoint(
     }
 
     override fun generateCertificateRequestV2(
-        keys: List<IrpcGeneratedKey>,
+        publicKeys: List<ByteArray>,
         challenge: ByteArray,
-    ): ByteArray = byteArrayOf(0x83.toByte(), keys.size.toByte(), challenge.size.toByte())
+    ): ByteArray = byteArrayOf(0x83.toByte(), publicKeys.size.toByte(), challenge.size.toByte())
 }
 
 internal class FakeKeyMintEndpoint(

@@ -53,6 +53,7 @@ internal object RkpJournalCodec {
                             java.security.MessageDigest.getInstance("SHA-256").digest(publicKey)
                         )
                     )
+                    require(handle.matches(RkpOpaqueHandle.derive(batchId, order, hash)))
                     RkpJournalEntry(order, publicKey, hash, handle)
                 }
             require(input.read() == -1)

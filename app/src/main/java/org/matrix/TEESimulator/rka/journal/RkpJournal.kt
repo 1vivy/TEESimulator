@@ -2,12 +2,7 @@ package org.matrix.TEESimulator.rka.journal
 
 import java.security.MessageDigest
 import java.security.SecureRandom
-import org.matrix.TEESimulator.rka.broker.BrokerCancellation
-import org.matrix.TEESimulator.rka.broker.BrokerDeadline
-import org.matrix.TEESimulator.rka.broker.BrokerOutcome
 import org.matrix.TEESimulator.rka.broker.IrpcClient
-import org.matrix.TEESimulator.rka.broker.IrpcGeneratedKey
-import org.matrix.TEESimulator.rka.broker.IrpcKeyBatch
 import org.matrix.TEESimulator.rka.broker.RkpKeyCount
 
 enum class RkpJournalState {
@@ -47,6 +42,8 @@ class RkpOpaqueHandle private constructor(private val value: ByteArray) {
     fun copyBytes(): ByteArray = value.copyOf()
 
     override fun toString(): String = "RkpOpaqueHandle(redacted)"
+
+    internal fun matches(other: RkpOpaqueHandle): Boolean = value.contentEquals(other.value)
 
     companion object {
         internal fun derive(
@@ -114,22 +111,8 @@ interface RkpJournalStore {
     fun replace(value: ByteArray)
 }
 
-internal class RkpBlobStore {
-    private val values = mutableMapOf<String, ByteArray>()
-
-    fun retain(handle: RkpOpaqueHandle, blob: ByteArray) {
-        require(values.putIfAbsent(handle.copyBytes().hex(), blob.copyOf()) == null)
-    }
-
-    fun deleteAll() {
-        values.values.forEach { it.fill(0) }
-        values.clear()
-    }
-}
-
-class RkpJournal
-private constructor(private val store: RkpJournalStore, private val blobs: RkpBlobStore) {
-    constructor(store: RkpJournalStore) : this(store, RkpBlobStore())
+class RkpJournal(private val store: RkpJournalStore) {
+    private var clearBrokerBlobs: (() -> Unit)? = null
 
     fun begin(count: RkpKeyCount, batchId: RkpBatchId = RkpBatchId.fresh()): RkpJournalRecord {
         check(store.read() == null) { "active batch exists" }
@@ -146,35 +129,40 @@ private constructor(private val store: RkpJournalStore, private val blobs: RkpBl
         )
     }
 
-    internal fun record(generating: RkpJournalRecord, batch: IrpcKeyBatch): RkpJournalRecord {
+    internal fun deriveEntries(
+        generating: RkpJournalRecord,
+        publicKeys: List<ByteArray>,
+    ): List<RkpJournalEntry> {
         require(generating.state == RkpJournalState.RKP_KEY_GENERATING)
         requireCurrent(generating)
-        val publicKeys = batch.publicKeys()
         require(publicKeys.size == generating.count)
-        val entries =
-            publicKeys.mapIndexed { order, publicKey ->
-                val hash = sha256(publicKey)
-                RkpJournalEntry(
-                    order,
-                    publicKey,
-                    hash,
-                    RkpOpaqueHandle.derive(generating.batchId, order, hash),
-                )
-            }
-        val opaque = batch.opaqueKeys()
-        try {
-            entries.zip(opaque).forEach { (entry, key) ->
-                blobs.retain(entry.handle, key.copyKeyBlob())
-            }
-            return persist(
-                generating.copy(state = RkpJournalState.RKP_KEY_RECORDED, entries = entries)
+        return publicKeys.mapIndexed { order, publicKey ->
+            val hash = sha256(publicKey)
+            RkpJournalEntry(
+                order,
+                publicKey,
+                hash,
+                RkpOpaqueHandle.derive(generating.batchId, order, hash),
             )
+        }
+    }
+
+    internal fun record(
+        generating: RkpJournalRecord,
+        entries: List<RkpJournalEntry>,
+        clearBlobs: () -> Unit,
+    ): RkpJournalRecord {
+        requireCurrent(generating)
+        require(entries.size == generating.count)
+        try {
+            val recorded =
+                generating.copy(state = RkpJournalState.RKP_KEY_RECORDED, entries = entries)
+            persist(recorded)
+            clearBrokerBlobs = clearBlobs
+            return recorded
         } catch (failure: RuntimeException) {
-            blobs.deleteAll()
-            batch.wipe()
+            clearBlobs()
             throw failure
-        } finally {
-            opaque.forEach(IrpcGeneratedKey::wipe)
         }
     }
 
@@ -187,7 +175,9 @@ private constructor(private val store: RkpJournalStore, private val blobs: RkpBl
         ) {
             "invalid journal transition"
         }
-        return persist(expected.copy(state = next))
+        val transitioned = persist(expected.copy(state = next))
+        if (next == RkpJournalState.DELETE) clearRetainedBlobs()
+        return transitioned
     }
 
     internal fun quarantine(expected: RkpJournalRecord): RkpJournalRecord {
@@ -196,7 +186,7 @@ private constructor(private val store: RkpJournalStore, private val blobs: RkpBl
             expected.state == RkpJournalState.RKP_KEY_GENERATING ||
                 expected.state == RkpJournalState.APP_KEY_GENERATING
         )
-        blobs.deleteAll()
+        clearRetainedBlobs()
         return persist(expected.copy(state = RkpJournalState.QUARANTINED))
     }
 
@@ -209,7 +199,7 @@ private constructor(private val store: RkpJournalStore, private val blobs: RkpBl
                 RkpJournalState.CSR_POSTING -> RkpJournalState.POST_AMBIGUOUS
                 else -> return record
             }
-        blobs.deleteAll()
+        clearRetainedBlobs()
         return persist(record.copy(state = recovery))
     }
 
@@ -230,6 +220,11 @@ private constructor(private val store: RkpJournalStore, private val blobs: RkpBl
         }
     }
 
+    private fun clearRetainedBlobs() {
+        clearBrokerBlobs?.invoke()
+        clearBrokerBlobs = null
+    }
+
     private fun successor(state: RkpJournalState): RkpJournalState =
         when (state) {
             RkpJournalState.RKP_KEY_GENERATING -> RkpJournalState.RKP_KEY_RECORDED
@@ -245,26 +240,6 @@ private constructor(private val store: RkpJournalStore, private val blobs: RkpBl
             RkpJournalState.DELETE,
             RkpJournalState.QUARANTINED -> throw IllegalStateException("terminal journal state")
         }
-}
-
-class DurableIrpcKeyBatchGenerator(
-    private val client: IrpcClient,
-    private val journal: RkpJournal,
-) {
-    fun generate(
-        count: RkpKeyCount,
-        deadline: BrokerDeadline,
-        cancellation: BrokerCancellation,
-    ): BrokerOutcome<IrpcKeyBatch> {
-        val intent = journal.begin(count)
-        val outcome = client.generateKeyBatch(count, deadline, cancellation)
-        if (outcome is BrokerOutcome.Success) {
-            journal.record(intent, outcome.value)
-        } else {
-            journal.quarantine(intent)
-        }
-        return outcome
-    }
 }
 
 private fun sha256(bytes: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(bytes)

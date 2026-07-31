@@ -18,9 +18,10 @@ pub use failure_budget::{
 };
 pub use replay::{PersistedTombstone, ReplayManager, TombstoneTime};
 pub use rkp_lease::{
-    BatchId, CertifiedLeaseMetadata, ChainHash, IrpcIdentityHash, LeaseId, LeaseState,
-    PublicChainMetadata, PublicKeyHash, RemoteKeyHandle, RkpLease, RkpLeaseBatch, RkpLeaseError,
-    SpkiHash, ValidatedCertificationToken, hash_public_key,
+    BatchId, CertifiedKeyEvidence, CertifiedLeaseMetadata, ChainHash, IrpcIdentityHash, LeaseId,
+    LeaseState, PublicChainMetadata, PublicKeyHash, RemoteKeyHandle, RkpLease, RkpLeaseBatch,
+    RkpLeaseError, SpkiHash, ValidatedCertificationToken, hash_public_key,
+    verify_certified_evidence,
 };
 pub use sensitive::SensitiveStateStore;
 

@@ -2,6 +2,8 @@ package org.matrix.TEESimulator.rka.broker
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class IrpcKeyBatchTest {
@@ -29,4 +31,28 @@ class IrpcKeyBatchTest {
             )
         )
     }
+
+    @Test
+    fun retainedBlobIsWipedAndRemovedOnClear() {
+        val wiped = mutableListOf<ByteArray>()
+        val owner = BrokerKeyBlobOwner { wiped += it }
+        val batch =
+            IrpcKeyBatch(
+                listOf(IrpcGeneratedKey(byteArrayOf(1), byteArrayOf(81, 82, 83, 84))),
+                owner,
+            )
+        batch.retain(listOf(ByteArray(32) { 7 }))
+
+        owner.clear()
+
+        assertTrue(owner.isEmpty())
+        assertTrue(wiped.single().all { it == 0.toByte() })
+        assertFalse(batch.toString().toByteArray().containsSubsequence(byteArrayOf(81, 82, 83, 84)))
+    }
 }
+
+private fun ByteArray.containsSubsequence(candidate: ByteArray): Boolean =
+    indices.any { start ->
+        start + candidate.size <= size &&
+            candidate.indices.all { offset -> this[start + offset] == candidate[offset] }
+    }

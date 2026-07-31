@@ -1,10 +1,18 @@
 package org.matrix.TEESimulator.rka.journal
 
+import java.nio.file.Path
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.matrix.TEESimulator.rka.broker.BrokerCancellation
+import org.matrix.TEESimulator.rka.broker.BrokerDeadline
+import org.matrix.TEESimulator.rka.broker.BrokerOutcome
+import org.matrix.TEESimulator.rka.broker.DirectCallRunner
+import org.matrix.TEESimulator.rka.broker.FakeIrpcEndpoint
+import org.matrix.TEESimulator.rka.broker.FakeResolver
 import org.matrix.TEESimulator.rka.broker.IrpcGeneratedKey
-import org.matrix.TEESimulator.rka.broker.IrpcKeyBatch
 import org.matrix.TEESimulator.rka.broker.RkpKeyCount
 
 class RkpJournalTest {
@@ -18,23 +26,69 @@ class RkpJournalTest {
             RkpJournalState.RKP_KEY_GENERATING,
             RkpJournalCodec.decode(store.writes[0]).state,
         )
-        val recorded =
-            journal.record(
-                generating,
-                IrpcKeyBatch(
-                    listOf(
-                        IrpcGeneratedKey(byteArrayOf(1), byteArrayOf(81)),
-                        IrpcGeneratedKey(byteArrayOf(2), byteArrayOf(82)),
-                    )
-                ),
-            )
+        val entries = journal.deriveEntries(generating, listOf(byteArrayOf(1), byteArrayOf(2)))
+        val recorded = journal.record(generating, entries) {}
 
         assertEquals(listOf(0, 1), recorded.entries.map { it.order })
         assertEquals(
             RkpJournalState.RKP_KEY_RECORDED,
             RkpJournalCodec.decode(store.writes[1]).state,
         )
-        assertTrue(store.writes.none { String(it).contains("81") || String(it).contains("82") })
+        assertFalse(store.writes.any { it.containsSubsequence(byteArrayOf(81, 82, 83, 84)) })
+    }
+
+    @Test
+    fun batchRecordedBeforeCsr() {
+        val order = mutableListOf<String>()
+        val sync = RecordingSyncOps(order)
+        val store = FileRkpJournalStore(Path.of("/journal/rkp"), sync)
+        val calls = intArrayOf(0)
+        val client =
+            org.matrix.TEESimulator.rka.broker.IrpcClient(
+                FakeResolver(
+                    irpc =
+                        FakeIrpcEndpoint(
+                            onGenerate = {
+                                calls[0] += 1
+                                order += "hardware"
+                            },
+                            generated =
+                                IrpcGeneratedKey(byteArrayOf(1), byteArrayOf(81, 82, 83, 84)),
+                        )
+                ),
+                DirectCallRunner,
+            )
+        val generator = DurableIrpcKeyBatchGenerator(client, RkpJournal(store))
+
+        val result =
+            generator.batchRecordedBeforeCsr(
+                count(1),
+                BrokerDeadline.at(5_000),
+                BrokerCancellation.active(),
+            ) {
+                order += "csr"
+            }
+
+        assertTrue(result is BrokerOutcome.Success)
+        assertEquals(1, calls[0])
+        assertFalse(sync.writes.any { it.containsSubsequence(byteArrayOf(81, 82, 83, 84)) })
+        assertEquals(
+            listOf(
+                "temp",
+                "write",
+                "file-fsync",
+                "rename",
+                "parent-fsync",
+                "hardware",
+                "temp",
+                "write",
+                "file-fsync",
+                "rename",
+                "parent-fsync",
+                "csr",
+            ),
+            order,
+        )
     }
 
     @Test
@@ -52,7 +106,7 @@ class RkpJournalTest {
     @Test
     fun postingCrashBecomesAmbiguousWithoutRetry() {
         val journal = RkpJournal(MemoryJournalStore())
-        val recorded = journal.record(journal.begin(count(1)), batch())
+        val recorded = recorded(journal)
         val prepared = journal.transition(recorded, RkpJournalState.CSR_PREPARED)
         journal.transition(prepared, RkpJournalState.CSR_POSTING)
 
@@ -63,7 +117,7 @@ class RkpJournalTest {
     @Test
     fun appGeneratingCrashBecomesQuarantined() {
         val journal = RkpJournal(MemoryJournalStore())
-        val recorded = journal.record(journal.begin(count(1)), batch())
+        val recorded = recorded(journal)
         val prepared = journal.transition(recorded, RkpJournalState.CSR_PREPARED)
         val posting = journal.transition(prepared, RkpJournalState.CSR_POSTING)
         val certified = journal.transition(posting, RkpJournalState.RKP_CERTIFIED)
@@ -83,19 +137,73 @@ class RkpJournalTest {
         RkpJournal(MemoryJournalStore(fail = true)).begin(count(1))
     }
 
+    @Test
+    fun writeFailurePreventsHardware() {
+        val calls = intArrayOf(0)
+        val generator =
+            DurableIrpcKeyBatchGenerator(
+                org.matrix.TEESimulator.rka.broker.IrpcClient(
+                    FakeResolver(irpc = FakeIrpcEndpoint(onGenerate = { calls[0] += 1 })),
+                    DirectCallRunner,
+                ),
+                RkpJournal(MemoryJournalStore(fail = true)),
+            )
+
+        assertThrows(IllegalStateException::class.java) {
+            generator.generate(count(1), BrokerDeadline.at(5_000), BrokerCancellation.active())
+        }
+        assertEquals(0, calls[0])
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun rejectsDuplicateTransition() {
         val journal = RkpJournal(MemoryJournalStore())
-        val recorded = journal.record(journal.begin(count(1)), batch())
+        val recorded = recorded(journal)
         journal.transition(recorded, RkpJournalState.CSR_PREPARED)
         journal.transition(recorded, RkpJournalState.CSR_PREPARED)
+    }
+
+    @Test
+    fun rejectsForgedDeterministicHandle() {
+        val journal = RkpJournal(MemoryJournalStore())
+        val encoded = RkpJournalCodec.encode(recorded(journal))
+        encoded[encoded.lastIndex] = (encoded.last().toInt() xor 1).toByte()
+
+        assertThrows(IllegalArgumentException::class.java) { RkpJournalCodec.decode(encoded) }
+    }
+
+    @Test
+    fun terminalDeleteClearsBrokerOwnerBeforeReturn() {
+        val journal = RkpJournal(MemoryJournalStore())
+        val generating = journal.begin(count(1))
+        var clears = 0
+        var current =
+            journal.record(generating, journal.deriveEntries(generating, listOf(byteArrayOf(1)))) {
+                clears += 1
+            }
+        current = journal.transition(current, RkpJournalState.CSR_PREPARED)
+        current = journal.transition(current, RkpJournalState.CSR_POSTING)
+        current = journal.transition(current, RkpJournalState.RKP_CERTIFIED)
+        current = journal.transition(current, RkpJournalState.APP_KEY_GENERATING)
+        current = journal.transition(current, RkpJournalState.APP_KEY_RECORDED)
+        current = journal.transition(current, RkpJournalState.EXPOSED)
+        current = journal.transition(current, RkpJournalState.TERMINAL)
+
+        journal.transition(current, RkpJournalState.DELETE)
+
+        assertEquals(1, clears)
     }
 
     private fun count(value: Int): RkpKeyCount =
         (RkpKeyCount.parse(value) as org.matrix.TEESimulator.rka.broker.BrokerOutcome.Success).value
 
-    private fun batch(): IrpcKeyBatch =
-        IrpcKeyBatch(listOf(IrpcGeneratedKey(byteArrayOf(1), byteArrayOf(81))))
+    private fun recorded(journal: RkpJournal): RkpJournalRecord {
+        val generating = journal.begin(count(1))
+        return journal.record(
+            generating,
+            journal.deriveEntries(generating, listOf(byteArrayOf(1))),
+        ) {}
+    }
 }
 
 private class MemoryJournalStore(private val fail: Boolean = false) : RkpJournalStore {
@@ -108,3 +216,43 @@ private class MemoryJournalStore(private val fail: Boolean = false) : RkpJournal
         writes += value.copyOf()
     }
 }
+
+private class RecordingSyncOps(private val order: MutableList<String>) : JournalSyncOps {
+    private var current: ByteArray? = null
+    private var temporary: ByteArray? = null
+    val writes = mutableListOf<ByteArray>()
+
+    override fun validateTarget(path: Path) {}
+
+    override fun read(path: Path): ByteArray? = current?.copyOf()
+
+    override fun createPrivateTemp(parent: Path): Path =
+        parent.resolve("temp").also { order += "temp" }
+
+    override fun write(path: Path, value: ByteArray) {
+        order += "write"
+        temporary = value.copyOf()
+        writes += value.copyOf()
+    }
+
+    override fun fsyncFile(path: Path) {
+        order += "file-fsync"
+    }
+
+    override fun atomicMove(source: Path, target: Path) {
+        order += "rename"
+        current = temporary
+    }
+
+    override fun fsyncDirectory(path: Path) {
+        order += "parent-fsync"
+    }
+
+    override fun deleteIfExists(path: Path) {}
+}
+
+private fun ByteArray.containsSubsequence(candidate: ByteArray): Boolean =
+    indices.any { start ->
+        start + candidate.size <= size &&
+            candidate.indices.all { offset -> this[start + offset] == candidate[offset] }
+    }

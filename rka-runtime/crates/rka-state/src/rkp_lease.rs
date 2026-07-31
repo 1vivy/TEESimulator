@@ -103,6 +103,60 @@ pub struct ValidatedCertificationToken {
     chain_hash: ChainHash,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "validated certificate evidence has a closed schema"
+)]
+pub struct CertifiedKeyEvidence {
+    pub batch_id: BatchId,
+    pub order: u8,
+    pub public_key_hash: PublicKeyHash,
+    pub leaf_spki_hash: SpkiHash,
+    pub certificate_count: u8,
+    pub chain_hash: ChainHash,
+}
+
+/// Converts already-validated certificate evidence into an opaque activation capability.
+///
+/// This function verifies structural binding only. Certificate parsing and X.509 validation belong
+/// to the caller.
+///
+/// # Errors
+/// Rejects missing, reordered, duplicated, or mismatched evidence.
+pub fn verify_certified_evidence(
+    pending: &RkpLeaseBatch,
+    evidence: &[CertifiedKeyEvidence],
+) -> Result<ValidatedCertificationToken, RkpLeaseError> {
+    if evidence.len() != pending.leases.len() || evidence.is_empty() {
+        return Err(RkpLeaseError::Certification);
+    }
+    let first = evidence.first().ok_or(RkpLeaseError::Certification)?;
+    for (order, (lease, certified)) in pending.leases.iter().zip(evidence).enumerate() {
+        let expected_order = u8::try_from(order).map_err(|_| RkpLeaseError::Count)?;
+        if certified.certificate_count == 0
+            || certified.batch_id != lease.metadata.batch_id
+            || certified.order != expected_order
+            || certified.order != lease.metadata.order
+            || certified.public_key_hash != lease.metadata.public_key_hash
+            || certified.leaf_spki_hash != lease.metadata.spki_hash
+            || certified.certificate_count != lease.metadata.chain.certificate_count
+            || certified.chain_hash != lease.metadata.chain.chain_hash
+            || certified.chain_hash != first.chain_hash
+            || evidence.iter().take(order).any(|prior| {
+                prior.public_key_hash == certified.public_key_hash
+                    || prior.leaf_spki_hash == certified.leaf_spki_hash
+            })
+        {
+            return Err(RkpLeaseError::Certification);
+        }
+    }
+    Ok(ValidatedCertificationToken {
+        batch_id: first.batch_id,
+        chain_hash: first.chain_hash,
+    })
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct RkpLeaseBatch {
     leases: Vec<RkpLease>,

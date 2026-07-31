@@ -25,7 +25,7 @@ internal interface IrpcServiceEndpoint {
 
     fun generateKey(): IrpcGeneratedKey
 
-    fun generateCertificateRequestV2(keys: List<IrpcGeneratedKey>, challenge: ByteArray): ByteArray
+    fun generateCertificateRequestV2(publicKeys: List<ByteArray>, challenge: ByteArray): ByteArray
 }
 
 class IrpcClient
@@ -91,7 +91,7 @@ internal constructor(
     ): BrokerOutcome<HalCertificateRequest> =
         withV3Endpoint(deadline, cancellation) { endpoint ->
             HalCertificateRequest(
-                endpoint.generateCertificateRequestV2(batch.opaqueKeys(), challenge.copyBytes())
+                endpoint.generateCertificateRequestV2(batch.publicKeys(), challenge.copyBytes())
             )
         }
 
@@ -144,14 +144,14 @@ internal class AndroidIrpcServiceEndpoint(
     }
 
     override fun generateCertificateRequestV2(
-        keys: List<IrpcGeneratedKey>,
+        publicKeys: List<ByteArray>,
         challenge: ByteArray,
     ): ByteArray {
-        val publicKeys =
-            keys
-                .map { key -> MacedPublicKey().apply { macedKey = key.copyPublicKey() } }
+        val macedPublicKeys =
+            publicKeys
+                .map { key -> MacedPublicKey().apply { macedKey = key.copyOf() } }
                 .toTypedArray()
-        return service.generateCertificateRequestV2(publicKeys, challenge.copyOf())
+        return service.generateCertificateRequestV2(macedPublicKeys, challenge.copyOf())
     }
 }
 

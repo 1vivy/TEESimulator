@@ -1,5 +1,9 @@
 import com.android.build.api.artifact.SingleArtifact
 import java.io.ByteArrayOutputStream
+import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermissions
+import java.security.MessageDigest
+import java.util.zip.ZipFile
 import javax.inject.Inject
 import org.gradle.process.ExecOperations
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -37,6 +41,7 @@ val versionCodeFloorOffset = 5
 val gitCommitCount =
     gitExecutor.execute("git rev-list HEAD --count", rootDir).toInt() + versionCodeFloorOffset
 val gitCommitHash = gitExecutor.execute("git rev-parse --verify --short HEAD", rootDir)
+val gitCommitSha = gitExecutor.execute("git rev-parse --verify HEAD", rootDir)
 val verName = "v6.0.1"
 
 android {
@@ -242,7 +247,6 @@ androidComponents {
                 }
                 dependsOn(buildRustCertgen)
                 dependsOn(stageRkaRuntimeArm64)
-                dependsOn(refreshUpdateJson)
 
                 if (isDebug) {
                     from(variant.artifacts.get(SingleArtifact.APK)) {
@@ -276,40 +280,128 @@ androidComponents {
                 }
                 from(rkaRuntimeStageDir) { include("rka-sidecar") }
 
-                // Now, copy and process the files from 'module' directory.
                 val sourceModuleDir = rootProject.projectDir.resolve("module")
                 from(sourceModuleDir) {
-                    exclude("module.prop") // Exclude the template file.
-                    exclude("diag.sh") // Debug-only diagnostic plane; included for debug below.
+                    include(
+                        "daemon",
+                        "module.prop",
+                        "rka-control.sh",
+                        "rka-paths.sh",
+                        "rka-profile.schema",
+                        "rka-role.conf",
+                        "rka-runtime.manifest",
+                        "rka-supervisor.sh",
+                        "sepolicy.rule",
+                        "service.sh",
+                        "uninstall.sh",
+                    )
+                    exclude("module.prop")
                 }
+                from(sourceModuleDir.resolve("webroot")) {
+                    into("webroot")
+                    include("**/*")
+                }
+                from(rootProject.projectDir.resolve("NOTICE")) { into("licenses") }
+                from(rootProject.projectDir.resolve("LICENSE")) { into("licenses") }
 
                 // Copy and filter the module.prop template separately.
                 from(sourceModuleDir) {
                     include("module.prop")
-                    // Use expand() for simple key-value replacement.
                     expand(
                         "REPLACEMEVERCODE" to gitCommitCount.toString(),
                         "REPLACEMEVER" to "$verName-$gitCommitCount",
                     )
                 }
 
-                if (isDebug) {
-                    from(sourceModuleDir) { include("diag.sh") }
-                }
-
-                // The destination for all the above 'from' operations.
                 into(tempModuleDir)
+                filePermissions { unix("0644") }
+                filesMatching("daemon") { filePermissions { unix("0755") } }
+                filesMatching("rka-control.sh") { filePermissions { unix("0755") } }
+                filesMatching("rka-paths.sh") { filePermissions { unix("0755") } }
+                filesMatching("rka-supervisor.sh") { filePermissions { unix("0755") } }
+                filesMatching("service.sh") { filePermissions { unix("0755") } }
+                filesMatching("uninstall.sh") { filePermissions { unix("0755") } }
+                filesMatching("rka-sidecar") { filePermissions { unix("0755") } }
 
-                if (isDebug) {
-                    doLast {
-                        // Debug-only: grant the keystore + soterserver (platform_app) domains
-                        // external-storage access for the per-UID NDJSON sink. diag.sh (shipped
-                        // only in debug) carries the shell side of the diagnostic plane.
-                        tempModuleDir.get().asFile.resolve("sepolicy.rule")
-                            .appendText(
-                                "\nallow keystore media_rw_data_file { dir file } *" +
-                                    "\nallow platform_app media_rw_data_file { dir file } *\n",
-                            )
+                doLast {
+                    val stageDirectory = tempModuleDir.get().asFile
+                    val executableEntries =
+                        setOf(
+                            "daemon",
+                            "rka-control.sh",
+                            "rka-paths.sh",
+                            "rka-sidecar",
+                            "rka-supervisor.sh",
+                            "service.sh",
+                            "uninstall.sh",
+                        )
+                    val artifactEntries =
+                        stageDirectory
+                            .walkTopDown()
+                            .filter(File::isFile)
+                            .map { it.relativeTo(stageDirectory).invariantSeparatorsPath }
+                            .filterNot { it.startsWith("META-INF/") }
+                            .sorted()
+                            .toList()
+                    artifactEntries.forEach { entry ->
+                        val mode = if (entry in executableEntries) "rwxr-xr-x" else "rw-r--r--"
+                        Files.setPosixFilePermissions(
+                            stageDirectory.resolve(entry).toPath(),
+                            PosixFilePermissions.fromString(mode),
+                        )
+                    }
+                    val digest = MessageDigest.getInstance("SHA-256")
+                    fun digestFile(file: File): String {
+                        digest.reset()
+                        file.inputStream().use { input ->
+                            val buffer = ByteArray(8192)
+                            while (true) {
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                digest.update(buffer, 0, count)
+                            }
+                        }
+                        return digest.digest().joinToString("") { "%02x".format(it) }
+                    }
+                    val metadataDirectory = stageDirectory.resolve("META-INF")
+                    metadataDirectory.mkdirs()
+                    val artifactManifest = metadataDirectory.resolve("rka-artifacts.sha256")
+                    artifactManifest.writeText(
+                        artifactEntries.joinToString("\n") { entry ->
+                            "${digestFile(stageDirectory.resolve(entry))}  $entry"
+                        } + "\n",
+                    )
+                    val sourceEntries =
+                        listOf(
+                            "NOTICE",
+                            "LICENSE",
+                            "module/daemon",
+                            "module/module.prop",
+                            "module/rka-control.sh",
+                            "module/rka-paths.sh",
+                            "module/rka-profile.schema",
+                            "module/rka-role.conf",
+                            "module/rka-runtime.manifest",
+                            "module/rka-supervisor.sh",
+                            "module/sepolicy.rule",
+                            "module/service.sh",
+                            "module/uninstall.sh",
+                        ) +
+                            sourceModuleDir.resolve("webroot").walkTopDown().filter(File::isFile).map {
+                                it.relativeTo(rootProject.projectDir).invariantSeparatorsPath
+                            }.toList().sorted()
+                    val sourceManifest = metadataDirectory.resolve("rka-source.sha256")
+                    sourceManifest.writeText(
+                        "commit=$gitCommitSha\n" +
+                            sourceEntries.joinToString("\n") { entry ->
+                                "${digestFile(rootProject.projectDir.resolve(entry))}  $entry"
+                            } + "\n",
+                    )
+                    listOf(artifactManifest, sourceManifest).forEach {
+                        Files.setPosixFilePermissions(
+                            it.toPath(),
+                            PosixFilePermissions.fromString("rw-r--r--"),
+                        )
                     }
                 }
             }
@@ -323,7 +415,52 @@ androidComponents {
 
                 archiveFileName.set(zipFileName)
                 destinationDirectory.set(project.rootDir.resolve("out"))
-                from(tempModuleDir) // Zip the entire contents of the staging directory.
+                from(tempModuleDir) {
+                    include(
+                        "daemon",
+                        "rka-control.sh",
+                        "rka-paths.sh",
+                        "rka-sidecar",
+                        "rka-supervisor.sh",
+                        "service.sh",
+                        "uninstall.sh",
+                    )
+                    filePermissions { unix("0755") }
+                }
+                from(tempModuleDir) {
+                    exclude(
+                        "daemon",
+                        "rka-control.sh",
+                        "rka-paths.sh",
+                        "rka-sidecar",
+                        "rka-supervisor.sh",
+                        "service.sh",
+                        "uninstall.sh",
+                    )
+                    filePermissions { unix("0644") }
+                }
+                isPreserveFileTimestamps = false
+                isReproducibleFileOrder = true
+                if (!isDebug) {
+                    doLast {
+                        val archive = archiveFile.get().asFile
+                        val digest = MessageDigest.getInstance("SHA-256")
+                        val hash = archive.inputStream().use { input ->
+                            val buffer = ByteArray(8192)
+                            while (true) {
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                digest.update(buffer, 0, count)
+                            }
+                            digest.digest().joinToString("") { "%02x".format(it) }
+                        }
+                        rootProject.layout.buildDirectory
+                            .file("rka-release.sha256")
+                            .get()
+                            .asFile
+                            .writeText("$hash  out/${archive.name}\n")
+                    }
+                }
             }
 
         // Task 3: A helper function to create installation tasks for different root providers.
@@ -369,3 +506,57 @@ androidComponents {
         createInstallTasks("Apatch", "/data/adb/apd module install")
     }
 }
+
+val verifyRkaModuleArchive by
+    tasks.registering {
+        group = "TEESimulator-RS Module Packaging"
+        description = "Verifies that the KSU archives contain only the role-neutral RKA runtime."
+        dependsOn("zipRelease", "zipDebug")
+
+        doLast {
+            val forbiddenEntryFragments =
+                listOf("keybox", "diag", "action", "customize", "update.json", "persistent_keys")
+            val commonEntries =
+                setOf(
+                    "daemon",
+                    "rka-sidecar",
+                    "rka-control.sh",
+                    "rka-paths.sh",
+                    "rka-profile.schema",
+                    "rka-role.conf",
+                    "rka-runtime.manifest",
+                    "rka-supervisor.sh",
+                    "sepolicy.rule",
+                    "service.sh",
+                    "uninstall.sh",
+                    "webroot/index.html",
+                    "webroot/app.js",
+                    "webroot/style.css",
+                    "licenses/NOTICE",
+                    "licenses/LICENSE",
+                    "META-INF/rka-artifacts.sha256",
+                    "META-INF/rka-source.sha256",
+                )
+            val archives =
+                rootProject.projectDir.resolve("out").listFiles()?.filter {
+                    it.name.endsWith(".zip") && it.name.contains("-$verName-$gitCommitCount-")
+                } ?: emptyList()
+            require(archives.size >= 2) { "Expected debug and release RKA archives." }
+            archives.forEach { archive ->
+                ZipFile(archive).use { zip ->
+                    val entries = zip.entries().asSequence().filterNot { it.isDirectory }.map { it.name }.toSet()
+                    require(entries.containsAll(commonEntries)) { "Archive $archive is missing RKA runtime files." }
+                    require(entries.none { entry -> forbiddenEntryFragments.any(entry::contains) }) {
+                        "Archive $archive contains forbidden legacy material."
+                    }
+                    val variantEntry = if (archive.name.endsWith("-Release.zip")) "classes.dex" else "service.apk"
+                    require(entries.contains(variantEntry)) { "Archive $archive lacks $variantEntry." }
+                    val sidecar = zip.getEntry("rka-sidecar") ?: error("Archive $archive lacks rka-sidecar.")
+                    val magic = zip.getInputStream(sidecar).readNBytes(4)
+                    require(magic.contentEquals(byteArrayOf(0x7f, 0x45, 0x4c, 0x46))) {
+                        "Archive $archive has a non-ELF sidecar."
+                    }
+                }
+            }
+        }
+    }

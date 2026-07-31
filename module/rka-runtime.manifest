@@ -1,0 +1,5 @@
+schema=1
+roles=LOCAL|DONOR|CANDIDATE
+sidecar_abi=arm64-v8a
+activation=staged-by-installer
+runtime_state=external-root-only

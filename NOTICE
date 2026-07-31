@@ -35,3 +35,7 @@ Third-party components:
 4. The separate RKA sidecar workspace uses the `thiserror` Rust crate under
    the MIT OR Apache-2.0 license. Resolved dependency versions are recorded in
    rka-runtime/Cargo.lock and audited by rka-runtime/deny.toml.
+
+5. The module archive carries the role-neutral RKA broker, arm64 sidecar,
+   static schema, SELinux policy, and WebUI assets. Device profiles, transport
+   keys, trust material, and generated credentials are intentionally external.

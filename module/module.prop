@@ -3,5 +3,5 @@ name=TEESimulator-RS
 version=${REPLACEMEVER}
 versionCode=${REPLACEMEVERCODE}
 author=JingMatrix, Enginex0
-description=Software simulation for Android hardware-backed key pairs with key attestation
+description=Role-neutral RKA broker and arm64 sidecar runtime for Android key attestation
 updateJson=https://raw.githubusercontent.com/Enginex0/TEESimulator-RS/main/module/update.json

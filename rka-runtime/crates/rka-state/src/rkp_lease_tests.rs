@@ -51,7 +51,7 @@ fn lease(order: u8) -> RkpLease {
         irpc_identity_hash: IrpcIdentityHash::new([4; 32]),
         remote_handle: RemoteKeyHandle::new([handle; 32]),
         chain: PublicChainMetadata {
-            chain_hash: ChainHash::new([9; 32]),
+            chain_hash: ChainHash::new([order.saturating_add(9); 32]),
             certificate_count: 2,
         },
         validator_public_key: validator_public_key(42),

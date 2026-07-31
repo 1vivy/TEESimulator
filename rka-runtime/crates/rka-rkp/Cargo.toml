@@ -9,7 +9,14 @@ description = "Host-testable provisioning boundary for the TEESimulator RKA side
 publish = false
 
 [dependencies]
+ciborium.workspace = true
+ring.workspace = true
+rka-state = { version = "=0.1.0", path = "../rka-state" }
 thiserror.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
 
 [lints]
 workspace = true

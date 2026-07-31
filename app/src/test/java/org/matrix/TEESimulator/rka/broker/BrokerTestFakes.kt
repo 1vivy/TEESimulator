@@ -57,17 +57,25 @@ internal class FakeIrpcEndpoint(
     private val onGenerate: (() -> Unit)? = null,
     private val generated: IrpcGeneratedKey =
         IrpcGeneratedKey(byteArrayOf(1, 2, 3), testSpki(), byteArrayOf(9, 8, 7)),
+    private val generatedSequence: ArrayDeque<IrpcGeneratedKey>? = null,
+    private val certificateRequest: ByteArray? = null,
 ) : IrpcServiceEndpoint {
+    val certificateRequests = mutableListOf<Pair<List<ByteArray>, ByteArray>>()
+
     override fun generateKey(): IrpcGeneratedKey {
         onGenerate?.invoke()
         if (dieOnGenerate) alive.set(false)
-        return generated
+        return generatedSequence?.removeFirst() ?: generated
     }
 
     override fun generateCertificateRequestV2(
         publicKeys: List<ByteArray>,
         challenge: ByteArray,
-    ): ByteArray = byteArrayOf(0x83.toByte(), publicKeys.size.toByte(), challenge.size.toByte())
+    ): ByteArray {
+        certificateRequests += publicKeys.map(ByteArray::copyOf) to challenge.copyOf()
+        return certificateRequest?.copyOf()
+            ?: byteArrayOf(0x83.toByte(), publicKeys.size.toByte(), challenge.size.toByte())
+    }
 }
 
 internal class FakeKeyMintEndpoint(
@@ -84,6 +92,18 @@ internal object MissingBrokerService : NoSuchElementException("missing")
 internal fun testSpki(): ByteArray =
     KeyPairGenerator.getInstance("EC")
         .apply { initialize(ECGenParameterSpec("secp256r1")) }
+        .generateKeyPair()
+        .public
+        .encoded
+
+internal fun distinctTestSpki(seed: Int): ByteArray =
+    KeyPairGenerator.getInstance("EC")
+        .apply {
+            initialize(
+                ECGenParameterSpec("secp256r1"),
+                java.security.SecureRandom.getInstance("SHA1PRNG").apply { setSeed(seed.toLong()) },
+            )
+        }
         .generateKeyPair()
         .public
         .encoded

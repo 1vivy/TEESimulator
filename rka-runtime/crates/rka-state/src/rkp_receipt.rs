@@ -64,19 +64,13 @@ impl ValidatedChainReceipt {
 #[derive(Debug)]
 pub struct ValidatedCertificationToken {
     pub(crate) batch_id: BatchId,
-    pub(crate) chain_hash: ChainHash,
     pub(crate) binding_hash: [u8; 32],
 }
 
 impl ValidatedCertificationToken {
     pub(crate) fn consume_matches(self, batch: &RkpLeaseBatch) -> bool {
         batch.leases.first().is_some_and(|lease| {
-            self.batch_id == lease.metadata().batch_id
-                && self.binding_hash == batch_binding(batch)
-                && batch
-                    .leases
-                    .iter()
-                    .all(|item| item.metadata().chain.chain_hash == self.chain_hash)
+            self.batch_id == lease.metadata().batch_id && self.binding_hash == batch_binding(batch)
         })
     }
 }
@@ -123,7 +117,6 @@ pub fn verify_validated_chain_receipts(
     }
     Ok(ValidatedCertificationToken {
         batch_id: first.batch_id,
-        chain_hash: first.chain.chain_hash,
         binding_hash: batch_binding(pending),
     })
 }

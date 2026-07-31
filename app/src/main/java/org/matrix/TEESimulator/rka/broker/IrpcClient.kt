@@ -4,12 +4,15 @@ import android.hardware.security.keymint.IRemotelyProvisionedComponent
 import android.hardware.security.keymint.MacedPublicKey
 import android.os.IBinder
 import android.os.ServiceManager
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 
 class HalCertificateRequest internal constructor(bytes: ByteArray) {
     private val bytes = bytes.copyOf()
 
     fun copyBytes(): ByteArray = bytes.copyOf()
+
+    fun halCsrHash(): ByteArray = MessageDigest.getInstance("SHA-256").digest(bytes)
 
     override fun toString(): String = "HalCertificateRequest(length=${bytes.size})"
 }

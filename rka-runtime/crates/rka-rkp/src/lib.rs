@@ -191,8 +191,24 @@ pub const fn validate_request(request: &[u8]) -> Result<(), ProvisioningError> {
     Ok(())
 }
 
+mod activation;
 pub mod challenge;
 pub mod config;
+mod csr;
+mod response;
+mod status;
+mod trust;
+mod validation;
+
+pub use activation::{ActivationError, activate_validated_response};
+pub use csr::{PreparedCertificateRequest, assemble_android_v3_body};
+pub use response::parse_signed_certificates;
+pub use status::{CertificateStatus, STATUS_URL, StatusSnapshot};
+pub use trust::{GOOGLE_ROOT_HASHES, RootBundle, RootRotationAuthorization};
+pub use validation::{
+    ExpectedKey, ResponseContext, ValidatedChain, ValidatedResponse, ValidationError,
+    validate_response,
+};
 
 #[cfg(test)]
 mod tests {

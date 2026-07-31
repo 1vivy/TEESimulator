@@ -16,6 +16,9 @@ mod provisioning;
 mod provisioning_io;
 mod trust_runtime;
 
+/// Paired-only donor policy and lifecycle service.
+pub mod donor;
+
 pub use provisioning::{ProvisioningRunError, provision_once};
 pub use trust_runtime::{committed_profile_epoch, dispatch_rotation};
 

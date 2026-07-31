@@ -1,0 +1,77 @@
+use super::{RemoteKeyHandle, RemoteOperationHandle};
+
+/// Broker generate request containing public inputs and typed handles only.
+#[derive(Clone, Copy, Debug)]
+pub struct BrokerGenerate<'a> {
+    pub rkp_handle: RemoteKeyHandle,
+    pub candidate_aaid: &'a [u8],
+    pub challenge: &'a [u8],
+    pub envelope_hash: [u8; 32],
+    pub prior_transcript_hash: [u8; 32],
+}
+
+/// Typed begin request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BrokerBegin {
+    pub key_handle: RemoteKeyHandle,
+}
+
+/// Public generated-key result. No key blob or live broker object crosses this seam.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedKey {
+    pub handle: RemoteKeyHandle,
+    pub certificate_chain: Vec<Vec<u8>>,
+    pub leaf_spki_hash: [u8; 32],
+    pub characteristics_hash: [u8; 32],
+}
+
+impl GeneratedKey {
+    #[must_use]
+    pub const fn new(
+        handle: RemoteKeyHandle,
+        certificate_chain: Vec<Vec<u8>>,
+        leaf_spki_hash: [u8; 32],
+        characteristics_hash: [u8; 32],
+    ) -> Self {
+        Self {
+            handle,
+            certificate_chain,
+            leaf_spki_hash,
+            characteristics_hash,
+        }
+    }
+}
+
+/// Public key response retained by the donor.
+pub type PublicKeyResult = GeneratedKey;
+
+/// Redacted broker failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BrokerFailure {
+    Unavailable,
+    Rejected,
+}
+
+/// Typed Android broker boundary.
+pub trait DonorBroker {
+    fn generate(&mut self, request: BrokerGenerate<'_>) -> Result<GeneratedKey, BrokerFailure>;
+    fn begin(&mut self, request: BrokerBegin) -> Result<RemoteOperationHandle, BrokerFailure>;
+    fn update_aad(
+        &mut self,
+        operation: RemoteOperationHandle,
+        input: &[u8],
+    ) -> Result<usize, BrokerFailure>;
+    fn update(
+        &mut self,
+        operation: RemoteOperationHandle,
+        input: &[u8],
+    ) -> Result<Vec<u8>, BrokerFailure>;
+    fn finish(
+        &mut self,
+        operation: RemoteOperationHandle,
+        input: &[u8],
+    ) -> Result<Vec<u8>, BrokerFailure>;
+    fn abort(&mut self, operation: RemoteOperationHandle) -> Result<(), BrokerFailure>;
+    fn delete(&mut self, key: RemoteKeyHandle) -> Result<(), BrokerFailure>;
+    fn get(&mut self, key: RemoteKeyHandle) -> Result<PublicKeyResult, BrokerFailure>;
+}

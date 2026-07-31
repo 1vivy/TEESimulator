@@ -20,6 +20,24 @@ FIXED_EPOCH = "1785486225"
 
 
 class RkaPackageTest(unittest.TestCase):
+    def test_clean_release_build_writes_root_receipt_for_release_archive(self) -> None:
+        result = run(
+            ["./gradlew", "clean", "zipRelease", "--rerun-tasks"],
+            cwd=REPOSITORY_ROOT,
+            check=False,
+            capture_output=True,
+            env=os.environ | {"SOURCE_DATE_EPOCH": FIXED_EPOCH},
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        archive = self.current_archives()["Release"]
+        receipt = REPOSITORY_ROOT / "build" / "rka-release.sha256"
+        self.assertEqual(
+            receipt.read_text(encoding="ascii"),
+            f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  out/{archive.name}\n",
+        )
+
     def test_sepolicy_probe_manifest_is_complete_bounded_and_live(self) -> None:
         rules = [
             line

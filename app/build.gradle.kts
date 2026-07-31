@@ -471,11 +471,12 @@ androidComponents {
                             }
                             digest.digest().joinToString("") { "%02x".format(it) }
                         }
-                        rootProject.layout.buildDirectory
+                        val receipt = rootProject.layout.buildDirectory
                             .file("rka-release.sha256")
                             .get()
                             .asFile
-                            .writeText("$hash  out/${archive.name}\n")
+                        receipt.parentFile.mkdirs()
+                        receipt.writeText("$hash  out/${archive.name}\n")
                     }
                 }
             }

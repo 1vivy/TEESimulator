@@ -14,9 +14,11 @@ import java.math.BigInteger
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.matrix.TEESimulator.attestation.KeyMintAttestation
+import org.matrix.TEESimulator.interception.keystore.shim.CandidateKeyMintParcelCodec
 import org.matrix.TEESimulator.interception.keystore.shim.KeyMintSecurityLevelInterceptor
 import org.matrix.TEESimulator.rka.candidate.CandidateGenerateRequest
 import org.matrix.TEESimulator.rka.candidate.CandidateRuntime
@@ -73,9 +75,11 @@ class RemoteCandidateParcelEntrypointTest {
                 fakeInterface(IKeystoreSecurityLevel::class.java),
                 SecurityLevel.TRUSTED_ENVIRONMENT,
             )
-        interceptor.javaClass.getDeclaredField("candidateGenerateDecoder").let {
+        interceptor.javaClass.getDeclaredField("candidateRawParcelSource").let {
             it.isAccessible = true
-            it.set(interceptor) { _: Parcel -> descriptor("entrypoint") to attestation() }
+            it.set(interceptor) { _: Parcel ->
+                CandidateKeyMintParcelCodec.encodeGenerate(descriptor("entrypoint"), attestation())
+            }
         }
         val outcome = runCatching {
             interceptor.onPreTransact(
@@ -90,6 +94,21 @@ class RemoteCandidateParcelEntrypointTest {
         }
         assertTrue(outcome.getOrNull() != null || outcome.exceptionOrNull() is NullPointerException)
         assertEquals(listOf("generate"), fixture.backend.calls)
+    }
+
+    @Test
+    fun candidateKeyMintRawCodecIsCanonicalAndBounded() {
+        val raw = CandidateKeyMintParcelCodec.encodeGenerate(descriptor("codec"), attestation())
+        val decoded = CandidateKeyMintParcelCodec.decodeGenerate(raw)
+        assertEquals("codec", decoded.descriptor.alias)
+        assertEquals(listOf(2), decoded.attestation.purpose)
+        assertEquals(listOf(Digest.SHA_2_256), decoded.attestation.digest)
+        assertThrows(IllegalArgumentException::class.java) {
+            CandidateKeyMintParcelCodec.decodeGenerate(raw + 0)
+        }
+        assertThrows(java.io.EOFException::class.java) {
+            CandidateKeyMintParcelCodec.decodeGenerate(raw.copyOf(raw.size - 1))
+        }
     }
 
     private fun transactionCode(name: String): Int =

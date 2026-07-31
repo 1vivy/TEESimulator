@@ -73,8 +73,7 @@ class KeyMintSecurityLevelInterceptor(
 
     private val activeOps = ConcurrentHashMap<Int, ConcurrentLinkedDeque<SoftwareOperation>>()
     private val recentOps = ConcurrentHashMap<Int, ConcurrentLinkedDeque<Long>>()
-    private var candidateGenerateDecoder: ((Parcel) -> Pair<KeyDescriptor, KeyMintAttestation>)? =
-        null
+    private var candidateRawParcelSource: ((Parcel) -> ByteArray)? = null
 
     override fun onPreTransact(
         txId: Long,
@@ -625,11 +624,6 @@ class KeyMintSecurityLevelInterceptor(
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
-        candidateGenerateDecoder?.invoke(data)?.let { (descriptor, parsed) ->
-            routeCandidateGenerate(callingUid, descriptor, parsed)?.let {
-                return it
-            }
-        }
         if (SystemLogger.isUidLogged(callingUid)) {
             val savedPos = data.dataPosition()
             val req = data.marshall()
@@ -639,9 +633,18 @@ class KeyMintSecurityLevelInterceptor(
         val oversized = data.dataSize() > MAX_ALIAS_LENGTH
 
         return runCatching {
-                data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
-                val attestationKey = data.readTypedObject(KeyDescriptor.CREATOR)
+                val candidateParcel =
+                    candidateRawParcelSource
+                        ?.invoke(data)
+                        ?.let(CandidateKeyMintParcelCodec::decodeGenerate)
+                if (candidateParcel == null) {
+                    data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
+                }
+                val keyDescriptor =
+                    candidateParcel?.descriptor ?: data.readTypedObject(KeyDescriptor.CREATOR)!!
+                val attestationKey =
+                    if (candidateParcel == null) data.readTypedObject(KeyDescriptor.CREATOR)
+                    else null
 
                 SystemLogger.debug(
                     "Handling generateKey ${keyDescriptor.alias}, attestKey=${attestationKey?.alias}"
@@ -655,26 +658,28 @@ class KeyMintSecurityLevelInterceptor(
                 // behavior). Deciding here keeps params/parsedParams val and derives
                 // isAttestKeyRequest from the effective parameters.
                 val params =
-                    data.createTypedArray(KeyParameter.CREATOR)!!.let { raw ->
-                        val stripUniqueId =
-                            raw.any { it.tag == Tag.INCLUDE_UNIQUE_ID } &&
-                                !ConfigurationManager.checkSELinuxPermission(
-                                    callingPid,
-                                    "keystore_key",
-                                    "gen_unique_id",
-                                ) &&
-                                !ConfigurationManager.hasPermissionForUid(
-                                    callingUid,
-                                    "android.permission.REQUEST_UNIQUE_ID_ATTESTATION",
+                    if (candidateParcel != null) emptyArray()
+                    else
+                        data.createTypedArray(KeyParameter.CREATOR)!!.let { raw ->
+                            val stripUniqueId =
+                                raw.any { it.tag == Tag.INCLUDE_UNIQUE_ID } &&
+                                    !ConfigurationManager.checkSELinuxPermission(
+                                        callingPid,
+                                        "keystore_key",
+                                        "gen_unique_id",
+                                    ) &&
+                                    !ConfigurationManager.hasPermissionForUid(
+                                        callingUid,
+                                        "android.permission.REQUEST_UNIQUE_ID_ATTESTATION",
+                                    )
+                            if (stripUniqueId) {
+                                SystemLogger.debug(
+                                    "[TX_ID: $txId] Stripping INCLUDE_UNIQUE_ID for uid=$callingUid pid=$callingPid (no permission)"
                                 )
-                        if (stripUniqueId) {
-                            SystemLogger.debug(
-                                "[TX_ID: $txId] Stripping INCLUDE_UNIQUE_ID for uid=$callingUid pid=$callingPid (no permission)"
-                            )
-                            raw.filter { it.tag != Tag.INCLUDE_UNIQUE_ID }.toTypedArray()
-                        } else raw
-                    }
-                val parsedParams = KeyMintAttestation(params)
+                                raw.filter { it.tag != Tag.INCLUDE_UNIQUE_ID }.toTypedArray()
+                            } else raw
+                        }
+                val parsedParams = candidateParcel?.attestation ?: KeyMintAttestation(params)
                 routeCandidateGenerate(callingUid, keyDescriptor, parsedParams)?.let {
                     return it
                 }

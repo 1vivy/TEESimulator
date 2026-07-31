@@ -44,7 +44,8 @@ class RemoteCandidateProductionIntegrationTest {
                 .generate(CandidateGenerateRequest(fixture.id, fixture.identity, fixture.shape))
                 .remoteSuccess()
         val handle = fixture.service.begin(fixture.uid, key.id).remoteSuccess()
-        val binder = RemoteCandidateOperationBinder(fixture.runtime, handle)
+        val binder =
+            checkNotNull(CandidateBinderAdapter.operation(fixture.runtime, handle).iOperation)
 
         binder.updateAad(byteArrayOf(1))
         assertArrayEquals(ByteArray(0), binder.update(byteArrayOf(2)))

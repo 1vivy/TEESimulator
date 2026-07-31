@@ -231,7 +231,7 @@ sepolicy_cli=true" ] || { printf "RESULT=INCOMPATIBLE reason=KSUD_PROVENANCE\n";
     case "$ksud_pid" in *" "*) printf "RESULT=INCOMPATIBLE reason=KSUD_PROCESS\n"; exit ;; esac
     ksud_ns=$(readlink "/proc/$ksud_pid/ns/mnt") || { printf "RESULT=INCOMPATIBLE reason=KSUD_NAMESPACE\n"; exit; }
     [ -n "$init_ns" ] && [ -n "$ksud_ns" ] || { printf "RESULT=INCOMPATIBLE reason=MOUNT_SEMANTICS\n"; exit; }
-    for command in base64 find lsattr logcat nsenter openssl sha256sum stat timeout toybox xxd; do
+    for command in base64 find head lsattr logcat nsenter openssl sha256sum stat timeout toybox xxd; do
         command -v "$command" >/dev/null 2>&1 || { printf "RESULT=INCOMPATIBLE reason=DEPLOY_TOOLING\n"; exit; }
     done
     if [ -x "$active/rka-control.sh" ]; then
@@ -462,13 +462,33 @@ function process_record(line, fields, identity, pid, process) {
     manager_record=${ownership_tail%%|*}
     hosting_record=${ownership_tail#*|}
     case "$webui_pid$renderer_record$manager_record" in *" "*|*[!0-9a-f]*) exit 1 ;; esac
-    webui_uid=$(awk '/^Uid:/ {print $2; exit}' "/proc/$webui_pid/status") || exit 1
+    renderer_status="$state/run/renderer-status.$tx"
+    zygote_status="$state/run/zygote-status.$tx"
+    zygote_cmdline="$state/run/zygote-cmdline.$tx"
+    rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"
+    head -c 4097 "/proc/$webui_pid/status" > "$renderer_status" || { rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"; exit 1; }
+    [ "$(wc -c < "$renderer_status")" -le 4096 ] || { rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"; exit 1; }
+    webui_uid=$(awk '/^Uid:/ {print $2; exit}' "$renderer_status") || { rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"; exit 1; }
     case "$webui_uid" in ""|*[!0-9]*) exit 1 ;; esac
     webui_app_id=$((webui_uid % 100000))
     [ "$webui_app_id" -ge 99000 ] && [ "$webui_app_id" -le 99999 ] || exit 1
     webui_command=$(cat "/proc/$webui_pid/cmdline" | tr '\0' '\n' | head -n 1) || exit 1
     [ "$webui_command" = com.google.android.webview:sandboxed_process0 ] || exit 1
-    printf "manager_pid=%s\nmanager_uid=%s\nmanager_process=me.weishu.kernelsu\nmanager_record=%s\nrenderer_pid=%s\nrenderer_uid=%s\nrenderer_process=com.google.android.webview:sandboxed_process0\nrenderer_record=%s\nprovider_package=com.google.android.webview\nhosting_record=%s\n" "$manager_pid" "$manager_uid" "$manager_record" "$webui_pid" "$webui_uid" "$renderer_record" "$hosting_record" > "$txn/webui-owner.receipt"
+    renderer_parent_pid=$(awk '/^PPid:/ {print $2; exit}' "$renderer_status") || { rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"; exit 1; }
+    zygote_pid=$(pidof webview_zygote) || { rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"; exit 1; }
+    case "$renderer_parent_pid$zygote_pid" in *" "*|*[!0-9]*) rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"; exit 1 ;; esac
+    [ "$renderer_parent_pid" = "$zygote_pid" ] || { rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"; exit 1; }
+    head -c 4097 "/proc/$zygote_pid/status" > "$zygote_status" || { rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"; exit 1; }
+    [ "$(wc -c < "$zygote_status")" -le 4096 ] || { rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"; exit 1; }
+    zygote_name=$(awk '/^Name:/ {print $2; exit}' "$zygote_status") || { rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"; exit 1; }
+    zygote_uid=$(awk '/^Uid:/ {print $2; exit}' "$zygote_status") || { rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"; exit 1; }
+    [ "$zygote_name" = webview_zygote ] && [ "$zygote_uid" = 1053 ] || { rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"; exit 1; }
+    head -c 257 "/proc/$zygote_pid/cmdline" > "$zygote_cmdline" || { rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"; exit 1; }
+    [ "$(wc -c < "$zygote_cmdline")" -le 256 ] || { rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"; exit 1; }
+    zygote_command=$(tr '\0' '\n' < "$zygote_cmdline" | sed -n '1p') || { rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"; exit 1; }
+    rm -f "$renderer_status" "$zygote_status" "$zygote_cmdline"
+    [ "$zygote_command" = webview_zygote ] || exit 1
+    printf "manager_pid=%s\nmanager_uid=%s\nmanager_process=me.weishu.kernelsu\nmanager_record=%s\nrenderer_pid=%s\nrenderer_uid=%s\nrenderer_process=com.google.android.webview:sandboxed_process0\nrenderer_record=%s\nrenderer_parent_pid=%s\nzygote_pid=%s\nzygote_name=%s\nzygote_uid=%s\nzygote_command=%s\nprovider_package=com.google.android.webview\nhosting_record=%s\n" "$manager_pid" "$manager_uid" "$manager_record" "$webui_pid" "$webui_uid" "$renderer_record" "$renderer_parent_pid" "$zygote_pid" "$zygote_name" "$zygote_uid" "$zygote_command" "$hosting_record" > "$txn/webui-owner.receipt"
     chmod 600 "$txn/webui-owner.receipt"
     active_inode=$(nsenter -t 1 -m -- stat -c %d:%i "$active/module.prop") || exit 1
     printf "init=%s\n" "$init_ns" > "$txn/mount-views.receipt"
@@ -494,16 +514,37 @@ function process_record(line, fields, identity, pid, process) {
     ;;
 direct-probe)
     tx=$1 peer_endpoint=$2 peer_pin=$3
-    [ -f "$state/deploy-transactions/$tx/installed" ] && [ -s "$state/profiles/direct.conf" ] || exit 1
+    txn="$state/deploy-transactions/$tx"
+    [ -f "$txn/installed" ] && [ -s "$state/profiles/direct.conf" ] || exit 1
     nsenter -t 1 -m -- "$active/rka-supervisor.sh" status | grep -q "sidecar=RUNNING"
     ping -c 1 -W 2 "$peer_endpoint" >/dev/null 2>&1
-    peer_certificate="$state/run/peer-certificate.pem"
-    printf "\n" | openssl s_client -connect "$peer_endpoint:37373" -tls1_3 -showcerts 2>/dev/null | openssl x509 -out "$peer_certificate"
+    tls_transcript="$state/run/tls-transcript.$tx"
+    peer_certificate="$state/run/peer-certificate.$tx.pem"
+    peer_public_key="$state/run/peer-public-key.$tx.pem"
+    peer_public_der="$state/run/peer-public-key.$tx.der"
+    receipt_tmp="$txn/direct-probe.receipt.tmp"
+    cleanup_tls_probe() {
+        rm -f "$tls_transcript" "$peer_certificate" "$peer_public_key" "$peer_public_der" "$receipt_tmp"
+    }
+    cleanup_tls_probe
+    (ulimit -f 128; printf "\n" | timeout 8 openssl s_client -connect "$peer_endpoint:37373" -tls1_3 -showcerts > "$tls_transcript" 2>&1) || { cleanup_tls_probe; exit 1; }
+    chmod 600 "$tls_transcript"
+    [ -s "$tls_transcript" ] && [ "$(wc -c < "$tls_transcript")" -le 65536 ] || { cleanup_tls_probe; exit 1; }
+    grep -Eq '^New, TLSv1\.3, Cipher is [A-Z0-9_-]+$' "$tls_transcript" || { cleanup_tls_probe; exit 1; }
+    openssl x509 -in "$tls_transcript" -out "$peer_certificate" || { cleanup_tls_probe; exit 1; }
     chmod 600 "$peer_certificate"
-    observed_pin=$(openssl x509 -in "$peer_certificate" -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | awk "{print \$1}")
-    rm -f "$peer_certificate"
-    [ "$observed_pin" = "$peer_pin" ]
-    printf "RESULT=DIRECT\n"
+    openssl x509 -in "$peer_certificate" -pubkey -noout > "$peer_public_key" || { cleanup_tls_probe; exit 1; }
+    chmod 600 "$peer_public_key"
+    openssl pkey -pubin -in "$peer_public_key" -outform DER > "$peer_public_der" || { cleanup_tls_probe; exit 1; }
+    chmod 600 "$peer_public_der"
+    observed_pin=$(sha256sum "$peer_public_der" | awk "{print \$1}") || { cleanup_tls_probe; exit 1; }
+    [ "$observed_pin" = "$peer_pin" ] || { cleanup_tls_probe; exit 1; }
+    printf "version=1\nprotocol=TLSv1.3\nobserved_spki_sha256=%s\nexpected_spki_sha256=%s\n" "$observed_pin" "$peer_pin" > "$receipt_tmp" || { cleanup_tls_probe; exit 1; }
+    chmod 600 "$receipt_tmp"
+    mv "$receipt_tmp" "$txn/direct-probe.receipt" || { cleanup_tls_probe; exit 1; }
+    sync "$txn/direct-probe.receipt" || { cleanup_tls_probe; exit 1; }
+    cleanup_tls_probe
+    printf "RESULT=DIRECT tls_protocol=TLSv1.3 observed_spki_sha256=%s\n" "$observed_pin"
     ;;
 verify)
     tx=$1 expected_boot=$2

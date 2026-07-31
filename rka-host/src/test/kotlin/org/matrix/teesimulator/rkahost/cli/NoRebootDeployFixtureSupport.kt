@@ -20,6 +20,11 @@ internal enum class FixtureMutation {
     WEBUI_WRONG_OWNER,
     WEBUI_AMBIGUOUS_OWNER,
     WEBUI_MISSING_OWNER,
+    TLS12_ONLY,
+    ZYGOTE_WRONG_PARENT,
+    ZYGOTE_INVALID_IDENTITY,
+    ZYGOTE_AMBIGUOUS,
+    ZYGOTE_MISSING,
 }
 
 internal data class ModuleSnapshot(
@@ -54,6 +59,12 @@ internal fun applyFixtureMutation(
         FixtureMutation.WEBUI_WRONG_OWNER -> environment["RKA_FAKE_WEBUI_OWNER"] = "wrong"
         FixtureMutation.WEBUI_AMBIGUOUS_OWNER -> environment["RKA_FAKE_WEBUI_OWNER"] = "ambiguous"
         FixtureMutation.WEBUI_MISSING_OWNER -> environment["RKA_FAKE_WEBUI_OWNER"] = "missing"
+        FixtureMutation.TLS12_ONLY -> Unit
+        FixtureMutation.ZYGOTE_WRONG_PARENT -> environment["RKA_FAKE_ZYGOTE"] = "wrong-parent"
+        FixtureMutation.ZYGOTE_INVALID_IDENTITY ->
+            environment["RKA_FAKE_ZYGOTE"] = "invalid-identity"
+        FixtureMutation.ZYGOTE_AMBIGUOUS -> environment["RKA_FAKE_ZYGOTE"] = "ambiguous"
+        FixtureMutation.ZYGOTE_MISSING -> environment["RKA_FAKE_ZYGOTE"] = "missing"
     }
 }
 
@@ -83,9 +94,29 @@ internal fun Fixture.hasAndroidWebViewOwnershipFacts(expectedAttempts: Int): Boo
                     facts["renderer_uid"] == "99001" &&
                     facts["renderer_process"] == "com.google.android.webview:sandboxed_process0" &&
                     facts["provider_package"] == "com.google.android.webview" &&
+                    facts["renderer_parent_pid"] == "700" &&
+                    facts["zygote_pid"] == "700" &&
+                    facts["zygote_name"] == "webview_zygote" &&
+                    facts["zygote_uid"] == "1053" &&
+                    facts["zygote_command"] == "webview_zygote" &&
                     facts["hosting_record"]?.startsWith(
                         "com.google.android.webview/org.chromium.content.app.SandboxedProcessService"
                     ) == true
+            }
+    }
+
+internal fun Fixture.hasTls13ProbeReceipts(expectedAttempts: Int): Boolean =
+    transactionPaths().all { paths ->
+        paths.size == expectedAttempts &&
+            paths.all { transaction ->
+                val facts =
+                    Files.readAllLines(transaction.resolve("direct-probe.receipt")).associate {
+                        it.substringBefore('=') to it.substringAfter('=')
+                    }
+                facts["version"] == "1" &&
+                    facts["protocol"] == "TLSv1.3" &&
+                    facts["observed_spki_sha256"]?.matches(Regex("[0-9a-f]{64}")) == true &&
+                    facts["observed_spki_sha256"] == facts["expected_spki_sha256"]
             }
     }
 

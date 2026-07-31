@@ -14,6 +14,7 @@ internal class Fixture(private val mutation: FixtureMutation? = null) : java.io.
     private val adb = root.resolve("adb")
     private val tools = root.resolve("tools")
     internal val devices = root.resolve("devices")
+    private val tlsServers = FixtureTlsServers(root.resolve("tls"))
 
     init {
         Files.writeString(
@@ -112,20 +113,23 @@ exit 0
             } else {
                 "exec 3<\"$pair\"; export RKA_DEVICE_PAIR_FD=3; exec $deploy"
             }
-        val process =
-            ProcessBuilder("bash", "-c", command)
-                .directory(projectRoot.toFile())
-                .apply {
-                    environment()["RKA_DEPLOY_ADB"] = adb.toString()
-                    environment()["RKA_FAKE_LOG"] = log.toString()
-                    environment()["RKA_FAKE_DEVICE_ROOT"] = devices.toString()
-                    environment()["PATH"] = "$tools:${environment()["PATH"]}"
-                    applyFixtureMutation(environment(), activeMutation)
-                }
-                .start()
-        val stdout = process.inputStream.bufferedReader().readText()
-        val stderr = process.errorStream.bufferedReader().readText()
-        return DeployResult(process.waitFor(), stdout, stderr)
+        return tlsServers.withServers(activeMutation) {
+            val process =
+                ProcessBuilder("bash", "-c", command)
+                    .directory(projectRoot.toFile())
+                    .apply {
+                        environment()["RKA_DEPLOY_ADB"] = adb.toString()
+                        environment()["RKA_FAKE_LOG"] = log.toString()
+                        environment()["RKA_FAKE_DEVICE_ROOT"] = devices.toString()
+                        environment()["RKA_FAKE_TLS_ROOT"] = root.resolve("tls").toString()
+                        environment()["PATH"] = "$tools:${environment()["PATH"]}"
+                        applyFixtureMutation(environment(), activeMutation)
+                    }
+                    .start()
+            val stdout = process.inputStream.bufferedReader().readText()
+            val stderr = process.errorStream.bufferedReader().readText()
+            DeployResult(process.waitFor(), stdout, stderr)
+        }
     }
 
     fun runWithOrdinaryPairDescriptor(): DeployResult =
@@ -164,6 +168,8 @@ exit 0
             )
             .trim() == "RUNNING"
 
+    fun tlsServersStopped(): Boolean = tlsServers.allStopped()
+
     fun rollbackDonorAgain(): DeployResult {
         val tx =
             trace()
@@ -189,6 +195,7 @@ exit 0
                 .apply {
                     environment()["RKA_FAKE_LOG"] = log.toString()
                     environment()["RKA_FAKE_DEVICE_ROOT"] = devices.toString()
+                    environment()["RKA_FAKE_TLS_ROOT"] = root.resolve("tls").toString()
                 }
                 .start()
         process.outputStream.use { it.write(helper.toByteArray()) }
@@ -246,6 +253,7 @@ os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zi
         }
 
     override fun close() {
+        tlsServers.close()
         root.toFile().deleteRecursively()
     }
 }

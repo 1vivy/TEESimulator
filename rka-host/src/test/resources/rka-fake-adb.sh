@@ -101,12 +101,18 @@ case "${1-}" in
   me.weishu.kernelsu) printf "201\n" ;;
   com.google.android.webview:sandboxed_process0)
     if [ "${RKA_FAKE_WEBUI_OWNER:-}" = ambiguous ]; then printf "301 302\n"; else printf "301\n"; fi ;;
+  webview_zygote)
+    case "${RKA_FAKE_ZYGOTE:-}" in
+      ambiguous) printf "700 701\n" ;;
+      missing) exit 1 ;;
+      *) printf "700\n" ;;
+    esac ;;
   *) exit 1 ;;
 esac'
 write_shim ip '
 case "$RKA_FAKE_SERIAL" in
-  DONOR_A) printf "1: tailscale0 inet 100.64.0.1/32 scope global tailscale0\n" ;;
-  *) printf "1: tailscale0 inet 100.64.0.2/32 scope global tailscale0\n" ;;
+  DONOR_A) printf "1: tailscale0 inet 127.0.0.1/32 scope global tailscale0\n" ;;
+  *) printf "1: tailscale0 inet 127.0.0.2/32 scope global tailscale0\n" ;;
 esac'
 write_shim ping 'exit 0'
 write_shim logcat 'exit 0'
@@ -193,22 +199,40 @@ case "${1-}" in
   /proc/301/cmdline|/proc/302/cmdline) printf "com.google.android.webview:sandboxed_process0\\0" ;;
   *) exec /usr/bin/cat "$@" ;;
 esac'
-write_shim openssl '
-if [ "${1-}" = s_client ]; then
-  if [ "${RKA_FAKE_MISMATCH_PIN:-}" = true ]; then
-    cat /data/adb/teesimulator-rka/trust/transport-self.pem
-    exit 0
-  fi
-  endpoint=
-  while [ $# -gt 0 ]; do
-    if [ "$1" = -connect ]; then endpoint=${2%:*}; break; fi
-    shift
-  done
-  case "$endpoint" in
-    100.64.0.1) cat /devices/DONOR_A/root/data/adb/teesimulator-rka/trust/transport-self.pem ;;
-    100.64.0.2) cat /devices/CANDIDATE_B/root/data/adb/teesimulator-rka/trust/transport-self.pem ;;
-    *) exit 1 ;;
+write_shim head '
+if [ "${1-}" = -c ]; then
+  path=${3-}
+  case "$path" in
+    /proc/301/status)
+      if [ "${RKA_FAKE_ZYGOTE:-}" = wrong-parent ]; then parent=701; else parent=700; fi
+      printf "Name:\tcom.google.android.webview:sandboxed_process0\nUid:\t99001\t99001\t99001\t99001\nPPid:\t%s\n" "$parent"
+      exit 0 ;;
+    /proc/302/status)
+      printf "Name:\tcom.google.android.webview:sandboxed_process0\nUid:\t99002\t99002\t99002\t99002\nPPid:\t700\n"
+      exit 0 ;;
+    /proc/700/status)
+      if [ "${RKA_FAKE_ZYGOTE:-}" = invalid-identity ]; then name=not_zygote uid=1054; else name=webview_zygote uid=1053; fi
+      printf "Name:\t%s\nUid:\t%s\t%s\t%s\t%s\nPPid:\t1\n" "$name" "$uid" "$uid" "$uid" "$uid"
+      exit 0 ;;
+    /proc/700/cmdline)
+      if [ "${RKA_FAKE_ZYGOTE:-}" = invalid-identity ]; then printf "not_zygote\0"; else printf "webview_zygote\0"; fi
+      exit 0 ;;
   esac
+fi
+exec /usr/bin/head "$@"'
+write_shim openssl '
+if [ "${1-}" = req ]; then
+  keyout= output=
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -keyout) keyout=$2; shift 2 ;;
+      -out) output=$2; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [ -n "$keyout" ] && [ -n "$output" ] || exit 1
+  cp "/tls-fixture/$RKA_FAKE_SERIAL/server.key" "$keyout"
+  cp "/tls-fixture/$RKA_FAKE_SERIAL/server.pem" "$output"
 else
   exec /usr/bin/openssl "$@"
 fi'
@@ -233,12 +257,15 @@ exec bwrap \
     --ro-bind /lib64 /lib64 \
     --ro-bind /etc /etc \
     --ro-bind "$RKA_FAKE_DEVICE_ROOT" /devices \
+    --ro-bind "$RKA_FAKE_TLS_ROOT" /tls-fixture \
     --proc /proc \
     --dev /dev \
     --unshare-all \
+    --share-net \
     --setenv PATH /shim:/usr/bin:/bin \
     --setenv RKA_FAKE_SERIAL "$serial" \
     --setenv RKA_FAKE_MISMATCH_PIN "$([ "${RKA_FAKE_MISMATCH_SERIAL:-}" = "$serial" ] && printf true || printf false)" \
     --setenv RKA_FAKE_FAULT "${RKA_FAKE_FAULT:-}" \
     --setenv RKA_FAKE_WEBUI_OWNER "${RKA_FAKE_WEBUI_OWNER:-}" \
+    --setenv RKA_FAKE_ZYGOTE "${RKA_FAKE_ZYGOTE:-}" \
     /bin/sh -s -- "$mode" "$@"

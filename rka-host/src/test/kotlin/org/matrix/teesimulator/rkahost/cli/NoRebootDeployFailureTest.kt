@@ -81,6 +81,8 @@ class NoRebootDeployFailureTest {
             assertTrue(fixture.hasCompleteAttemptReceipts(expectedAttempts = 2))
             assertTrue(fixture.hasAndroidWebViewOwnershipFacts(expectedAttempts = 2))
             assertTrue(fixture.hasDistinctMountViewFacts(expectedAttempts = 2))
+            assertTrue(fixture.hasTls13ProbeReceipts(expectedAttempts = 2))
+            assertTrue(fixture.tlsServersStopped())
             assertFalse(trace.any { forbidden.containsMatchIn(it) })
             println(
                 "EFFECT_RECEIPT scenario=same-build attempts=2 devices=2 complete_receipts=4 order=${fixture.redactedOrder()}"

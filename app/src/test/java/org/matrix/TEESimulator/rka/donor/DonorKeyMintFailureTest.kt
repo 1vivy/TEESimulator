@@ -53,6 +53,31 @@ class DonorKeyMintFailureTest {
     }
 
     @Test
+    fun wrongChallengeDeletesQuarantinesAndNeverExposesOrRetries() {
+        // Given
+        val fixture = DonorFixture()
+        val device = FakeDonorKeyMintDevice(fixture).apply { wrongChallenge = true }
+        val backend = DonorKeyMintBackend(device, fixture.journal)
+
+        // When
+        val first = backend.generate(fixture.request())
+        val get = backend.get(fixture.alias)
+        val begin = backend.begin(fixture.alias)
+        val second = backend.generate(fixture.request())
+
+        // Then
+        assertTrue(first is DonorResult.Failure)
+        assertTrue(get is DonorResult.Failure)
+        assertTrue(begin is DonorResult.Failure)
+        assertTrue(second is DonorResult.Failure)
+        assertEquals(1, device.generateCalls)
+        assertEquals(1, device.deleteCalls)
+        assertEquals(0, device.beginCalls)
+        assertEquals(0, backend.list().size)
+        assertEquals(RkpJournalState.QUARANTINED, fixture.journal.recover()?.state)
+    }
+
+    @Test
     fun operationFailureDeletesAndQuarantinesWithoutSignature() {
         // Given
         val fixture = DonorFixture()

@@ -98,7 +98,6 @@ class RkaWebUiTest(unittest.TestCase):
             "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\n"
             "-----END CERTIFICATE-----\n",
         )
-        self.write_private(state_root / "run" / "boot-continuity.state", "LIVE\n")
 
     def write_fake_runtime(self, temporary_root: Path) -> Path:
         runtime = temporary_root / "fake-runtime.sh"

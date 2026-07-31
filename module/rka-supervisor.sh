@@ -51,9 +51,26 @@ profile_valid() {
     [ "$(wc -l < "$profile")" -eq 3 ]
 }
 
+direct_ready() {
+    request=$state/profiles/pair.request
+    key=$state/secrets/transport.key
+    trust=$state/trust/transport-trust.pem
+    [ -f "$request" ] && [ ! -L "$request" ] &&
+        [ "$(cat "$request")" = "version=1
+action=PAIR_DIRECT" ] || return 1
+    [ -f "$key" ] && [ ! -L "$key" ] && [ "$(stat -c '%u:%a' "$key")" = "$(id -u):600" ] ||
+        return 1
+    [ "$(wc -c < "$key")" -ge 16 ] && [ "$(wc -c < "$key")" -le 16384 ] || return 1
+    [ -f "$trust" ] && [ ! -L "$trust" ] &&
+        [ "$(stat -c '%u:%a' "$trust")" = "$(id -u):600" ] || return 1
+    [ "$(sed -n '1p' "$trust")" = '-----BEGIN CERTIFICATE-----' ] &&
+        [ "$(tail -n 1 "$trust")" = '-----END CERTIFICATE-----' ]
+}
+
 write_record() {
     name=$1 child=$2
     child_stamp=$(proc_stamp "$child") || return 1
+    # shellcheck disable=SC2086
     set -- $child_stamp
     printf '%s %s %s\n' "$child" "$2" "$3" > "$pids/$name.pid"
     chmod 600 "$pids/$name.pid"
@@ -120,7 +137,12 @@ start() {
     role=$($control --root "$root" --state-root "$state" boot-decision) || return 1
     case $role in
         DISABLED) return 1 ;;
-        DONOR|CANDIDATE) profile_valid "$role" || return 1 ;;
+        DONOR|CANDIDATE)
+            profile_valid "$role" || return 1
+            if [ "${RKA_REQUIRE_DIRECT_READY:-false}" = true ]; then
+                direct_ready || return 1
+            fi
+            ;;
         LOCAL) ;;
         *) return 1 ;;
     esac

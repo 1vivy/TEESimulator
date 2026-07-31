@@ -7,11 +7,13 @@ readonly DEFAULT_ROOT=/data/adb/tricky_store
 readonly DEFAULT_STATE_ROOT=/data/adb/teesimulator-rka
 readonly CONFIG_DIRECTORY=rka
 readonly CONFIG_NAME=role.conf
+readonly OFFICIAL_ATTESTATION_ROOT_URL=https://android.googleapis.com/attestation/root
 
 root=$DEFAULT_ROOT
 rka_state_root=$DEFAULT_STATE_ROOT
 
 script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=module/rka-paths.sh
 . "$script_directory/rka-paths.sh"
 
 print_inert() {
@@ -589,6 +591,28 @@ profile_epoch=$webui_profile_epoch
 "
 }
 
+webui_validate_profile() {
+    webui_requested_role=$1
+    case $webui_requested_role in DONOR|CANDIDATE) ;; *) return 1 ;; esac
+    webui_read_active_profile || return 1
+    webui_record_request "$rka_state_root/profiles/webui-profile.pending" "version=1
+role=$webui_requested_role
+profile_epoch=$webui_profile_epoch
+"
+}
+
+webui_apply_profile() {
+    webui_requested_role=$1
+    webui_read_active_profile || return 1
+    webui_pending_profile=$rka_state_root/profiles/webui-profile.pending
+    rka_private_file_is_valid "$webui_pending_profile" || return 1
+    [ "$(cat "$webui_pending_profile")" = "version=1
+role=$webui_requested_role
+profile_epoch=$webui_profile_epoch" ] || return 1
+    webui_set_role "$webui_requested_role" || return 1
+    rm -f "$webui_pending_profile"
+}
+
 webui_export_redacted() {
     webui_export_kind=$1
     case $webui_export_kind in audit|evidence) ;; *) return 1 ;; esac
@@ -610,9 +634,186 @@ webui_mutation_complete() {
     printf 'next_nonce=%s\n' "$webui_new_nonce"
 }
 
+webui_confirmation_path() {
+    printf '%s\n' "$rka_state_root/run/webui.confirm"
+}
+
+webui_prepare_confirmation() {
+    webui_confirm_action=$1
+    webui_confirm_token=$(webui_next_nonce) || return 1
+    webui_record_request "$(webui_confirmation_path)" "version=1
+action=$webui_confirm_action
+nonce=$webui_new_nonce
+token=$webui_confirm_token
+" || return 1
+    printf 'confirmation_action=%s\nconfirmation_token=%s\n' \
+        "$webui_confirm_action" "$webui_confirm_token"
+}
+
+webui_confirmation_matches() {
+    webui_confirm_action=$1
+    webui_confirm_nonce=$2
+    webui_confirm_token=$3
+    webui_nonce_is_valid "$webui_confirm_token" || return 1
+    webui_confirm_path=$(webui_confirmation_path)
+    rka_private_file_is_valid "$webui_confirm_path" || return 1
+    [ "$(cat "$webui_confirm_path")" = "version=1
+action=$webui_confirm_action
+nonce=$webui_confirm_nonce
+token=$webui_confirm_token" ] || return 1
+    rm -f "$webui_confirm_path"
+}
+
+webui_recovery_request() {
+    webui_recovery_target=$1
+    webui_sentinel_status
+    [ "$webui_sentinel" = LIVE ] || return 1
+    recovery_read_profile || return 1
+    recovery_select_target "$webui_recovery_target" || return 1
+    webui_record_request "$rka_state_root/journal/recovery.request" "version=1
+target=$(printf '%s' "$webui_recovery_target" | tr '[:lower:]' '[:upper:]')
+" || return 1
+    recovery_snapshot "$webui_recovery_target" >/dev/null || return 1
+    webui_recovery_pid=$recovery_pid
+    webui_recovery_start=$recovery_start
+    recovery_restart_exact "$webui_recovery_target" \
+        "$webui_recovery_pid" "$webui_recovery_start" >/dev/null || return 1
+    recovery_ready "$webui_recovery_target" 30000 >/dev/null || return 1
+    recovery_emit_snapshot "$webui_recovery_target" >/dev/null
+}
+
+webui_root_bundle_fields() {
+    webui_bundle_path=$1
+    rka_private_file_is_valid "$webui_bundle_path" || return 1
+    [ "$(wc -c < "$webui_bundle_path")" -le 4096 ] || return 1
+    webui_bundle_epoch=
+    webui_bundle_pins=
+    webui_bundle_authorization=
+    webui_bundle_version=false
+    while IFS= read -r webui_bundle_line || [ -n "$webui_bundle_line" ]; do
+        case $webui_bundle_line in
+            version=1) [ "$webui_bundle_version" = false ] || return 1; webui_bundle_version=true ;;
+            epoch=*) [ -z "$webui_bundle_epoch" ] || return 1; webui_bundle_epoch=${webui_bundle_line#epoch=} ;;
+            pin=*)
+                webui_bundle_pin=${webui_bundle_line#pin=}
+                case $webui_bundle_pin in
+                    ????????????????????????????????????????????????????????????????) ;;
+                    *) return 1 ;;
+                esac
+                case $webui_bundle_pin in *[!0123456789abcdef]*) return 1 ;; esac
+                webui_bundle_pins="${webui_bundle_pins}${webui_bundle_pin}
+"
+                ;;
+            authorization=*)
+                [ -z "$webui_bundle_authorization" ] || return 1
+                webui_bundle_authorization=${webui_bundle_line#authorization=}
+                case $webui_bundle_authorization in
+                    ????????????????????????????????????????????????????????????????) ;;
+                    *) return 1 ;;
+                esac
+                case $webui_bundle_authorization in *[!0123456789abcdef]*) return 1 ;; esac
+                ;;
+            *) return 1 ;;
+        esac
+    done < "$webui_bundle_path"
+    case $webui_bundle_epoch in ''|*[!0-9]*) return 1 ;; esac
+    [ "$webui_bundle_version" = true ] && [ -n "$webui_bundle_pins" ]
+}
+
+webui_prepare_root_rotation() {
+    webui_active_bundle=$rka_state_root/trust/root-bundle.active
+    if rka_private_file_is_valid "$webui_active_bundle"; then
+        webui_root_bundle_fields "$webui_active_bundle" || return 1
+        webui_old_epoch=$webui_bundle_epoch
+        webui_old_pins=$webui_bundle_pins
+    else
+        webui_read_active_profile || return 1
+        webui_old_epoch=$webui_profile_epoch
+        webui_old_pins='cedb1cb6dc896ae5ec797348bce9286753c2b38ee71ce0fbe34a9a1248800dfc
+6d9db4ce6c5c0b293166d08986e05774a8776ceb525d9e4329520de12ba4bcc0
+'
+    fi
+    webui_fetcher=${RKA_ROOT_FETCH:-curl}
+    webui_fetched=$("$webui_fetcher" --fail --silent --show-error --proto '=https' \
+        --tlsv1.2 --max-redirs 0 "$OFFICIAL_ATTESTATION_ROOT_URL") || return 1
+    webui_candidate=$rka_state_root/trust/root-bundle.candidate
+    rka_atomic_replace "$rka_state_root/trust" "$webui_candidate" "$webui_fetched
+" || return 1
+    webui_root_bundle_fields "$webui_candidate" || return 1
+    [ -z "$webui_bundle_authorization" ] || return 1
+    [ "$webui_bundle_epoch" -eq $((webui_old_epoch + 1)) ] || return 1
+    webui_new_pins=$webui_bundle_pins
+    webui_overlap=NO_OVERLAP
+    while IFS= read -r webui_old_pin; do
+        [ -n "$webui_old_pin" ] || continue
+        if printf '%s' "$webui_new_pins" | grep -Fxq "$webui_old_pin"; then
+            webui_overlap=OVERLAP
+        fi
+    done <<EOF
+$webui_old_pins
+EOF
+    webui_old_hash=$(printf '%s' "$webui_old_pins" | LC_ALL=C sort | sha256sum | awk '{print $1}')
+    webui_new_hash=$(printf '%s' "$webui_new_pins" | LC_ALL=C sort | sha256sum | awk '{print $1}')
+    [ "$webui_old_hash" != "$webui_new_hash" ] || return 1
+    if [ "$webui_overlap" = NO_OVERLAP ]; then
+        webui_signed_bundle=$root/rka-root-bundle.signed
+        webui_signed_signature=$root/rka-root-bundle.signed.sig
+        webui_verifier=$root/rka-agent-pgp-verify.sh
+        [ -x "$webui_verifier" ] && [ -f "$webui_signed_bundle" ] &&
+            [ -f "$webui_signed_signature" ] || return 1
+        "$webui_verifier" "$webui_signed_bundle" "$webui_signed_signature" \
+            "$webui_old_hash" "$webui_new_hash" || return 1
+        webui_root_bundle_fields "$webui_signed_bundle" || return 1
+        [ "$webui_bundle_epoch" -eq $((webui_old_epoch + 1)) ] || return 1
+        [ "$webui_bundle_pins" = "$webui_new_pins" ] || return 1
+        [ -n "$webui_bundle_authorization" ] || return 1
+        webui_candidate=$webui_signed_bundle
+    fi
+    rka_atomic_replace "$rka_state_root/trust" \
+        "$rka_state_root/trust/root-bundle.next" "$(cat "$webui_candidate")
+" || return 1
+    printf 'root_old_hash=%s\nroot_new_hash=%s\nroot_overlap=%s\n' \
+        "$webui_old_hash" "$webui_new_hash" "$webui_overlap"
+}
+
+webui_rotate_roots() {
+    webui_sentinel_status
+    [ "$webui_sentinel" = LIVE ] || return 1
+    webui_next_bundle=$rka_state_root/trust/root-bundle.next
+    rka_private_file_is_valid "$webui_next_bundle" || return 1
+    webui_runtime_state || return 1
+    webui_restart_after_rotation=false
+    if [ "$webui_runtime" = RUNNING ]; then
+        sh "$script_directory/rka-supervisor.sh" --root "$root" \
+            --state-root "$rka_state_root" stop || return 1
+        webui_restart_after_rotation=true
+    fi
+    RKA_STATE_ROOT="$rka_state_root" "${RKA_SIDECAR:-$script_directory/rka-sidecar}" rotate-roots ||
+        {
+            if [ "$webui_restart_after_rotation" = true ]; then
+                RKA_REQUIRE_DIRECT_READY=true sh "$script_directory/rka-supervisor.sh" \
+                    --root "$root" --state-root "$rka_state_root" start >/dev/null 2>&1 || :
+            fi
+            return 1
+        }
+    webui_next_epoch=$(RKA_STATE_ROOT="$rka_state_root" \
+        "${RKA_SIDECAR:-$script_directory/rka-sidecar}" trust-epoch) || return 1
+    case $webui_next_epoch in ''|*[!0-9]*) return 1 ;; esac
+    webui_read_active_profile || return 1
+    rka_atomic_replace "$rka_state_root/profiles" \
+        "$rka_state_root/profiles/$RKA_PROFILE_NAME" "version=1
+role=$webui_profile_role
+profile_epoch=$webui_next_epoch
+" || return 1
+    if [ "$webui_restart_after_rotation" = true ]; then
+        RKA_REQUIRE_DIRECT_READY=true sh "$script_directory/rka-supervisor.sh" \
+            --root "$root" --state-root "$rka_state_root" start || return 1
+    fi
+}
+
 webui_action_is_valid() {
     case $1 in
-        status|role-donor|role-candidate|pair-direct|rotate-pairing|start|stop|recover-keystore2|export-audit|export-evidence|cleanup|quarantine) return 0 ;;
+        status|role-donor|role-candidate|profile-validate-donor|profile-validate-candidate|profile-apply-donor|profile-apply-candidate|pair-direct|rotate-pairing|rotate-attestation-roots|start|stop|recover-keystore2|recover-rkpd|export-audit|export-evidence|cleanup|quarantine) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -620,6 +821,7 @@ webui_action_is_valid() {
 webui_request() {
     webui_action=$1
     webui_nonce=$2
+    webui_confirmation=${3:-}
     webui_action_is_valid "$webui_action" || return 1
     case $webui_action in
         status|quarantine) webui_nonce_matches "$webui_nonce" && webui_status; return $? ;;
@@ -635,14 +837,56 @@ action=PAIR_DIRECT
         rotate-pairing) webui_record_request "$rka_state_root/trust/rotate.request" "version=1
 action=ROTATE_PAIRING
 " && webui_request_ok=true ;;
-        start) sh "$script_directory/rka-supervisor.sh" --root "$root" --state-root "$rka_state_root" start && webui_request_ok=true ;;
+        start) RKA_REQUIRE_DIRECT_READY=true sh "$script_directory/rka-supervisor.sh" --root "$root" --state-root "$rka_state_root" start && webui_request_ok=true ;;
         stop) sh "$script_directory/rka-supervisor.sh" --root "$root" --state-root "$rka_state_root" stop && webui_request_ok=true ;;
-        recover-keystore2) webui_record_request "$rka_state_root/journal/recovery.request" "version=1
-target=KEYSTORE2
-" && printf '%s\n' recovery_target=KEYSTORE2 && webui_request_ok=true ;;
+        profile-validate-donor) webui_validate_profile DONOR && printf '%s\n' profile_validation=VALID && webui_request_ok=true ;;
+        profile-validate-candidate) webui_validate_profile CANDIDATE && printf '%s\n' profile_validation=VALID && webui_request_ok=true ;;
+        profile-apply-donor) webui_apply_profile DONOR && printf '%s\n' profile_apply=VALIDATED && webui_request_ok=true ;;
+        profile-apply-candidate) webui_apply_profile CANDIDATE && printf '%s\n' profile_apply=VALIDATED && webui_request_ok=true ;;
+        recover-keystore2|recover-rkpd|cleanup|rotate-attestation-roots)
+            if [ -z "$webui_confirmation" ]; then
+                webui_confirmation_ready=true
+                case $webui_action in
+                    recover-keystore2|recover-rkpd|rotate-attestation-roots)
+                        webui_sentinel_status
+                        [ "$webui_sentinel" = LIVE ] || webui_confirmation_ready=false
+                        ;;
+                esac
+                if [ "$webui_action" = rotate-attestation-roots ] &&
+                    ! webui_prepare_root_rotation; then
+                    webui_confirmation_ready=false
+                fi
+                if [ "$webui_confirmation_ready" = true ] &&
+                    webui_prepare_confirmation "$webui_action"; then
+                    case $webui_action in
+                        recover-keystore2) printf '%s\n' recovery_target=KEYSTORE2 ;;
+                        recover-rkpd) printf '%s\n' recovery_target=RKPD ;;
+                    esac
+                    webui_request_ok=true
+                fi
+            elif webui_confirmation_matches "$webui_action" "$webui_nonce" "$webui_confirmation"; then
+                case $webui_action in
+                    recover-keystore2)
+                        webui_recovery_request keystore2 &&
+                            printf '%s\n' recovery_target=KEYSTORE2 &&
+                            webui_request_ok=true
+                        ;;
+                    recover-rkpd)
+                        webui_recovery_request rkpd &&
+                            printf '%s\n' recovery_target=RKPD &&
+                            webui_request_ok=true
+                        ;;
+                    cleanup) rka_wipe_runtime && webui_request_ok=true ;;
+                    rotate-attestation-roots)
+                        webui_rotate_roots &&
+                            printf '%s\n' root_rotation=ACTIVATED &&
+                            webui_request_ok=true
+                        ;;
+                esac
+            fi
+            ;;
         export-audit) webui_export_redacted audit && webui_request_ok=true ;;
         export-evidence) webui_export_redacted evidence && webui_request_ok=true ;;
-        cleanup) rka_wipe_runtime && webui_request_ok=true ;;
     esac
     if [ "$webui_request_ok" = true ]; then
         webui_mutation_complete
@@ -743,11 +987,11 @@ while [ $# -gt 0 ]; do
             exit 0
             ;;
         webui)
-            [ $# -eq 3 ] || {
+            { [ $# -eq 3 ] || [ $# -eq 4 ]; } || {
                 webui_invalid_request
                 exit 1
             }
-            webui_request "$2" "$3" || {
+            webui_request "$2" "$3" "${4:-}" || {
                 webui_invalid_request
                 exit 1
             }

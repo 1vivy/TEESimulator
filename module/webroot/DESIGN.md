@@ -33,6 +33,11 @@ The 4px scale uses 8px, 12px, 16px, 24px, and 32px steps. The 1120px centered do
 - **States**: default, hover, active, focus-visible, disabled, busy.
 - **Accessibility**: native keyboard behavior and a visible focus ring.
 
+### Protected-action confirmation
+- **Structure**: native modal dialog, one-time token output, labelled input, fixed confirm button.
+- **States**: closed, awaiting exact token, mismatch, busy, accepted, refused.
+- **Accessibility**: native focus trapping, explicit heading and label, live operation result.
+
 ## 6. Motion & Interaction
 
 Buttons use 120ms opacity/transform feedback only; the controller disables a button while its request is outstanding. Reduced motion removes transitions.

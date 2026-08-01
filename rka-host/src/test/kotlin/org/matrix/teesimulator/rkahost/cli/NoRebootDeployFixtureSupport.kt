@@ -69,6 +69,10 @@ internal enum class FixtureMutation {
     NEXT_BOOT_DRIFT,
     NEXT_PROBE_HASH_MISMATCH,
     NEXT_PROBE_CLEANUP_FAILURE,
+    NEXT_CANDIDATE_SHELL_RESTRICTED,
+    NEXT_PROBE_STAGE_TRUNCATED,
+    NEXT_PROBE_MATERIALIZE_NONZERO,
+    NEXT_PROBE_PARENT_SYMLINK,
     NEXT_ANDROID_SHELL_PARSER,
     NEXT_MATCH_WHITESPACE,
     NEXT_MATCH_NEWLINE,
@@ -158,6 +162,14 @@ internal fun applyFixtureMutation(
             environment["RKA_FAKE_NEXT_MUTATION"] = "probe-hash-mismatch"
         FixtureMutation.NEXT_PROBE_CLEANUP_FAILURE ->
             environment["RKA_FAKE_NEXT_MUTATION"] = "probe-cleanup-failure"
+        FixtureMutation.NEXT_CANDIDATE_SHELL_RESTRICTED ->
+            environment["RKA_FAKE_PROTECTED_PUSH_DENIED"] = "CANDIDATE_B"
+        FixtureMutation.NEXT_PROBE_STAGE_TRUNCATED ->
+            environment["RKA_FAKE_UPLOAD_FAULT"] = "truncate"
+        FixtureMutation.NEXT_PROBE_MATERIALIZE_NONZERO ->
+            environment["RKA_FAKE_UPLOAD_FAULT"] = "remote-nonzero"
+        FixtureMutation.NEXT_PROBE_PARENT_SYMLINK ->
+            environment["RKA_FAKE_UPLOAD_FAULT"] = "symlink-parent"
         FixtureMutation.NEXT_ANDROID_SHELL_PARSER ->
             environment["RKA_FAKE_NEXT_MUTATION"] = "android-shell-parser"
         FixtureMutation.NEXT_MATCH_WHITESPACE ->

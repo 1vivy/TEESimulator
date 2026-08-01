@@ -7,6 +7,55 @@ import org.junit.Test
 
 class KsuNext330AdapterTest {
     @Test
+    fun candidateNonRootShellCanStageButCannotPushProtectedPaths() {
+        Fixture(
+                mutation = FixtureMutation.NEXT_CANDIDATE_SHELL_RESTRICTED,
+                kernelProfile = KernelProfile.KSU_NEXT_DUAL,
+            )
+            .use { fixture ->
+                val result = fixture.run()
+
+                assertEquals(result.stderr, 0, result.exitCode)
+                assertTrue(result.stdout.contains("\"result\":\"DEPLOYED_NO_REBOOT\""))
+                assertTrue(fixture.stagedUploadArtifactsAbsent())
+                assertFalse(
+                    fixture.trace().any {
+                        it.startsWith("CANDIDATE_B push ") && " /data/adb/" in it
+                    }
+                )
+                assertTrue(
+                    fixture.trace().any {
+                        it.startsWith("CANDIDATE_B push ") && " /data/local/tmp/" in it
+                    }
+                )
+            }
+    }
+
+    @Test
+    fun protectedProbeTransferCleansStagingWhenMaterializationFails() {
+        listOf(
+                FixtureMutation.NEXT_PROBE_STAGE_TRUNCATED,
+                FixtureMutation.NEXT_PROBE_MATERIALIZE_NONZERO,
+                FixtureMutation.NEXT_PROBE_PARENT_SYMLINK,
+            )
+            .forEach { mutation ->
+                Fixture(mutation = mutation, kernelProfile = KernelProfile.KSU_NEXT_DUAL).use {
+                    fixture ->
+                    val result = fixture.run()
+
+                    assertEquals(mutation.name, 3, result.exitCode)
+                    assertTrue(result.stderr.contains("KSU_MANAGER_AUTHORIZATION_FAILED"))
+                    assertTrue(mutation.name, fixture.stagedUploadArtifactsAbsent())
+                    assertTrue(mutation.name, fixture.managerPayloadsDidNotExecute())
+                    assertFalse(
+                        mutation.name,
+                        fixture.trace().any { "role-neutral-release.zip " in " $it " },
+                    )
+                }
+            }
+    }
+
+    @Test
     fun donorOfficialManagerUsesAuthoritativeProbesWhenDumpsysOmitsComponentLines() {
         Fixture(kernelProfile = KernelProfile.KSU_NEXT_DUAL).use { fixture ->
             val result = fixture.run()

@@ -304,6 +304,15 @@ os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zi
             !Files.exists(probes) || Files.list(probes).use { it.findAny().isEmpty }
         }
 
+    fun stagedUploadArtifactsAbsent(): Boolean =
+        listOf("DONOR_A", "CANDIDATE_B").all { serial ->
+            val staging = devices.resolve(serial).resolve("root/data/local/tmp")
+            !Files.exists(staging) ||
+                Files.list(staging).use { paths ->
+                    paths.noneMatch { it.fileName.toString().startsWith("rka-adb-upload-") }
+                }
+        }
+
     fun managerPayloadsDidNotExecute(): Boolean =
         listOf("DONOR_A", "CANDIDATE_B").all { serial ->
             val root = devices.resolve(serial).resolve("root/tmp")
@@ -401,6 +410,10 @@ os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zi
 
     override fun close() {
         tlsServers.close()
+        listOf("DONOR_A", "CANDIDATE_B").forEach { serial ->
+            val probes = devices.resolve(serial).resolve("root/data/adb/teesimulator-rka/probes")
+            if (Files.isSymbolicLink(probes)) Files.deleteIfExists(probes)
+        }
         root.toFile().deleteRecursively()
     }
 }

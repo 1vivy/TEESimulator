@@ -8,15 +8,22 @@ root="$device/root"
 
 if [ "${1-}" = push ]; then
     printf '%s %s\n' "$serial" "$*" >> "$RKA_FAKE_LOG"
+    if [ "${RKA_FAKE_PROTECTED_PUSH_DENIED:-}" = "$serial" ] && [[ "$3" = /data/adb/* ]]; then
+        printf 'adb: error: failed to copy: Permission denied\n' >&2
+        exit 1
+    fi
     mkdir -p "$root${3%/*}"
     cp "$2" "$root$3"
+    if [ "${RKA_FAKE_UPLOAD_FAULT:-}" = truncate ] && [[ "$3" = /data/local/tmp/rka-adb-upload-* ]]; then
+        printf 'truncated\n' >> "$root$3"
+    fi
     if [ "${RKA_FAKE_CORRUPT_ARCHIVE_SERIAL:-}" = "$serial" ] && [ "$3" = /data/adb/teesimulator-rka/upload/role-neutral-release.zip ]; then
         printf 'corrupt\n' >> "$root$3"
     fi
     if [ "${RKA_FAKE_CORRUPT_SOURCE_SERIAL:-}" = "$serial" ] && [ "$3" = /data/adb/teesimulator-rka/upload/role-neutral-release.zip.source-sha ]; then
         printf '%040d\n' 0 > "$root$3"
     fi
-    if [ "${RKA_FAKE_NEXT_MUTATION:-}" = probe-hash-mismatch ] && [[ "$3" = /data/adb/teesimulator-rka/probes/*.manager-appid ]]; then
+    if [ "${RKA_FAKE_NEXT_MUTATION:-}" = probe-hash-mismatch ] && [[ "$3" = /data/local/tmp/rka-adb-upload-*-probe ]]; then
         printf 'corrupt\n' >> "$root$3"
     fi
     exit 0
@@ -303,6 +310,13 @@ if [ "${1-}" = --bind ]; then
   exit 0
 fi
 exit 1'
+write_shim mv '
+source_path=
+for value in "$@"; do
+  case "$value" in /data/adb/teesimulator-rka/*/.rka-adb-upload.*) source_path=$value ;; esac
+done
+if [ "${RKA_FAKE_UPLOAD_FAULT:-}" = remote-nonzero ] && [ -n "$source_path" ]; then exit 1; fi
+exec /usr/bin/mv "$@"'
 write_shim umount '
 rm -rf /data/adb/modules/tricky_store
 mv /data/adb/teesimulator-rka/active-underlay /data/adb/modules/tricky_store
@@ -389,6 +403,11 @@ if [ "${RKA_FAKE_NEXT_MUTATION:-}" = android-shell-parser ]; then
     esac
 fi
 
+if [ "${RKA_FAKE_UPLOAD_FAULT:-}" = symlink-parent ] && [[ "$wire_payload" = *'/data/local/tmp/rka-adb-upload-'* ]]; then
+    rm -rf "$root/data/adb/teesimulator-rka/probes"
+    ln -s /tmp "$root/data/adb/teesimulator-rka/probes"
+fi
+
 printf '%s\n' "$wire_payload" | bwrap \
     --bind "$root" / \
     --ro-bind /usr /usr \
@@ -415,4 +434,5 @@ printf '%s\n' "$wire_payload" | bwrap \
     --setenv RKA_FAKE_FAULT "${RKA_FAKE_FAULT:-}" \
     --setenv RKA_FAKE_WEBUI_OWNER "${RKA_FAKE_WEBUI_OWNER:-}" \
     --setenv RKA_FAKE_ZYGOTE "${RKA_FAKE_ZYGOTE:-}" \
+    --setenv RKA_FAKE_UPLOAD_FAULT "${RKA_FAKE_UPLOAD_FAULT:-}" \
     /bin/sh

@@ -821,7 +821,10 @@ authorize_next_manager() {
         remote "$serial" cleanup-probe "$transaction_id" "$role"
     }
     remote "$serial" prepare-probe >/dev/null
-    "$adb_command" -s "$serial" push "$local_probe" "$remote_probe" >/dev/null
+    rka_adb_protected_push "$adb_command" "$serial" "$local_probe" "$remote_probe" "$probe_sha" 700 "$transaction_id" "$role-probe" || {
+        cleanup_remote_probe >/dev/null 2>&1 || fail KSU_PROBE_CLEANUP_FAILED 3
+        fail KSU_MANAGER_AUTHORIZATION_FAILED 3
+    }
     remote "$serial" READ_ONLY_PROBE_TRANSFER "$transaction_id" "$remote_probe" "$probe_sha" "$role" >/dev/null || {
         cleanup_remote_probe >/dev/null 2>&1 || fail KSU_PROBE_CLEANUP_FAILED 3
         fail KSU_MANAGER_AUTHORIZATION_FAILED 3
@@ -859,10 +862,12 @@ candidate_endpoint="${candidate_network##* endpoint=}"
 
 remote "$donor_serial" prepare-upload >/dev/null
 remote "$candidate_serial" prepare-upload >/dev/null
-"$adb_command" -s "$donor_serial" push "$zip_path" "$REMOTE_ZIP" >/dev/null
-"$adb_command" -s "$candidate_serial" push "$zip_path" "$REMOTE_ZIP" >/dev/null
-"$adb_command" -s "$donor_serial" push "$zip_path.source-sha" "$REMOTE_ZIP.source-sha" >/dev/null
-"$adb_command" -s "$candidate_serial" push "$zip_path.source-sha" "$REMOTE_ZIP.source-sha" >/dev/null
+source_receipt_sha="$(sha256sum -- "$zip_path.source-sha" | awk '{print $1}')"
+[[ "$source_receipt_sha" =~ ^[0-9a-f]{64}$ ]] || fail ARCHIVE_INVALID
+rka_adb_protected_push "$adb_command" "$donor_serial" "$zip_path" "$REMOTE_ZIP" "$archive_sha" 600 "$transaction_id" DONOR-archive
+rka_adb_protected_push "$adb_command" "$candidate_serial" "$zip_path" "$REMOTE_ZIP" "$archive_sha" 600 "$transaction_id" CANDIDATE-archive
+rka_adb_protected_push "$adb_command" "$donor_serial" "$zip_path.source-sha" "$REMOTE_ZIP.source-sha" "$source_receipt_sha" 600 "$transaction_id" DONOR-source
+rka_adb_protected_push "$adb_command" "$candidate_serial" "$zip_path.source-sha" "$REMOTE_ZIP.source-sha" "$source_receipt_sha" 600 "$transaction_id" CANDIDATE-source
 
 rollback_pair() {
     set +e

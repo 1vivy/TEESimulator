@@ -3,6 +3,7 @@
 readonly RKA_ADB_ROOT_INPUT_MAX_BYTES=65536
 readonly RKA_ADB_ROOT_OUTPUT_MAX_BYTES=1048576
 readonly RKA_ADB_ROOT_PAYLOAD_DELIMITER=RKA_ADB_ROOT_PAYLOAD_7D4C2A91
+readonly RKA_ADB_PROTECTED_UPLOAD_MAX_BYTES=134217728
 
 rka_adb_root_run() (
     set -uo pipefail
@@ -70,6 +71,7 @@ trap 'rm -f "$rka_script"' 0 HUP INT TERM
 cat > "$rka_script" <<'RKA_ADB_ROOT_PAYLOAD_7D4C2A91'
 RKA_ADB_ROOT_LOADER
 )
+
     loader_suffix=$(cat <<'RKA_ADB_ROOT_LOADER'
 chmod 700 "$rka_script"
 status=0
@@ -118,4 +120,110 @@ RKA_ADB_ROOT_LOADER
     cleanup_rka_adb_root
     trap - EXIT
     return "$result"
+)
+
+rka_adb_protected_push() (
+    set -uo pipefail
+    set -f
+
+    if (( $# != 8 )); then
+        printf 'RKA_ADB_PROTECTED_UPLOAD_INVALID\n' >&2
+        return 64
+    fi
+    local adb_command=$1 serial=$2 local_path=$3 target=$4 expected_sha=$5 mode=$6 transfer_id=$7 label=$8
+    if [[ ! "$serial" =~ ^[A-Za-z0-9._:-]{1,255}$ || ! -f "$local_path" || -L "$local_path" ||
+        ! "$expected_sha" =~ ^[0-9a-f]{64}$ || ! "$mode" =~ ^[0-7]{3}$ ||
+        ! "$transfer_id" =~ ^[A-Za-z0-9._-]{1,160}$ || ! "$label" =~ ^[A-Za-z0-9._-]{1,48}$ ]]; then
+        printf 'RKA_ADB_PROTECTED_UPLOAD_INVALID\n' >&2
+        return 64
+    fi
+
+    local parent
+    case "$target" in
+        /data/adb/teesimulator-rka/probes/*.manager-appid) parent=/data/adb/teesimulator-rka/probes ;;
+        /data/adb/teesimulator-rka/upload/role-neutral-release.zip|\
+        /data/adb/teesimulator-rka/upload/role-neutral-release.zip.source-sha) parent=/data/adb/teesimulator-rka/upload ;;
+        *) printf 'RKA_ADB_PROTECTED_UPLOAD_INVALID\n' >&2; return 64 ;;
+    esac
+
+    local local_size local_sha
+    local_size=$(LC_ALL=C wc -c < "$local_path") || return 70
+    if (( local_size > RKA_ADB_PROTECTED_UPLOAD_MAX_BYTES )); then
+        printf 'RKA_ADB_PROTECTED_UPLOAD_INVALID\n' >&2
+        return 64
+    fi
+    local_sha=$(sha256sum -- "$local_path" | awk '{print $1}') || return 70
+    if [[ "$local_sha" != "$expected_sha" ]]; then
+        printf 'RKA_ADB_PROTECTED_UPLOAD_HASH_MISMATCH\n' >&2
+        return 65
+    fi
+
+    local staging_path="/data/local/tmp/rka-adb-upload-$transfer_id-$label"
+    if (( ${#staging_path} > 240 )); then
+        printf 'RKA_ADB_PROTECTED_UPLOAD_INVALID\n' >&2
+        return 64
+    fi
+    local materialize_script cleanup_script
+    materialize_script=$(cat <<'RKA_ADB_PROTECTED_UPLOAD'
+set -eu
+set -f
+stage=$1
+target=$2
+expected_sha=$3
+mode=$4
+case "$stage" in /data/local/tmp/rka-adb-upload-*) ;; *) exit 2 ;; esac
+case "$target" in
+    /data/adb/teesimulator-rka/probes/*.manager-appid) parent=/data/adb/teesimulator-rka/probes ;;
+    /data/adb/teesimulator-rka/upload/role-neutral-release.zip|\
+    /data/adb/teesimulator-rka/upload/role-neutral-release.zip.source-sha) parent=/data/adb/teesimulator-rka/upload ;;
+    *) exit 2 ;;
+esac
+case "$expected_sha" in *[!0-9a-f]*|'') exit 2 ;; esac
+[ "$(printf %s "$expected_sha" | wc -c)" -eq 64 ] || exit 2
+case "$mode" in 600|700) ;; *) exit 2 ;; esac
+for directory in /data /data/adb /data/adb/teesimulator-rka "$parent"; do
+    [ ! -L "$directory" ] || exit 1
+    if [ ! -e "$directory" ]; then mkdir "$directory"; fi
+    [ -d "$directory" ] && [ ! -L "$directory" ] || exit 1
+done
+chmod 700 /data/adb/teesimulator-rka "$parent"
+[ -f "$stage" ] && [ ! -L "$stage" ] || exit 1
+[ ! -L "$target" ] || exit 1
+temporary=$(mktemp "$parent/.rka-adb-upload.XXXXXX")
+cleanup() { rm -f -- "$temporary" "$stage"; }
+trap cleanup EXIT HUP INT TERM
+cat -- "$stage" > "$temporary"
+[ "$(sha256sum "$temporary" | awk '{print $1}')" = "$expected_sha" ] || exit 1
+chown 0:0 "$temporary"
+chmod "$mode" "$temporary"
+mv -f -- "$temporary" "$target"
+temporary=
+[ -f "$target" ] && [ ! -L "$target" ] || exit 1
+[ "$(sha256sum "$target" | awk '{print $1}')" = "$expected_sha" ] || exit 1
+rm -f -- "$stage"
+trap - EXIT HUP INT TERM
+RKA_ADB_PROTECTED_UPLOAD
+)
+    materialize_script+=$'\n'
+    cleanup_script=$(cat <<'RKA_ADB_PROTECTED_UPLOAD_CLEANUP'
+set -eu
+set -f
+stage=$1
+case "$stage" in /data/local/tmp/rka-adb-upload-*) ;; *) exit 2 ;; esac
+rm -f -- "$stage"
+[ ! -e "$stage" ] && [ ! -L "$stage" ]
+RKA_ADB_PROTECTED_UPLOAD_CLEANUP
+)
+    cleanup_script+=$'\n'
+
+    local result=0
+    "$adb_command" -s "$serial" push "$local_path" "$staging_path" >/dev/null || result=$?
+    if (( result == 0 )); then
+        rka_adb_root_run "$adb_command" "$serial" "$materialize_script" \
+            "$staging_path" "$target" "$expected_sha" "$mode" || result=$?
+    fi
+    if (( result != 0 )); then
+        rka_adb_root_run "$adb_command" "$serial" "$cleanup_script" "$staging_path" >/dev/null 2>&1 || :
+        return "$result"
+    fi
 )

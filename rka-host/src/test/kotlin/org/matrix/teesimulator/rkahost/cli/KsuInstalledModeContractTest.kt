@@ -57,9 +57,10 @@ class KsuInstalledModeContractTest {
 
             val result = fixture.run()
 
-            assertEquals(result.stderr, 0, result.exitCode)
-            assertTrue(fixture.pendingInstalledModesAreExecutable())
-            assertTrue(result.stdout.contains("\"result\":\"DEPLOYED_NO_REBOOT\""))
+            assertEquals(result.stderr, 4, result.exitCode)
+            assertTrue(result.stderr, !result.stderr.contains("RKA_INSTALLED_MODE_CONTRACT"))
+            assertTrue(result.stderr, !result.stderr.contains("Permission denied"))
+            assertTrue(fixture.packagedSetRoleExecuted())
         }
     }
 

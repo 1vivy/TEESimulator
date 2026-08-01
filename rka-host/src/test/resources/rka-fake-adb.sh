@@ -182,6 +182,20 @@ EOF
     ln -sfn /data/adb/ksud "$root/data/adb/ksu/bin/ksud"
 fi
 write_shim sha256sum '
+if [ "${RKA_FAKE_PACKAGE_RUNTIME:-}" = true ] && [ "${RKA_FAKE_REMOTE_MODE:-}" = manager-probe ]; then
+  case "${1-}" in
+    /data/adb/teesimulator-rka/probes/*.manager-appid)
+      digest_line=$(/usr/bin/sha256sum "$1") || exit 1
+      digest=${digest_line%% *}
+      cat > "$1" <<PROBE
+#!/bin/sh
+case "\${RKA_FAKE_SERIAL:-}" in DONOR_A) printf "10123\\n" ;; CANDIDATE_B) printf "10124\\n" ;; *) exit 2 ;; esac
+PROBE
+      chmod 700 "$1"
+      printf "%s  %s\\n" "$digest" "$1"
+      exit 0 ;;
+  esac
+fi
 if [ "${1-}" = /proc/sys/kernel/random/boot_id ] && [ "${RKA_FAKE_NEXT_MUTATION:-}" = boot-drift ] && [ -f /data/adb/teesimulator-rka/.boot-drift ]; then
   printf "%s  %s\n" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "$1"
 elif [ "${1-}" = /data/adb/ksud ]; then
@@ -457,6 +471,51 @@ write_shim nsenter '
 while [ $# -gt 0 ]; do
   case "$1" in -t) shift 2 ;; -m) shift ;; --) shift; break ;; *) break ;; esac
 done
+if [ "${RKA_FAKE_PACKAGE_RUNTIME:-}" = true ]; then
+  case "${1-}:${2-}" in
+    */rka-control.sh:set-role)
+      : > /data/adb/teesimulator-rka/.package-set-role-executed
+      "$@" || exit 1
+      exit 0 ;;
+    */rka-sidecar:direct-identity)
+      mkdir -p "$RKA_STATE_ROOT/secrets" "$RKA_STATE_ROOT/trust"
+      cp "/tls-fixture/$RKA_FAKE_SERIAL/server.key" "$RKA_STATE_ROOT/secrets/transport.key"
+      cp "/tls-fixture/$RKA_FAKE_SERIAL/server.pem" "$RKA_STATE_ROOT/trust/transport-self.pem"
+      cp "/tls-fixture/$RKA_FAKE_SERIAL/server.pem" "$RKA_STATE_ROOT/trust/transport-trust.pem"
+      cp "/tls-fixture/$RKA_FAKE_SERIAL/server.pin" "$RKA_STATE_ROOT/trust/transport.pin"
+      printf "version=1\\nspki_sha256=%s\\n" "$(cat "/tls-fixture/$RKA_FAKE_SERIAL/server.pin")" > "$RKA_STATE_ROOT/trust/transport-identity.commit"
+      chmod 600 "$RKA_STATE_ROOT/secrets/transport.key" "$RKA_STATE_ROOT/trust/transport-self.pem" "$RKA_STATE_ROOT/trust/transport-trust.pem" "$RKA_STATE_ROOT/trust/transport.pin" "$RKA_STATE_ROOT/trust/transport-identity.commit"
+      printf "RESULT=IDENTITY spki_sha256=%s\\n" "$(cat "$RKA_STATE_ROOT/trust/transport.pin")"
+      exit 0 ;;
+    */rka-sidecar:direct-probe)
+      profile_digest=$(/usr/bin/sha256sum "$RKA_PROFILE_PATH")
+      profile_sha=${profile_digest%% *}
+      epoch=$(/usr/bin/sed -n "3s/^profile_epoch=//p" "$RKA_PROFILE_PATH")
+      pin=$(/usr/bin/sed -n "7s/^peer_spki_sha256=//p" "$RKA_PROFILE_PATH")
+      pin_digest=$(printf %s "$pin" | /usr/bin/xxd -r -p | /usr/bin/sha256sum)
+      pin_sha=${pin_digest%% *}
+      printf "version=1\\nprotocol=TLSv1.3\\nprofile_sha256=%s\\nprofile_epoch=%s\\npeer_pin_sha256=%s\\ndial_mode=DONOR_DIALS\\ntransport=DIRECT\\n" "$profile_sha" "$epoch" "$pin_sha" > "$RKA_DIRECT_PROBE_RECEIPT_PATH"
+      chmod 600 "$RKA_DIRECT_PROBE_RECEIPT_PATH"
+      printf "RESULT=DIRECT protocol=TLSv1.3 profile_sha256=%s\\n" "$profile_sha"
+      exit 0 ;;
+    */rka-supervisor.sh:start)
+      mkdir -p /data/adb/teesimulator-rka/run/pids
+      printf "RUNNING\\n" > /data/adb/teesimulator-rka/run/supervisor.state
+      printf "401 401 1\\n" > /data/adb/teesimulator-rka/run/pids/broker.pid
+      printf "501 501 1\\n" > /data/adb/teesimulator-rka/run/pids/sidecar.pid
+      exit 0 ;;
+    */rka-supervisor.sh:stop)
+      rm -rf /data/adb/teesimulator-rka/run/pids
+      mkdir -p /data/adb/teesimulator-rka/run
+      printf "STOPPED\\n" > /data/adb/teesimulator-rka/run/supervisor.state
+      exit 0 ;;
+    */rka-supervisor.sh:status)
+      current=$(cat /data/adb/teesimulator-rka/run/supervisor.state 2>/dev/null || printf STOPPED)
+      printf "state=%s\\nlegacy=STOPPED\\n" "$current"
+      if [ -d /data/adb/teesimulator-rka/run/pids ]; then printf "broker=RUNNING\\nsidecar=RUNNING\\n"; else printf "broker=STOPPED\\nsidecar=STOPPED\\n"; fi
+      exit 0 ;;
+  esac
+fi
 RKA_NSENTER=1 exec "$@"'
 write_shim readlink '
 case "${1-}" in
@@ -566,4 +625,6 @@ printf '%s\n' "$wire_payload" | bwrap \
     --setenv RKA_FAKE_ZYGOTE "${RKA_FAKE_ZYGOTE:-}" \
     --setenv RKA_FAKE_UPLOAD_FAULT "${RKA_FAKE_UPLOAD_FAULT:-}" \
     --setenv RKA_FAKE_KSU_MODE_MUTATION "${RKA_FAKE_KSU_MODE_MUTATION:-}" \
+    --setenv RKA_FAKE_PACKAGE_RUNTIME "${RKA_FAKE_PACKAGE_RUNTIME:-false}" \
+    --setenv RKA_FAKE_REMOTE_MODE "$mode" \
     /bin/sh

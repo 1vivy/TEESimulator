@@ -19,6 +19,7 @@ internal class Fixture(
     private val tools = root.resolve("tools")
     internal val devices = root.resolve("devices")
     private val tlsServers = FixtureTlsServers(root.resolve("tls"))
+    private var packagedArchive = false
 
     init {
         Files.writeString(
@@ -288,6 +289,7 @@ exit 0
                         environment()["RKA_FAKE_SYSTEM_OPENSSL"] =
                             kernelProfile.systemOpenSsl.toString()
                         environment()["RKA_FAKE_KSU_MODE_MUTATION"] = ""
+                        environment()["RKA_FAKE_PACKAGE_RUNTIME"] = packagedArchive.toString()
                         environment()["PATH"] = "$tools:${environment()["PATH"]}"
                         applyFixtureMutation(environment(), activeMutation)
                     }
@@ -313,6 +315,7 @@ exit 0
 
     fun replaceArchive(packageZip: Path, omitCustomize: Boolean = false) {
         Files.copy(packageZip, zip, StandardCopyOption.REPLACE_EXISTING)
+        packagedArchive = true
         if (omitCustomize) {
             val process = ProcessBuilder("zip", "-qd", zip.toString(), "customize.sh").start()
             check(process.waitFor() == 0)
@@ -535,6 +538,11 @@ os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zi
                 Files.isExecutable(pending.resolve("rka-sidecar")) &&
                 !Files.isExecutable(pending.resolve("module.prop"))
         }
+
+    fun packagedSetRoleExecuted(): Boolean =
+        Files.isRegularFile(
+            devices.resolve("DONOR_A/root/data/adb/teesimulator-rka/.package-set-role-executed")
+        )
 
     fun metadataTransactionTempAbsent(): Boolean =
         listOf("DONOR_A", "CANDIDATE_B").all { serial ->

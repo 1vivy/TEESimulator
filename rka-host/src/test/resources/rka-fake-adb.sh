@@ -258,6 +258,13 @@ write_shim ping 'exit 0'
 write_shim logcat 'exit 0'
 write_shim strings 'exit 1'
 write_shim toybox 'exit 0'
+write_shim unzip '
+if [ "${RKA_FAKE_NEXT_MUTATION:-}" = busybox-unzip ]; then
+  case "${1-}" in
+    -Z*) printf "unzip: invalid option -- Z\\n" >&2; exit 2 ;;
+  esac
+fi
+exec /usr/bin/unzip "$@"'
 write_shim timeout 'shift; exec "$@"'
 write_shim lsattr 'printf "%s %s\n" ---------------------- "${@: -1}"'
 write_shim awk '

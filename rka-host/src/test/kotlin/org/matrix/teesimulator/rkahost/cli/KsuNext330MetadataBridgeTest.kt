@@ -28,6 +28,36 @@ class KsuNext330MetadataBridgeTest {
     }
 
     @Test
+    fun busyboxUnzipRejectingZipinfoOptionStillReinjectsValidatedMetadata() {
+        Fixture(
+                FixtureMutation.BUSYBOX_UNZIP_REJECTS_Z_OPTION,
+                KernelProfile.KSU_NEXT_FIRST_INSTALL,
+            )
+            .use { fixture ->
+                val result = fixture.run()
+
+                assertEquals(result.stderr, 0, result.exitCode)
+                assertTrue(fixture.pendingMetadataIsReinjected())
+                assertTrue(fixture.pendingManifestVerifies())
+            }
+    }
+
+    @Test
+    fun duplicateFixedMetadataEntriesAreRejectedBeforeUpload() {
+        Fixture(
+                FixtureMutation.ARCHIVE_METADATA_FIXED_ENTRY_DUPLICATE,
+                KernelProfile.KSU_NEXT_FIRST_INSTALL,
+            )
+            .use { fixture ->
+                val result = fixture.run()
+
+                assertEquals(result.stderr, 2, result.exitCode)
+                assertTrue(fixture.moduleParentsAbsent())
+                assertTrue(fixture.metadataTransactionTempAbsent())
+            }
+    }
+
+    @Test
     fun invalidMetadataReceiptsFailBeforeKernelSuInstallationAndRollbackAbsentParents() {
         listOf(
                 FixtureMutation.ARCHIVE_METADATA_MISSING,

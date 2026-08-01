@@ -96,7 +96,7 @@ profile_sha="${pair_values[2]}"
 git -C "$project_root" verify-commit HEAD >/dev/null 2>&1 || fail SOURCE_SIGNATURE_INVALID
 "$project_root/scripts/rka-audit.sh" secrets --base HEAD --archive "$zip_path" >/dev/null ||
     fail ARCHIVE_INVALID
-archive_entries="$(unzip -Z1 -- "$zip_path")" || fail ARCHIVE_INVALID
+archive_listing="$(unzip -l -- "$zip_path")" || fail ARCHIVE_INVALID
 for required_entry in \
     META-INF/rka-artifacts.sha256 \
     module.prop \
@@ -107,7 +107,8 @@ for required_entry in \
     sepolicy.probes \
     sepolicy.rule \
     webroot/index.html; do
-    grep -Fxq "$required_entry" <<<"$archive_entries" || fail ARCHIVE_INVALID
+    archive_entry_count=$(printf '%s\n' "$archive_listing" | awk -v entry="$required_entry" '$NF == entry { count++ } END { print count + 0 }')
+    [[ "$archive_entry_count" == 1 ]] || fail ARCHIVE_INVALID
 done
 
 adb_command="${RKA_DEPLOY_ADB:-adb}"
@@ -259,15 +260,15 @@ validate_metadata_manifest() {
     [ "$metadata_first" = false ] && [ "$metadata_count" -gt 0 ]
 }
 prepare_ksu_metadata() {
-    metadata_listing=$(unzip -Z1 -- "$archive") || return 1
+    metadata_listing=$(unzip -l "$archive") || return 1
     mkdir "$txn/metadata" || return 1
     chmod 700 "$txn/metadata"
     for metadata_entry in META-INF/rka-artifacts.sha256 META-INF/rka-source.sha256; do
-        metadata_count=$(printf '%s\n' "$metadata_listing" | awk -v entry="$metadata_entry" '$0 == entry { count++ } END { print count + 0 }')
+        metadata_count=$(printf '%s\n' "$metadata_listing" | awk -v entry="$metadata_entry" '$NF == entry { count++ } END { print count + 0 }')
         [ "$metadata_count" = 1 ] || return 1
         metadata_name=${metadata_entry#META-INF/}
         metadata_next="$txn/metadata/$metadata_name.next"
-        unzip -p -- "$archive" "$metadata_entry" > "$metadata_next" || return 1
+        unzip -p "$archive" "$metadata_entry" > "$metadata_next" || return 1
         [ -f "$metadata_next" ] && [ ! -L "$metadata_next" ] || return 1
         metadata_bytes=$(stat -c %s "$metadata_next") || return 1
         [ "$metadata_bytes" -gt 0 ] && [ "$metadata_bytes" -le 1048576 ] || return 1

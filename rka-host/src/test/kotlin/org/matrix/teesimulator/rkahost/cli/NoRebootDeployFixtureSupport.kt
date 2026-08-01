@@ -107,6 +107,8 @@ internal enum class FixtureMutation {
     ARCHIVE_METADATA_DUPLICATE_PATH,
     ARCHIVE_METADATA_TRAVERSAL,
     ARCHIVE_METADATA_OVERSIZE,
+    ARCHIVE_METADATA_FIXED_ENTRY_DUPLICATE,
+    BUSYBOX_UNZIP_REJECTS_Z_OPTION,
     ARCHIVE_ARTIFACT_METADATA_TAMPERED,
     ARCHIVE_ARTIFACT_DOT_PREFIX,
     ARCHIVE_ARTIFACT_EMBEDDED_DOT,
@@ -250,6 +252,7 @@ internal fun applyFixtureMutation(
         FixtureMutation.ARCHIVE_METADATA_DUPLICATE_PATH,
         FixtureMutation.ARCHIVE_METADATA_TRAVERSAL,
         FixtureMutation.ARCHIVE_METADATA_OVERSIZE,
+        FixtureMutation.ARCHIVE_METADATA_FIXED_ENTRY_DUPLICATE,
         FixtureMutation.ARCHIVE_ARTIFACT_METADATA_TAMPERED,
         FixtureMutation.ARCHIVE_ARTIFACT_DOT_PREFIX,
         FixtureMutation.ARCHIVE_ARTIFACT_EMBEDDED_DOT,
@@ -262,6 +265,8 @@ internal fun applyFixtureMutation(
         FixtureMutation.ARCHIVE_ARTIFACT_WHITESPACE,
         FixtureMutation.ARCHIVE_ARTIFACT_CANONICAL_ALIAS_DUPLICATE,
         FixtureMutation.ARCHIVE_SOURCE_METADATA_MISMATCH -> Unit
+        FixtureMutation.BUSYBOX_UNZIP_REJECTS_Z_OPTION ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "busybox-unzip"
         FixtureMutation.AFTER_METADATA -> environment["RKA_FAKE_FAULT"] = "after-metadata"
         FixtureMutation.AFTER_INSTALL -> environment["RKA_FAKE_FAULT"] = "after-install"
         FixtureMutation.INSTALL_ONLY_MODULES_PARENT ->

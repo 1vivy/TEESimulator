@@ -187,6 +187,29 @@ exit 0
                 .directory(archiveRoot.toFile())
                 .start()
         check(zipped.waitFor() == 0)
+        if (mutation == FixtureMutation.ARCHIVE_METADATA_FIXED_ENTRY_DUPLICATE) {
+            val duplicate =
+                ProcessBuilder(
+                        "python3",
+                        "-c",
+                        """
+                        import sys
+                        import zipfile
+
+                        archive = sys.argv[1]
+                        with zipfile.ZipFile(archive, "a", zipfile.ZIP_DEFLATED) as bundle:
+                            bundle.writestr(
+                                "META-INF/rka-source.sha256",
+                                bundle.read("META-INF/rka-source.sha256"),
+                            )
+                        """
+                            .trimIndent(),
+                        zip.toString(),
+                    )
+                    .directory(archiveRoot.toFile())
+                    .start()
+            check(duplicate.waitFor() == 0)
+        }
         Files.writeString(Path.of("${zip}.source-sha"), "$sourceSha\n")
         Files.writeString(adb, checkNotNull(javaClass.getResource("/rka-fake-adb.sh")).readText())
         Files.setPosixFilePermissions(adb, PosixFilePermissions.fromString("rwx------"))

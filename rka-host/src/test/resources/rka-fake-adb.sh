@@ -93,6 +93,16 @@ if [ "${RKA_FAKE_NEXT_MUTATION:-}" = probe-cleanup-failure ] && [ "${2-}" != "" 
 fi
 exec /usr/bin/rm "$@"'
 write_shim ksud '
+set_perm() {
+  [ "${RKA_FAKE_KSU_MODE_MUTATION:-}" != customize-failure ] || return 1
+  chown "$2:$3" "$1" || return 1
+  chmod "$4" "$1" || return 1
+}
+set_perm_recursive() {
+  find "$1" -type d -exec chmod "$4" {} + || return 1
+  find "$1" -type f -exec chmod "$5" {} + || return 1
+}
+abort() { exit 1; }
 case "${1-} ${2-}" in
   "--version ") printf "%s\n" "3.2.5-12-g824f2f23 (uapi: 2)" ;;
   "module --help"|"sepolicy --help"|"sepolicy check"|"sepolicy apply") exit 0 ;;
@@ -102,12 +112,28 @@ case "${1-} ${2-}" in
     rm -rf /data/adb/modules_update/tricky_store
     mkdir -p /data/adb/modules_update/tricky_store
     /usr/bin/unzip -q "$3" -d /data/adb/modules_update/tricky_store
+    set_perm_recursive /data/adb/modules_update/tricky_store 0 0 0755 0644 || exit 1
+    if [ -f /data/adb/modules_update/tricky_store/customize.sh ]; then
+      MODPATH=/data/adb/modules_update/tricky_store
+      . "$MODPATH/customize.sh" || exit 1
+      rm -f "$MODPATH/customize.sh"
+    fi
     ;;
   *) exit 1 ;;
 esac'
 if [ "${RKA_FAKE_KSU_PROFILE:-legacy}" = ksu-next-dual ]; then
-    cat > "$root/data/adb/ksud" <<'EOF'
+cat > "$root/data/adb/ksud" <<'EOF'
 #!/bin/sh
+set_perm() {
+  [ "${RKA_FAKE_KSU_MODE_MUTATION:-}" != customize-failure ] || return 1
+  chown "$2:$3" "$1" || return 1
+  chmod "$4" "$1" || return 1
+}
+set_perm_recursive() {
+  find "$1" -type d -exec chmod "$4" {} + || return 1
+  find "$1" -type f -exec chmod "$5" {} + || return 1
+}
+abort() { exit 1; }
 case "${1-} ${2-}" in
   "--version ")
     if [ "${RKA_FAKE_NEXT_MUTATION:-}" = version-drift ]; then printf '%s\n' 'ksud 3.3.1 (uapi: 2)'; else printf '%s\n' 'ksud 3.3.0 (uapi: 2)'; fi ;;
@@ -122,6 +148,20 @@ case "${1-} ${2-}" in
     rm -rf /data/adb/modules_update/tricky_store
     mkdir -p /data/adb/modules/tricky_store /data/adb/modules_update/tricky_store
     /usr/bin/unzip -q "$3" -d /data/adb/modules_update/tricky_store -x 'META-INF/*'
+    set_perm_recursive /data/adb/modules_update/tricky_store 0 0 0755 0644 || exit 1
+    if [ "${RKA_FAKE_KSU_MODE_MUTATION:-}" = customize-missing ]; then
+      rm -f /data/adb/modules_update/tricky_store/customize.sh
+    elif [ -f /data/adb/modules_update/tricky_store/customize.sh ]; then
+      MODPATH=/data/adb/modules_update/tricky_store
+      . "$MODPATH/customize.sh" || exit 1
+      rm -f "$MODPATH/customize.sh"
+    fi
+    case "${RKA_FAKE_KSU_MODE_MUTATION:-}" in
+      executable-mode) chmod 0644 /data/adb/modules_update/tricky_store/rka-control.sh ;;
+      ordinary-mode) chmod 0755 /data/adb/modules_update/tricky_store/module.prop ;;
+      directory-mode) chmod 0700 /data/adb/modules_update/tricky_store/webroot ;;
+      symlink-type) rm -f /data/adb/modules_update/tricky_store/rka-control.sh; ln -s module.prop /data/adb/modules_update/tricky_store/rka-control.sh ;;
+    esac
     if [ "${RKA_FAKE_FIRST_INSTALL:-false}" = true ]; then
       cp /data/adb/modules_update/tricky_store/module.prop /data/adb/modules/tricky_store/module.prop
     fi
@@ -344,7 +384,14 @@ case "$last" in
     if [ -f /data/adb/teesimulator-rka/.bound ] && [ "${RKA_NSENTER:-}" = 1 ] && [ "$last" = /data/adb/modules/tricky_store/module.prop ]; then
       exec /usr/bin/stat -c %d:%i /data/adb/modules_update/tricky_store/module.prop
     fi
-    if [ "${1-}" = -c ] && [ "${2-}" = %u:%g:%a ]; then printf "0:0:644\n"; exit 0; fi ;;
+    if [ "${1-}" = -c ] && [ "${2-}" = %u:%g:%a ]; then
+      if [ "$last" = /data/adb/modules_update/tricky_store/module.prop ]; then
+        printf "0:0:%s\n" "$(/usr/bin/stat -c %a "$last")"
+      else
+        printf "0:0:644\n"
+      fi
+      exit 0
+    fi ;;
   /data/adb/modules/tricky_store/update)
     if [ "${1-}" = -c ] && [ "${2-}" = %u:%g:%a ]; then
       case "${RKA_FAKE_NEXT_MUTATION:-}" in
@@ -362,6 +409,16 @@ case "$last" in
         if [ -f /data/adb/teesimulator-rka/.active-hash-complete ]; then exit 1; fi
         : > /data/adb/teesimulator-rka/.active-hash-complete
       fi
+    fi ;;
+  /data/adb/modules_update/tricky_store|/data/adb/modules_update/tricky_store/*)
+    if [ "${1-}" = -c ] && [ "${2-}" = %u:%g:%a ]; then
+      installed_mode=$(/usr/bin/stat -c %a "$last") || exit 1
+      if [ "${RKA_FAKE_KSU_MODE_MUTATION:-}" = wrong-owner ] && [ "$last" = /data/adb/modules_update/tricky_store/rka-control.sh ]; then
+        printf "1000:0:%s\n" "$installed_mode"
+      else
+        printf "0:0:%s\n" "$installed_mode"
+      fi
+      exit 0
     fi ;;
 esac
 exec /usr/bin/stat "$@"'
@@ -508,4 +565,5 @@ printf '%s\n' "$wire_payload" | bwrap \
     --setenv RKA_FAKE_WEBUI_OWNER "${RKA_FAKE_WEBUI_OWNER:-}" \
     --setenv RKA_FAKE_ZYGOTE "${RKA_FAKE_ZYGOTE:-}" \
     --setenv RKA_FAKE_UPLOAD_FAULT "${RKA_FAKE_UPLOAD_FAULT:-}" \
+    --setenv RKA_FAKE_KSU_MODE_MUTATION "${RKA_FAKE_KSU_MODE_MUTATION:-}" \
     /bin/sh

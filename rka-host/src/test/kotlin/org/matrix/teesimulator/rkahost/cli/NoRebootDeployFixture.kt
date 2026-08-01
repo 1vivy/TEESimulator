@@ -2,6 +2,7 @@ package org.matrix.teesimulator.rkahost.cli
 
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.Base64
 
@@ -54,6 +55,10 @@ internal class Fixture(
         val archiveRoot = root.resolve("archive")
         Files.createDirectories(archiveRoot.resolve("META-INF"))
         Files.createDirectories(archiveRoot.resolve("webroot"))
+        listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64").forEach {
+            Files.createDirectories(archiveRoot.resolve("lib/$it"))
+        }
+        Files.createDirectories(archiveRoot.resolve("licenses"))
         Files.writeString(archiveRoot.resolve("module.prop"), "id=tricky_store\nversion=fixture\n")
         Files.writeString(archiveRoot.resolve("rka-runtime.manifest"), "version=1\n")
         Files.writeString(
@@ -111,12 +116,36 @@ exit 0
 """,
         )
         Files.writeString(archiveRoot.resolve("rka-supervisor.sh"), fixtureSupervisor)
-        listOf("rka-control.sh", "rka-sidecar", "rka-supervisor.sh").forEach {
-            Files.setPosixFilePermissions(
-                archiveRoot.resolve(it),
-                PosixFilePermissions.fromString("rwxr-xr-x"),
+        listOf(
+                "daemon",
+                "rka-agent-pgp-verify",
+                "rka-paths.sh",
+                "rka-sepolicy-probe.sh",
+                "service.sh",
+                "uninstall.sh",
             )
+            .forEach { Files.writeString(archiveRoot.resolve(it), "#!/bin/sh\nexit 0\n") }
+        val customizeSource = projectRoot.resolve("module/rka-ksu-customize.sh")
+        if (Files.isRegularFile(customizeSource)) {
+            Files.copy(customizeSource, archiveRoot.resolve("customize.sh"))
         }
+        listOf(
+                "daemon",
+                "rka-agent-pgp-verify",
+                "rka-control.sh",
+                "rka-paths.sh",
+                "rka-sepolicy-probe.sh",
+                "rka-sidecar",
+                "rka-supervisor.sh",
+                "service.sh",
+                "uninstall.sh",
+            )
+            .forEach {
+                Files.setPosixFilePermissions(
+                    archiveRoot.resolve(it),
+                    PosixFilePermissions.fromString("rwxr-xr-x"),
+                )
+            }
         val manifest =
             ProcessBuilder("bash", "-c", fixtureManifestCommand)
                 .directory(archiveRoot.toFile())
@@ -258,6 +287,7 @@ exit 0
                             kernelProfile.firstInstallParentLayout.fixtureValue
                         environment()["RKA_FAKE_SYSTEM_OPENSSL"] =
                             kernelProfile.systemOpenSsl.toString()
+                        environment()["RKA_FAKE_KSU_MODE_MUTATION"] = ""
                         environment()["PATH"] = "$tools:${environment()["PATH"]}"
                         applyFixtureMutation(environment(), activeMutation)
                     }
@@ -280,6 +310,14 @@ exit 0
 
     fun runWithMutation(value: FixtureMutation): DeployResult =
         execute("direct-auto", sealedDescriptor = true, activeMutation = value)
+
+    fun replaceArchive(packageZip: Path, omitCustomize: Boolean = false) {
+        Files.copy(packageZip, zip, StandardCopyOption.REPLACE_EXISTING)
+        if (omitCustomize) {
+            val process = ProcessBuilder("zip", "-qd", zip.toString(), "customize.sh").start()
+            check(process.waitFor() == 0)
+        }
+    }
 
     fun activeModuleBytes(): ByteArray =
         Files.readAllBytes(
@@ -487,6 +525,15 @@ os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zi
                 .directory(pending.toFile())
                 .start()
                 .waitFor() == 0
+        }
+
+    fun pendingInstalledModesAreExecutable(): Boolean =
+        listOf("DONOR_A", "CANDIDATE_B").all { serial ->
+            val pending =
+                devices.resolve(serial).resolve("root/data/adb/modules_update/tricky_store")
+            Files.isExecutable(pending.resolve("rka-control.sh")) &&
+                Files.isExecutable(pending.resolve("rka-sidecar")) &&
+                !Files.isExecutable(pending.resolve("module.prop"))
         }
 
     fun metadataTransactionTempAbsent(): Boolean =

@@ -155,6 +155,13 @@ internal enum class FixtureMutation {
     AFTER_INSTALL,
     INSTALL_ONLY_MODULES_PARENT,
     INSTALL_ONLY_UPDATE_PARENT,
+    KSU_CUSTOMIZE_MISSING,
+    KSU_CUSTOMIZE_FAILURE,
+    KSU_EXECUTABLE_MODE,
+    KSU_ORDINARY_MODE,
+    KSU_DIRECTORY_MODE,
+    KSU_WRONG_OWNER,
+    KSU_SYMLINK_TYPE,
 }
 
 internal data class ModuleSnapshot(
@@ -325,6 +332,19 @@ internal fun applyFixtureMutation(
             environment["RKA_FAKE_FAULT"] = "install-only-modules-parent"
         FixtureMutation.INSTALL_ONLY_UPDATE_PARENT ->
             environment["RKA_FAKE_FAULT"] = "install-only-update-parent"
+        FixtureMutation.KSU_CUSTOMIZE_MISSING ->
+            environment["RKA_FAKE_KSU_MODE_MUTATION"] = "customize-missing"
+        FixtureMutation.KSU_CUSTOMIZE_FAILURE ->
+            environment["RKA_FAKE_KSU_MODE_MUTATION"] = "customize-failure"
+        FixtureMutation.KSU_EXECUTABLE_MODE ->
+            environment["RKA_FAKE_KSU_MODE_MUTATION"] = "executable-mode"
+        FixtureMutation.KSU_ORDINARY_MODE ->
+            environment["RKA_FAKE_KSU_MODE_MUTATION"] = "ordinary-mode"
+        FixtureMutation.KSU_DIRECTORY_MODE ->
+            environment["RKA_FAKE_KSU_MODE_MUTATION"] = "directory-mode"
+        FixtureMutation.KSU_WRONG_OWNER -> environment["RKA_FAKE_KSU_MODE_MUTATION"] = "wrong-owner"
+        FixtureMutation.KSU_SYMLINK_TYPE ->
+            environment["RKA_FAKE_KSU_MODE_MUTATION"] = "symlink-type"
     }
 }
 
@@ -404,7 +424,7 @@ private fun Fixture.transactionPaths() =
     }
 
 internal const val fixtureManifestCommand =
-    "sha256sum module.prop rka-control.sh rka-runtime.manifest rka-sidecar rka-supervisor.sh sepolicy.probes sepolicy.rule webroot/index.html > META-INF/rka-artifacts.sha256"
+    "sha256sum daemon module.prop rka-agent-pgp-verify rka-control.sh rka-paths.sh rka-runtime.manifest rka-sepolicy-probe.sh rka-sidecar rka-supervisor.sh sepolicy.probes sepolicy.rule service.sh uninstall.sh webroot/index.html > META-INF/rka-artifacts.sha256"
 
 internal val fixtureSupervisor =
     """#!/bin/sh

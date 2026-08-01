@@ -92,6 +92,19 @@ class NoRebootDeployCommandContractTest {
     }
 
     @Test
+    fun installedModeContractPrecedesPolicyAndEveryNewModuleExecutable() {
+        val deploy = script.substringAfter("deploy)\n").substringBefore("    ;;\npair)")
+        val install = deploy.indexOf("ksud module install \"\$archive\"")
+        val modeContract = deploy.indexOf("validate_installed_module_contract")
+        val policy = deploy.indexOf("ksud sepolicy check")
+        val bind = deploy.indexOf("mount --bind \"\$pending\" \"\$active\"")
+        val setRole = deploy.indexOf("\"\$active/rka-control.sh\" set-role")
+
+        assertTrue(modeContract > install)
+        assertTrue(policy > modeContract && bind > policy && setRole > bind)
+    }
+
+    @Test
     fun completeDirectProfileIsPublishedBeforeRuntimeStartAndReloaded() {
         val pair = script.substringAfter("pair)\n").substringBefore("    ;;\ndirect-probe)")
         val profile = pair.indexOf("direct.conf")

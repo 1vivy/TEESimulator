@@ -307,6 +307,47 @@ discard_ksu_metadata() {
     rm -rf "$metadata_staging"
     [ ! -e "$metadata_staging" ] && [ ! -L "$metadata_staging" ]
 }
+validate_installed_module_contract() {
+    installed_manifest="$pending/META-INF/rka-artifacts.sha256"
+    installed_expected_files="$txn/installed-files.expected"
+    installed_actual_files="$txn/installed-files.actual"
+    installed_expected_directories="$txn/installed-directories.expected"
+    installed_actual_directories="$txn/installed-directories.actual"
+    [ -f "$installed_manifest" ] && [ ! -L "$installed_manifest" ] || return 1
+    awk '{print $2}' "$installed_manifest" | sort > "$installed_expected_files" || return 1
+    printf '%s\n' META-INF/rka-artifacts.sha256 META-INF/rka-source.sha256 >> "$installed_expected_files"
+    sort -o "$installed_expected_files" "$installed_expected_files" || return 1
+    (cd "$pending" && find . -mindepth 1 -type f -print | sed 's#^\./##' | sort) > "$installed_actual_files" || return 1
+    cmp -s "$installed_expected_files" "$installed_actual_files" || return 1
+    printf '%s\n' . META-INF lib lib/arm64-v8a lib/armeabi-v7a lib/x86 lib/x86_64 licenses webroot > "$installed_expected_directories"
+    (cd "$pending" && { printf '.\n'; find . -mindepth 1 -type d -print | sed 's#^\./##' | sort; }) > "$installed_actual_directories" || return 1
+    cmp -s "$installed_expected_directories" "$installed_actual_directories" || return 1
+    [ -z "$(find "$pending" -mindepth 1 ! -type f ! -type d -print -quit)" ] || return 1
+    while read -r installed_digest installed_file; do
+        case "$installed_file" in
+            daemon|rka-agent-pgp-verify|rka-control.sh|rka-paths.sh|rka-sepolicy-probe.sh|rka-sidecar|rka-supervisor.sh|service.sh|uninstall.sh) installed_mode=755 ;;
+            *) installed_mode=644 ;;
+        esac
+        [ -f "$pending/$installed_file" ] && [ ! -L "$pending/$installed_file" ] || return 1
+        [ "$(stat -c '%u:%g:%a' "$pending/$installed_file")" = "0:0:$installed_mode" ] || return 1
+    done < "$installed_manifest"
+    installed_metadata_file_mode=600
+    installed_metadata_directory_mode=700
+    if [ "$metadata_bridge" = false ]; then
+        installed_metadata_file_mode=644
+        installed_metadata_directory_mode=755
+    fi
+    for installed_file in META-INF/rka-artifacts.sha256 META-INF/rka-source.sha256; do
+        [ -f "$pending/$installed_file" ] && [ ! -L "$pending/$installed_file" ] || return 1
+        [ "$(stat -c '%u:%g:%a' "$pending/$installed_file")" = "0:0:$installed_metadata_file_mode" ] || return 1
+    done
+    while IFS= read -r installed_directory; do
+        installed_mode=755
+        [ "$installed_directory" != META-INF ] || installed_mode=$installed_metadata_directory_mode
+        [ -d "$pending/$installed_directory" ] && [ ! -L "$pending/$installed_directory" ] || return 1
+        [ "$(stat -c '%u:%g:%a' "$pending/$installed_directory")" = "0:0:$installed_mode" ] || return 1
+    done < "$installed_expected_directories"
+}
 prepare_active_view_without_update() {
     active_view_source=$1
     active_view_destination=$2
@@ -716,6 +757,10 @@ deploy)
         [ "${RKA_FAKE_FAULT:-}" != after-metadata ] || exit 1
     fi
     [ "${RKA_FAKE_FAULT:-}" != after-install ] || exit 1
+    if ! validate_installed_module_contract; then
+        printf '%s\n' RKA_INSTALLED_MODE_CONTRACT >&2
+        exit 1
+    fi
     (cd "$pending" && sha256sum -c META-INF/rka-artifacts.sha256) > "$txn/staged-manifest.verify" 2>&1
     if [ "$metadata_bridge" = true ]; then discard_ksu_metadata || exit 1; fi
     policy="$pending/sepolicy.rule"

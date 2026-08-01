@@ -303,6 +303,10 @@ androidComponents {
                     )
                     exclude("module.prop")
                 }
+                from(sourceModuleDir) {
+                    include("rka-ksu-customize.sh")
+                    rename { "customize.sh" }
+                }
                 from(sourceModuleDir.resolve("webroot")) {
                     into("webroot")
                     include("**/*")
@@ -350,6 +354,7 @@ androidComponents {
                             .filter(File::isFile)
                             .map { it.relativeTo(stageDirectory).invariantSeparatorsPath }
                             .filterNot { it.startsWith("META-INF/") }
+                            .filterNot { it == "customize.sh" }
                             .sorted()
                             .toList()
                     artifactEntries.forEach { entry ->
@@ -393,6 +398,7 @@ androidComponents {
                             "module/rka-profile.schema",
                             "module/rka-role.conf",
                             "module/rka-runtime.manifest",
+                            "module/rka-ksu-customize.sh",
                             "module/rka-sepolicy-probe.sh",
                             "module/rka-supervisor.sh",
                             "module/sepolicy.probes",
@@ -541,7 +547,6 @@ val verifyRkaModuleArchive by
                 listOf(
                     "action",
                     "companion",
-                    "customize",
                     "device-id",
                     "device_id",
                     "diag",
@@ -556,6 +561,7 @@ val verifyRkaModuleArchive by
             val commonEntries =
                 setOf(
                     "daemon",
+                    "customize.sh",
                     "rka-agent-pgp-public.gpg",
                     "rka-agent-pgp-verify",
                     "rka-sidecar",

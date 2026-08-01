@@ -1,4 +1,5 @@
 use std::{
+    fmt::Write as _,
     fs,
     net::{Ipv4Addr, SocketAddrV4, TcpListener, UdpSocket},
     path::{Path, PathBuf},
@@ -18,7 +19,8 @@ use super::{
     DirectSessionError, candidate_server, connect_bound, donor_client, exchange_candidate_request,
 };
 use crate::{
-    direct_profile::{DialMode, DirectProfile},
+    LifecycleRole,
+    direct_profile::{DialMode, DirectProfile, load_from},
     provisioning_io::FileStateStore,
 };
 
@@ -117,8 +119,12 @@ fn production_direct_session_uses_persisted_admission_and_donor_dial_direction()
     )?;
     persist_pairing(&donor_state.0, candidate_pin)?;
     persist_pairing(&candidate_state.0, donor_pin)?;
-    let donor_profile = profile(local, candidate_pin);
-    let candidate_profile = profile(local, donor_pin);
+    let donor_profile =
+        persist_profile(&donor_state.0, (LifecycleRole::Donor, local, candidate_pin))?;
+    let candidate_profile = persist_profile(
+        &candidate_state.0,
+        (LifecycleRole::Candidate, local, donor_pin),
+    )?;
     let _candidate = candidate_server(&candidate_state.0, &candidate_profile)?;
     let _donor = donor_client(&donor_state.0, &donor_profile)?;
     let listener = TcpListener::bind(SocketAddrV4::new(local, 0))?;
@@ -150,14 +156,30 @@ fn production_direct_session_uses_persisted_admission_and_donor_dial_direction()
     Ok(())
 }
 
-fn profile(listen_interface: Ipv4Addr, peer_pin: [u8; 32]) -> DirectProfile {
-    DirectProfile {
-        epoch: 9,
-        endpoint: listen_interface,
-        listen_interface,
-        dial_mode: DialMode::DonorDials,
-        peer_pin,
-    }
+fn persist_profile(
+    root: &Path,
+    profile: (LifecycleRole, Ipv4Addr, [u8; 32]),
+) -> Result<DirectProfile, Box<dyn std::error::Error>> {
+    let (role, listen_interface, peer_pin) = profile;
+    let profile_path = root.join("profiles/direct.conf");
+    fs::create_dir_all(root.join("profiles"))?;
+    let role_line = match role {
+        LifecycleRole::Donor => "DONOR",
+        LifecycleRole::Candidate => "CANDIDATE",
+    };
+    let encoded_pin = peer_pin.iter().fold(String::new(), |mut encoded, byte| {
+        let _ = write!(encoded, "{byte:02x}");
+        encoded
+    });
+    fs::write(
+        &profile_path,
+        format!(
+            "version=2\nrole={role_line}\nprofile_epoch=9\ndial_mode=DONOR_DIALS\ndial_endpoint={listen_interface}\nlisten_interface={listen_interface}\npeer_spki_sha256={encoded_pin}\ntransport=DIRECT\n"
+        ),
+    )?;
+    let (profile, _) = load_from((root, &profile_path, role), 9)?;
+    assert_eq!(profile.dial_mode, DialMode::DonorDials);
+    Ok(profile)
 }
 
 fn persist_pairing(

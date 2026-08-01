@@ -239,19 +239,31 @@ pub(crate) fn load(role: LifecycleRole) -> Result<(PathBuf, DirectProfile, Vec<u
         .map_err(|_| SidecarError::RuntimeContext)?
         .parse::<u64>()
         .map_err(|_| SidecarError::RuntimeContext)?;
+    let (profile, raw) = load_from((&state_root, &profile_path, role), expected_epoch)?;
+    Ok((state_root, profile, raw))
+}
+
+pub(crate) fn load_from(
+    context: (&Path, &Path, LifecycleRole),
+    expected_epoch: u64,
+) -> Result<(DirectProfile, Vec<u8>), SidecarError> {
+    let (state_root, profile_path, role) = context;
+    if profile_path != state_root.join(PROFILE_NAME) {
+        return Err(SidecarError::RuntimeContext);
+    }
     let root_metadata =
-        fs::symlink_metadata(&state_root).map_err(|_| SidecarError::RuntimeContext)?;
+        fs::symlink_metadata(state_root).map_err(|_| SidecarError::RuntimeContext)?;
     let profile_metadata =
-        fs::symlink_metadata(&profile_path).map_err(|_| SidecarError::RuntimeContext)?;
+        fs::symlink_metadata(profile_path).map_err(|_| SidecarError::RuntimeContext)?;
     if !root_metadata.file_type().is_dir()
         || !profile_metadata.file_type().is_file()
         || profile_metadata.len() > MAX_PROFILE_BYTES
     {
         return Err(SidecarError::RuntimeContext);
     }
-    let raw = fs::read(&profile_path).map_err(|_| SidecarError::RuntimeContext)?;
+    let raw = fs::read(profile_path).map_err(|_| SidecarError::RuntimeContext)?;
     let profile = DirectProfile::parse(&raw, role, expected_epoch)?;
-    Ok((state_root, profile, raw))
+    Ok((profile, raw))
 }
 
 #[doc(hidden)]

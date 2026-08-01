@@ -32,7 +32,7 @@ class BrokerBridgeFourthFollowupTest {
         assertFalse(socketPath.contains("restorecon"))
         assertFalse(policy.contains("relabelfrom"))
         assertFalse(policy.contains("relabelto"))
-        for (domain in listOf("ksu", "magisk")) {
+        for (domain in listOf("ksu")) {
             assertTrue(
                 policy.contains(
                     "type_transition $domain adb_data_file dir " +
@@ -46,6 +46,7 @@ class BrokerBridgeFourthFollowupTest {
                 )
             )
         }
+        assertFalse(policy.contains("magisk"))
         assertTrue(socketPath.contains("fileContext(directoryAnchor) == DIRECTORY_CONTEXT"))
         assertTrue(socketPath.contains("fileContext(nodeAnchor)"))
         assertTrue(socketPath.contains("SOCKET_CONTEXT"))
@@ -61,12 +62,9 @@ class BrokerBridgeFourthFollowupTest {
                 .toList()
         val expected =
             setOf(
-                "allow ksu self unix_stream_socket { create bind connect listen accept read write getattr getopt setopt shutdown }",
-                "allow magisk self unix_stream_socket { create bind connect listen accept read write getattr getopt setopt shutdown }",
+                "allow ksu ksu unix_stream_socket { create bind connect listen accept read write getattr getopt setopt shutdown }",
                 "allow ksu teesimulator_rka_socket_dir dir { search open read getattr write add_name remove_name setattr }",
                 "allow ksu teesimulator_rka_socket sock_file { create open read write getattr setattr unlink }",
-                "allow magisk teesimulator_rka_socket_dir dir { search open read getattr write add_name remove_name setattr }",
-                "allow magisk teesimulator_rka_socket sock_file { create open read write getattr setattr unlink }",
             )
         val actual =
             policy

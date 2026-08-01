@@ -71,12 +71,7 @@ class BrokerBridgeSecondFollowupTest {
         val policy = String(Files.readAllBytes(repositoryRoot().resolve("module/sepolicy.rule")))
 
         assertFalse(policy.contains("adb_data_file:sock_file"))
-        assertFalse(
-            policy.lineSequence().any {
-                it.startsWith("allow ksu adb_data_file:dir") ||
-                    it.startsWith("allow magisk adb_data_file:dir")
-            }
-        )
+        assertFalse(policy.lineSequence().any { it.startsWith("allow ksu adb_data_file:dir") })
         assertTrue(policy.contains("type teesimulator_rka_socket_dir file_type\n"))
         assertTrue(policy.contains("type teesimulator_rka_socket file_type\n"))
         assertTrue(
@@ -86,21 +81,11 @@ class BrokerBridgeSecondFollowupTest {
         )
         assertTrue(
             policy.contains(
-                "type_transition magisk adb_data_file dir teesimulator_rka_socket_dir sockets\n"
-            )
-        )
-        assertTrue(
-            policy.contains(
                 "type_transition ksu teesimulator_rka_socket_dir sock_file " +
                     "teesimulator_rka_socket broker.sock\n"
             )
         )
-        assertTrue(
-            policy.contains(
-                "type_transition magisk teesimulator_rka_socket_dir sock_file " +
-                    "teesimulator_rka_socket broker.sock\n"
-            )
-        )
+        assertFalse(policy.contains("magisk"))
     }
 
     @Test

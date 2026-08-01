@@ -5,31 +5,12 @@ allow crash_dump keystore process *
 # media_rw_data_file grant is debug-only — appended for debug builds in app/build.gradle.kts.
 allow crash_dump platform_app process *
 
-allow ksu self tcp_socket { create connect read write getopt setopt }
-allow ksu node tcp_socket node_bind
-allow ksu port tcp_socket name_connect
-allow magisk self tcp_socket { create connect read write getopt setopt }
-allow magisk node tcp_socket node_bind
-allow magisk port tcp_socket name_connect
-
-allow ksu self udp_socket { create connect read write getopt setopt }
-allow ksu node udp_socket node_bind
-allow ksu port udp_socket name_connect
-allow magisk self udp_socket { create connect read write getopt setopt }
-allow magisk node udp_socket node_bind
-allow magisk port udp_socket name_connect
-
-# Root broker/sidecar bridge only: both processes remain in the module launcher domain and use
+# KernelSU Next only: both bridge processes remain in the ksu module launcher domain and use
 # the root-owned /data/adb/teesimulator-rka/run/sockets Unix stream endpoint.
 type teesimulator_rka_socket_dir file_type
 type teesimulator_rka_socket file_type
 type_transition ksu adb_data_file dir teesimulator_rka_socket_dir sockets
-type_transition magisk adb_data_file dir teesimulator_rka_socket_dir sockets
 type_transition ksu teesimulator_rka_socket_dir sock_file teesimulator_rka_socket broker.sock
-type_transition magisk teesimulator_rka_socket_dir sock_file teesimulator_rka_socket broker.sock
-allow ksu self unix_stream_socket { create bind connect listen accept read write getattr getopt setopt shutdown }
-allow magisk self unix_stream_socket { create bind connect listen accept read write getattr getopt setopt shutdown }
+allow ksu ksu unix_stream_socket { create bind connect listen accept read write getattr getopt setopt shutdown }
 allow ksu teesimulator_rka_socket_dir dir { search open read getattr write add_name remove_name setattr }
 allow ksu teesimulator_rka_socket sock_file { create open read write getattr setattr unlink }
-allow magisk teesimulator_rka_socket_dir dir { search open read getattr write add_name remove_name setattr }
-allow magisk teesimulator_rka_socket sock_file { create open read write getattr setattr unlink }

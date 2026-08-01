@@ -22,6 +22,24 @@ FIXED_EPOCH = "1785486225"
 
 
 class RkaPackageTest(unittest.TestCase):
+    def test_ksu_next_policy_applies_without_rejected_legacy_targets(self) -> None:
+        rules = [
+            line
+            for line in SEPOLICY_RULE.read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith("#")
+        ]
+
+        rejects = self.fake_ksu_next_apply(rules)
+
+        self.assertEqual(rejects, [])
+        self.assertEqual(len(rules), 10)
+        self.assertFalse(any("magisk" in rule for rule in rules))
+        self.assertFalse(any("tcp_socket" in rule or "udp_socket" in rule for rule in rules))
+        self.assertIn(
+            "allow ksu ksu unix_stream_socket { create bind connect listen accept read write getattr getopt setopt shutdown }",
+            rules,
+        )
+
     def test_clean_release_build_writes_root_receipt_for_release_archive(self) -> None:
         result = run(
             ["./gradlew", "clean", "zipRelease", "--rerun-tasks"],
@@ -47,16 +65,15 @@ class RkaPackageTest(unittest.TestCase):
             if line and not line.startswith("#")
         ]
         probes = [line.split("|", 1) for line in SEPOLICY_PROBES.read_text(encoding="ascii").splitlines()]
-        self.assertEqual(len(probes), len(rules))
-        self.assertEqual({probe[0] for probe in probes}, {hashlib.sha256(rule.encode()).hexdigest() for rule in rules})
+        self.assert_probe_manifest_contract(rules, probes)
+        with self.assertRaises(AssertionError):
+            self.assert_probe_manifest_contract(rules, probes[:-1])
+        with self.assertRaises(AssertionError):
+            self.assert_probe_manifest_contract(rules, probes + [probes[0]])
+        with self.assertRaises(AssertionError):
+            self.assert_probe_manifest_contract(rules, probes[:-1] + [probes[0]])
         self.assertTrue(SEPOLICY_LIVE_PROBE.is_file())
         self.assertEqual(SEPOLICY_LIVE_PROBE.stat().st_mode & 0o777, 0o755)
-        for digest, encoded in probes:
-            self.assertRegex(digest, r"^[0-9a-f]{64}$")
-            command = base64.b64decode(encoded, validate=True).decode("ascii")
-            self.assertEqual(base64.b64encode(command.encode()).decode(), encoded)
-            self.assertEqual(command, f"exec /data/adb/modules/tricky_store/rka-sepolicy-probe.sh {digest}")
-            self.assertLessEqual(len(command), 256)
         deploy = (REPOSITORY_ROOT / "scripts" / "rka-deploy.sh").read_text(encoding="utf-8")
         paired_start = deploy.index('RKA_REQUIRE_DIRECT_READY=true RKA_DIRECT_PROFILE_PATH="$state/profiles/direct.conf"')
         self.assertGreater(paired_start, deploy.index("ksud sepolicy apply"))
@@ -72,8 +89,6 @@ class RkaPackageTest(unittest.TestCase):
         self.assertEqual(len(dispatch), len(set(dispatch)))
         for digest, rule in rule_by_digest.items():
             expected = (
-                "tcp_loopback_probe" if "tcp_socket" in rule else
-                "udp_loopback_probe" if "udp_socket" in rule else
                 "unix_broker_probe" if "unix_stream_socket" in rule else
                 "scratch_transition_probe" if rule.startswith(("type ", "type_transition")) or "teesimulator_rka_socket" in rule else
                 "toybox"
@@ -81,8 +96,6 @@ class RkaPackageTest(unittest.TestCase):
             self.assertEqual(dispatch[digest], expected, rule)
         self.assert_live_probe_contract(helper)
         for replacement in (
-            ("toybox nc -l -s 127.0.0.1", "toybox stat -c"),
-            ("toybox nc -l -u -s 127.0.0.1", "toybox stat -c"),
             ("toybox nc -U -w 2", "toybox stat -c"),
             ("toybox nc -l -U \"$scratch_socket\"", "toybox stat -c"),
             ("scratch=$state/p/$2", "scratch=$state/policy-probes/$1"),
@@ -357,12 +370,31 @@ class RkaPackageTest(unittest.TestCase):
     def parse_hash_manifest(self, payload: bytes) -> dict[str, str]:
         return {name: digest for digest, name in (line.split("  ", 1) for line in payload.decode().splitlines())}
 
+    def assert_probe_manifest_contract(self, rules: list[str], probes: list[list[str]]) -> None:
+        self.assertEqual(len(probes), len(rules))
+        digests = [probe[0] for probe in probes]
+        self.assertEqual(len(digests), len(set(digests)))
+        self.assertEqual(set(digests), {hashlib.sha256(rule.encode()).hexdigest() for rule in rules})
+        for digest, encoded in probes:
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+            command = base64.b64decode(encoded, validate=True).decode("ascii")
+            self.assertEqual(base64.b64encode(command.encode()).decode(), encoded)
+            self.assertEqual(command, f"exec /data/adb/modules/tricky_store/rka-sepolicy-probe.sh {digest}")
+            self.assertLessEqual(len(command), 256)
+
+    def fake_ksu_next_apply(self, rules: list[str]) -> list[str]:
+        rejected_targets = {"self", "node", "port"}
+        rejects: list[str] = []
+        for rule in rules:
+            fields = rule.split()
+            if "magisk" in fields:
+                rejects.append(f"inactive domain: {rule}")
+            elif len(fields) >= 3 and fields[0] == "allow" and fields[1] == "ksu" and fields[2] in rejected_targets:
+                rejects.append(f"unknown type: {rule}")
+        return rejects
+
     def assert_live_probe_contract(self, helper: str) -> None:
         for required in (
-            "toybox nc -l -s 127.0.0.1",
-            "toybox nc -w 2 127.0.0.1",
-            "toybox nc -l -u -s 127.0.0.1",
-            "toybox nc -u -w 2 127.0.0.1",
             "toybox nc -U -w 2 \"$socket\"",
             "mkdir -p \"$scratch/sockets\"",
             "scratch=$state/p/$2",
@@ -395,9 +427,9 @@ class RkaPackageTest(unittest.TestCase):
             if action.startswith('scratch_transition_probe "$1" '):
                 scratch_keys.append(action.removesuffix(" ;;").rsplit(" ", 1)[1])
         self.assertEqual(set(dispatch), set(rule_by_digest))
-        self.assertEqual(len(scratch_keys), 10)
+        self.assertEqual(len(scratch_keys), 6)
         self.assertEqual(len(scratch_keys), len(set(scratch_keys)))
-        self.assertEqual(set(scratch_keys), {f"t{index:02d}" for index in range(1, 11)})
+        self.assertEqual(set(scratch_keys), {f"t{index:02d}" for index in range(1, 7)})
 
 
 if __name__ == "__main__":

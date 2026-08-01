@@ -141,7 +141,6 @@ next_sha=f4359553a597955956b97e86277e08bc426f644de0dba5ff13da562fba29c55d
 next_reference=3b18216f71df189ab3d1b1ce0bdb21be1268e771
 next_manager=com.rifsxd.ksunext
 next_activity=com.rifsxd.ksunext/.ui.MainActivity
-next_webui=com.rifsxd.ksunext/.ui.webui.WebUIActivity
 tree_hash() {
     path=$1
     if [ ! -e "$path" ] && [ ! -L "$path" ]; then printf ABSENT; return; fi
@@ -352,8 +351,6 @@ EOF
         [ "$activity" = "$next_activity" ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_ACTIVITY\n"; exit; }
         printf '%s\n' "$package_dump" | grep -Fq 'versionName=v3.3.0' || { printf "RESULT=INCOMPATIBLE reason=MANAGER_VERSION\n"; exit; }
         printf '%s\n' "$package_dump" | grep -Eq 'versionCode=33214([[:space:]]|$)' || { printf "RESULT=INCOMPATIBLE reason=MANAGER_CODE\n"; exit; }
-        printf '%s\n' "$package_dump" | grep -Fqx '  activity com.rifsxd.ksunext/.ui.MainActivity exported=true' || { printf "RESULT=INCOMPATIBLE reason=MANAGER_COMPONENT\n"; exit; }
-        printf '%s\n' "$package_dump" | grep -Fqx '  activity com.rifsxd.ksunext/.ui.webui.WebUIActivity exported=false' || { printf "RESULT=INCOMPATIBLE reason=WEBUI_COMPONENT\n"; exit; }
         surface=KSU_NEXT_MANAGER
     else
         [ "$role:$authorization_mode" = CANDIDATE:authorized_headless ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_AUTHORIZATION_MODE\n"; exit; }

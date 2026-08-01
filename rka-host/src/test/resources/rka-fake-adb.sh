@@ -123,7 +123,11 @@ fi'
 write_shim cmd '
 if [ "${1-} ${2-}" = "package resolve-activity" ]; then
   if [ "${RKA_FAKE_KSU_PROFILE:-legacy}" = ksu-next-dual ]; then
-    if [ "${RKA_FAKE_NEXT_MUTATION:-}" = activity-wrong ]; then printf "%s\n" com.rifsxd.ksunext/.ui.OtherActivity; else printf "%s\n" com.rifsxd.ksunext/.ui.MainActivity; fi
+    case "${RKA_FAKE_NEXT_MUTATION:-}" in
+      component-wrong) exit 0 ;;
+      activity-wrong) printf "%s\n" com.rifsxd.ksunext/.ui.OtherActivity ;;
+      *) printf "%s\n" com.rifsxd.ksunext/.ui.MainActivity ;;
+    esac
   else
     printf "%s\n" me.weishu.kernelsu/.ui.MainActivity
   fi
@@ -156,8 +160,6 @@ if [ "${1-} ${2-}" = "package com.rifsxd.ksunext" ]; then
   printf "%s\n" "versionName=v3.3.0" "versionCode=33214"
   if [ "${RKA_FAKE_NEXT_MUTATION:-}" = legacy-userid ]; then printf "  userId=%s\n" "$package_uid"; else printf "  appId=%s\n" "$package_uid"; fi
   [ "${RKA_FAKE_NEXT_MUTATION:-}" = signing-wrong ] || printf "%s\n" "  signingDetails=SigningDetails{fixture-donor}"
-  if [ "${RKA_FAKE_NEXT_MUTATION:-}" = component-wrong ]; then exported=false; else exported=true; fi
-  printf "%s\n" "  activity com.rifsxd.ksunext/.ui.MainActivity exported=$exported" "  activity com.rifsxd.ksunext/.ui.webui.WebUIActivity exported=false"
   exit 0
 fi
 if [ "${1-} ${2-}" = "package org.example.headless" ]; then

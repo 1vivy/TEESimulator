@@ -7,7 +7,7 @@ import org.junit.Test
 
 class KsuNext330AdapterTest {
     @Test
-    fun donorOfficialManagerUidComesFromCmdPackageWhenDumpsysOnlyHasAppId() {
+    fun donorOfficialManagerUsesAuthoritativeProbesWhenDumpsysOmitsComponentLines() {
         Fixture(kernelProfile = KernelProfile.KSU_NEXT_DUAL).use { fixture ->
             val result = fixture.run()
 

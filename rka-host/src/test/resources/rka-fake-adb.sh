@@ -109,7 +109,7 @@ case "${1-} ${2-}" in
     rm -rf /data/adb/modules_update/tricky_store
     mkdir -p /data/adb/modules/tricky_store /data/adb/modules_update/tricky_store
     : > /data/adb/modules/tricky_store/update
-    /usr/bin/unzip -q "$3" -d /data/adb/modules_update/tricky_store ;;
+    /usr/bin/unzip -q "$3" -d /data/adb/modules_update/tricky_store -x 'META-INF/*' ;;
   *) exit 1 ;;
 esac
 EOF

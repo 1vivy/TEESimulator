@@ -103,6 +103,13 @@ internal enum class FixtureMutation {
     NEXT_LAYOUT_FILE,
     NEXT_LAYOUT_SYMLINK,
     NEXT_LAYOUT_HIDDEN_MOUNT,
+    ARCHIVE_METADATA_MISSING,
+    ARCHIVE_METADATA_DUPLICATE_PATH,
+    ARCHIVE_METADATA_TRAVERSAL,
+    ARCHIVE_METADATA_OVERSIZE,
+    ARCHIVE_ARTIFACT_METADATA_TAMPERED,
+    ARCHIVE_SOURCE_METADATA_MISMATCH,
+    AFTER_METADATA,
     AFTER_INSTALL,
     INSTALL_ONLY_MODULES_PARENT,
     INSTALL_ONLY_UPDATE_PARENT,
@@ -229,6 +236,13 @@ internal fun applyFixtureMutation(
             environment["RKA_FAKE_NEXT_MUTATION"] = "layout-symlink"
         FixtureMutation.NEXT_LAYOUT_HIDDEN_MOUNT ->
             environment["RKA_FAKE_NEXT_MUTATION"] = "layout-hidden-mount"
+        FixtureMutation.ARCHIVE_METADATA_MISSING,
+        FixtureMutation.ARCHIVE_METADATA_DUPLICATE_PATH,
+        FixtureMutation.ARCHIVE_METADATA_TRAVERSAL,
+        FixtureMutation.ARCHIVE_METADATA_OVERSIZE,
+        FixtureMutation.ARCHIVE_ARTIFACT_METADATA_TAMPERED,
+        FixtureMutation.ARCHIVE_SOURCE_METADATA_MISMATCH -> Unit
+        FixtureMutation.AFTER_METADATA -> environment["RKA_FAKE_FAULT"] = "after-metadata"
         FixtureMutation.AFTER_INSTALL -> environment["RKA_FAKE_FAULT"] = "after-install"
         FixtureMutation.INSTALL_ONLY_MODULES_PARENT ->
             environment["RKA_FAKE_FAULT"] = "install-only-modules-parent"

@@ -41,6 +41,16 @@ internal class Fixture(
                 PosixFilePermissions.fromString("rw-------"),
             )
         }
+        val projectRoot = Path.of(System.getProperty("user.dir")).parent
+        val sourceSha =
+            ProcessBuilder("git", "rev-parse", "HEAD")
+                .directory(projectRoot.toFile())
+                .start()
+                .let { process ->
+                    val value = process.inputStream.bufferedReader().readText().trim()
+                    check(process.waitFor() == 0)
+                    value
+                }
         val archiveRoot = root.resolve("archive")
         Files.createDirectories(archiveRoot.resolve("META-INF"))
         Files.createDirectories(archiveRoot.resolve("webroot"))
@@ -112,21 +122,47 @@ exit 0
                 .directory(archiveRoot.toFile())
                 .start()
         check(manifest.waitFor() == 0)
+        Files.writeString(
+            archiveRoot.resolve("META-INF/rka-source.sha256"),
+            "commit=$sourceSha\n${"a".repeat(64)}  module/module.prop\n",
+        )
+        when (mutation) {
+            FixtureMutation.ARCHIVE_METADATA_MISSING ->
+                Files.delete(archiveRoot.resolve("META-INF/rka-source.sha256"))
+            FixtureMutation.ARCHIVE_METADATA_DUPLICATE_PATH ->
+                Files.writeString(
+                    archiveRoot.resolve("META-INF/rka-source.sha256"),
+                    "commit=$sourceSha\n${"a".repeat(64)}  module/module.prop\n${"b".repeat(64)}  module/module.prop\n",
+                )
+            FixtureMutation.ARCHIVE_METADATA_TRAVERSAL ->
+                Files.writeString(
+                    archiveRoot.resolve("META-INF/rka-source.sha256"),
+                    "commit=$sourceSha\n${"a".repeat(64)}  ../module.prop\n",
+                )
+            FixtureMutation.ARCHIVE_METADATA_OVERSIZE ->
+                Files.writeString(
+                    archiveRoot.resolve("META-INF/rka-source.sha256"),
+                    "commit=$sourceSha\n" + "a".repeat(1_048_577),
+                )
+            FixtureMutation.ARCHIVE_ARTIFACT_METADATA_TAMPERED -> {
+                val artifactManifest = archiveRoot.resolve("META-INF/rka-artifacts.sha256")
+                Files.writeString(
+                    artifactManifest,
+                    "b".repeat(64) + Files.readString(artifactManifest).substring(64),
+                )
+            }
+            FixtureMutation.ARCHIVE_SOURCE_METADATA_MISMATCH ->
+                Files.writeString(
+                    archiveRoot.resolve("META-INF/rka-source.sha256"),
+                    "commit=${"b".repeat(40)}\n${"a".repeat(64)}  module/module.prop\n",
+                )
+            else -> Unit
+        }
         val zipped =
             ProcessBuilder("zip", "-qr", zip.toString(), ".")
                 .directory(archiveRoot.toFile())
                 .start()
         check(zipped.waitFor() == 0)
-        val projectRoot = Path.of(System.getProperty("user.dir")).parent
-        val sourceSha =
-            ProcessBuilder("git", "rev-parse", "HEAD")
-                .directory(projectRoot.toFile())
-                .start()
-                .let { process ->
-                    val value = process.inputStream.bufferedReader().readText().trim()
-                    check(process.waitFor() == 0)
-                    value
-                }
         Files.writeString(Path.of("${zip}.source-sha"), "$sourceSha\n")
         Files.writeString(adb, checkNotNull(javaClass.getResource("/rka-fake-adb.sh")).readText())
         Files.setPosixFilePermissions(adb, PosixFilePermissions.fromString("rwx------"))
@@ -356,6 +392,43 @@ os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zi
             val adbRoot = devices.resolve(serial).resolve("root/data/adb")
             !Files.exists(adbRoot.resolve("modules")) &&
                 !Files.exists(adbRoot.resolve("modules_update"))
+        }
+
+    fun pendingMetadataIsReinjected(): Boolean =
+        listOf("DONOR_A", "CANDIDATE_B").all { serial ->
+            val metadata =
+                devices
+                    .resolve(serial)
+                    .resolve("root/data/adb/modules_update/tricky_store/META-INF")
+            Files.isDirectory(metadata) &&
+                !Files.isSymbolicLink(metadata) &&
+                Files.isRegularFile(metadata.resolve("rka-artifacts.sha256")) &&
+                Files.isRegularFile(metadata.resolve("rka-source.sha256")) &&
+                Files.list(metadata).use { paths -> paths.count() == 2L }
+        }
+
+    fun pendingManifestVerifies(): Boolean =
+        listOf("DONOR_A", "CANDIDATE_B").all { serial ->
+            val pending =
+                devices.resolve(serial).resolve("root/data/adb/modules_update/tricky_store")
+            ProcessBuilder("sha256sum", "-c", "META-INF/rka-artifacts.sha256")
+                .directory(pending.toFile())
+                .start()
+                .waitFor() == 0
+        }
+
+    fun metadataTransactionTempAbsent(): Boolean =
+        listOf("DONOR_A", "CANDIDATE_B").all { serial ->
+            val transactions =
+                devices
+                    .resolve(serial)
+                    .resolve("root/data/adb/teesimulator-rka/deploy-transactions")
+            Files.notExists(transactions) ||
+                Files.list(transactions).use { paths ->
+                    paths.allMatch { transaction ->
+                        Files.notExists(transaction.resolve("metadata"))
+                    }
+                }
         }
 
     fun hasKsuNextManagerSurfaceReceipts(): Boolean {

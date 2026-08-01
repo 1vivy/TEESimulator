@@ -214,6 +214,87 @@ restore_prior_runtime() {
     nsenter -t 1 -m -- "$active/rka-supervisor.sh" status > "$txn/recovered.graph" || return 1
     cmp -s "$txn/prior.graph" "$txn/recovered.graph"
 }
+validate_metadata_manifest() {
+    metadata_file=$1
+    metadata_kind=$2
+    metadata_expected_source=$3
+    metadata_seen="$txn/metadata/$metadata_kind.seen"
+    : > "$metadata_seen"
+    chmod 600 "$metadata_seen"
+    metadata_first=true
+    metadata_count=0
+    while IFS= read -r metadata_line || [ -n "$metadata_line" ]; do
+        [ "${#metadata_line}" -le 512 ] || return 1
+        if [ "$metadata_kind" = source ] && [ "$metadata_first" = true ]; then
+            [ "$metadata_line" = "commit=$metadata_expected_source" ] || return 1
+            metadata_first=false
+            continue
+        fi
+        metadata_first=false
+        metadata_digest=${metadata_line%%"  "*}
+        metadata_path=${metadata_line#*"  "}
+        [ "$metadata_digest" != "$metadata_line" ] || return 1
+        case "$metadata_digest" in *[!0-9a-f]*|"") return 1 ;; esac
+        [ "$(printf %s "$metadata_digest" | wc -c)" -eq 64 ] || return 1
+        case "$metadata_path" in
+            ""|/*|.|..|../*|*/../*|*//*|*\\*|*[!A-Za-z0-9._/-]*) return 1 ;;
+        esac
+        [ "$(printf %s "$metadata_path" | wc -c)" -le 240 ] || return 1
+        ! grep -Fxq "$metadata_path" "$metadata_seen" || return 1
+        printf '%s\n' "$metadata_path" >> "$metadata_seen"
+        metadata_count=$((metadata_count + 1))
+        [ "$metadata_count" -le 256 ] || return 1
+    done < "$metadata_file"
+    [ "$metadata_first" = false ] && [ "$metadata_count" -gt 0 ]
+}
+prepare_ksu_metadata() {
+    metadata_listing=$(unzip -Z1 -- "$archive") || return 1
+    mkdir "$txn/metadata" || return 1
+    chmod 700 "$txn/metadata"
+    for metadata_entry in META-INF/rka-artifacts.sha256 META-INF/rka-source.sha256; do
+        metadata_count=$(printf '%s\n' "$metadata_listing" | awk -v entry="$metadata_entry" '$0 == entry { count++ } END { print count + 0 }')
+        [ "$metadata_count" = 1 ] || return 1
+        metadata_name=${metadata_entry#META-INF/}
+        metadata_next="$txn/metadata/$metadata_name.next"
+        unzip -p -- "$archive" "$metadata_entry" > "$metadata_next" || return 1
+        [ -f "$metadata_next" ] && [ ! -L "$metadata_next" ] || return 1
+        metadata_bytes=$(stat -c %s "$metadata_next") || return 1
+        [ "$metadata_bytes" -gt 0 ] && [ "$metadata_bytes" -le 1048576 ] || return 1
+        chmod 600 "$metadata_next"
+        mv "$metadata_next" "$txn/metadata/$metadata_name"
+    done
+    validate_metadata_manifest "$txn/metadata/rka-artifacts.sha256" artifact "$expected_source_sha" || return 1
+    validate_metadata_manifest "$txn/metadata/rka-source.sha256" source "$expected_source_sha"
+}
+reinject_ksu_metadata() {
+    [ -d "$pending" ] && [ ! -L "$pending" ] || return 1
+    metadata_target="$pending/META-INF"
+    [ ! -e "$metadata_target" ] && [ ! -L "$metadata_target" ] || return 1
+    metadata_next="$pending/.rka-metadata-$tx"
+    [ ! -e "$metadata_next" ] && [ ! -L "$metadata_next" ] || return 1
+    mkdir "$metadata_next" || return 1
+    chmod 700 "$metadata_next"
+    for metadata_name in rka-artifacts.sha256 rka-source.sha256; do
+        cp "$txn/metadata/$metadata_name" "$metadata_next/$metadata_name.next" || return 1
+        chown 0:0 "$metadata_next/$metadata_name.next" || return 1
+        chmod 600 "$metadata_next/$metadata_name.next" || return 1
+        cmp -s "$txn/metadata/$metadata_name" "$metadata_next/$metadata_name.next" || return 1
+        mv "$metadata_next/$metadata_name.next" "$metadata_next/$metadata_name" || return 1
+    done
+    [ "$(find "$metadata_next" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 2 ] || return 1
+    [ -z "$(find "$metadata_next" -mindepth 1 -maxdepth 1 ! -type f -print)" ] || return 1
+    chown 0:0 "$metadata_next" || return 1
+    chmod 700 "$metadata_next" || return 1
+    mv "$metadata_next" "$metadata_target" || return 1
+    [ -d "$metadata_target" ] && [ ! -L "$metadata_target" ] || return 1
+}
+discard_ksu_metadata() {
+    metadata_staging="$txn/metadata"
+    [ ! -e "$metadata_staging" ] && [ ! -L "$metadata_staging" ] && return 0
+    [ -d "$metadata_staging" ] && [ ! -L "$metadata_staging" ] || return 1
+    rm -rf "$metadata_staging"
+    [ ! -e "$metadata_staging" ] && [ ! -L "$metadata_staging" ]
+}
 case "$mode" in
 preflight)
     [ "$(id -u)" = 0 ] || { printf "RESULT=INCOMPATIBLE reason=ROOT\n"; exit; }
@@ -246,7 +327,7 @@ preflight)
         fi
         init_ns=$(readlink /proc/1/ns/mnt) || { printf "RESULT=INCOMPATIBLE reason=INIT_NAMESPACE\n"; exit; }
         [ -n "$init_ns" ] || { printf "RESULT=INCOMPATIBLE reason=MOUNT_SEMANTICS\n"; exit; }
-        for command in base64 find head lsattr logcat mktemp nsenter sha256sum stat timeout toybox xxd; do
+        for command in base64 find head lsattr logcat mktemp nsenter sha256sum stat timeout toybox unzip xxd; do
             command -v "$command" >/dev/null 2>&1 || { printf "RESULT=INCOMPATIBLE reason=DEPLOY_TOOLING\n"; exit; }
         done
         boot_hash=$(sha256sum /proc/sys/kernel/random/boot_id | awk "{print \$1}")
@@ -452,6 +533,12 @@ deploy)
     source_receipt=$archive.source-sha
     [ -f "$source_receipt" ] && [ ! -L "$source_receipt" ] || exit 1
     [ "$(cat "$source_receipt")" = "$expected_source_sha" ] || exit 1
+    installed_ksud_version=$(ksud --version 2>/dev/null | head -n 1) || exit 1
+    if [ "$installed_ksud_version" = "$next_version" ]; then
+        metadata_bridge=true
+    else
+        metadata_bridge=false
+    fi
     printf "source_sha=%s\narchive_sha256=%s\n" "$expected_source_sha" "$expected_archive_sha" > "$txn/source.receipt"
     chmod 600 "$txn/source.receipt"
     if [ ! -e /data/adb/modules ] && [ ! -L /data/adb/modules ] && [ ! -e /data/adb/modules_update ] && [ ! -L /data/adb/modules_update ]; then
@@ -492,6 +579,7 @@ deploy)
     if [ -d "$txn/active.tree" ]; then [ "$(tree_hash "$txn/active.tree")" = "$(cat "$txn/active.before")" ] || exit 1; fi
     touch "$txn/snapshot.ready"
     set_phase SNAPSHOTS_READY
+    if [ "$metadata_bridge" = true ]; then prepare_ksu_metadata || exit 1; fi
     if [ -e "$pending" ]; then rm -rf "$pending"; fi
     if ! ksud module install "$archive"; then exit 1; fi
     [ -d "$pending" ] && [ ! -L "$pending" ] || exit 1
@@ -502,8 +590,13 @@ deploy)
         [ -f "$active/update" ] && [ ! -L "$active/update" ] || exit 1
         [ "$(find "$active" -mindepth 1 -maxdepth 1 -print)" = "$active/update" ] || exit 1
     fi
+    if [ "$metadata_bridge" = true ]; then
+        reinject_ksu_metadata || exit 1
+        [ "${RKA_FAKE_FAULT:-}" != after-metadata ] || exit 1
+    fi
     [ "${RKA_FAKE_FAULT:-}" != after-install ] || exit 1
     (cd "$pending" && sha256sum -c META-INF/rka-artifacts.sha256) > "$txn/staged-manifest.verify" 2>&1
+    if [ "$metadata_bridge" = true ]; then discard_ksu_metadata || exit 1; fi
     policy="$pending/sepolicy.rule"
     probe_manifest="$pending/sepolicy.probes"
     : > "$txn/sepolicy.probes.validated"
@@ -790,6 +883,7 @@ rollback)
     txn="$state/deploy-transactions/$tx"
     [ -d "$txn" ] || { printf "RESULT=ROLLED_BACK\n"; exit; }
     [ ! -f "$txn/rollback.complete" ] || { printf "RESULT=ROLLED_BACK role=%s additive_sepolicy_may_persist=true\n" "$role"; exit; }
+    discard_ksu_metadata || exit 1
     phase=$(cat "$txn/phase" 2>/dev/null) || phase=
     case "$phase" in
         "") printf "RESULT=ROLLED_BACK role=%s additive_sepolicy_may_persist=true\n" "$role"; exit ;;

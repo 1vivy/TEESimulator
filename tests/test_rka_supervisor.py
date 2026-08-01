@@ -49,10 +49,12 @@ class RkaSupervisorTest(unittest.TestCase):
     def write_direct_profile(self, state: Path, role: str, epoch: int = 0) -> None:
         path = state / "profiles" / "direct.conf"
         path.write_text(
-            "version=1\n"
+            "version=2\n"
             f"role={role}\n"
             f"profile_epoch={epoch}\n"
-            "peer_endpoint=192.0.2.44\n"
+            "dial_mode=DONOR_DIALS\n"
+            "dial_endpoint=100.88.0.2\n"
+            "listen_interface=100.88.0.2\n"
             f"peer_spki_sha256={'ab' * 32}\n"
             "transport=DIRECT\n",
             encoding="utf-8",
@@ -89,7 +91,7 @@ class RkaSupervisorTest(unittest.TestCase):
         root.mkdir()
         child = root / "fake-child.sh"
         child.write_text(
-            "#!/bin/sh\nprintf '%s %s RKA_PROFILE_PATH=%s RKA_EXPECTED_PROFILE_EPOCH=%s RKA_PROFILE_RECEIPT_PATH=%s\\n' \"$0\" \"$*\" \"${RKA_PROFILE_PATH-}\" \"${RKA_EXPECTED_PROFILE_EPOCH-}\" \"${RKA_PROFILE_RECEIPT_PATH-}\" >> \"$RKA_CHILD_LOG\"\nif [ -n \"${RKA_PROFILE_RECEIPT_PATH-}\" ]; then profile_hash=$(sha256sum \"$RKA_PROFILE_PATH\" | awk '{print $1}'); printf 'version=1\\nprofile_sha256=%s\\nprofile_epoch=%s\\npeer_pin_sha256=%064d\\ntransport=DIRECT\\n' \"$profile_hash\" \"$RKA_EXPECTED_PROFILE_EPOCH\" 0 > \"$RKA_PROFILE_RECEIPT_PATH\"; chmod 600 \"$RKA_PROFILE_RECEIPT_PATH\"; fi\n[ \"${RKA_CHILD_MODE:-hold}\" = crash ] && exit 7\nif [ \"${RKA_CHILD_MODE:-hold}\" = crash-once ] && [ ! -e \"$RKA_CRASH_ONCE_FILE\" ]; then : > \"$RKA_CRASH_ONCE_FILE\"; sleep 1; exit 7; fi\ntrap 'printf term\\n >> \"$RKA_CHILD_LOG\"; exit 0' TERM INT\nwhile :; do sleep 1; done\n",
+            "#!/bin/sh\nprintf '%s %s RKA_PROFILE_PATH=%s RKA_EXPECTED_PROFILE_EPOCH=%s RKA_PROFILE_RECEIPT_PATH=%s\\n' \"$0\" \"$*\" \"${RKA_PROFILE_PATH-}\" \"${RKA_EXPECTED_PROFILE_EPOCH-}\" \"${RKA_PROFILE_RECEIPT_PATH-}\" >> \"$RKA_CHILD_LOG\"\nif [ -n \"${RKA_PROFILE_RECEIPT_PATH-}\" ]; then profile_hash=$(sha256sum \"$RKA_PROFILE_PATH\" | awk '{print $1}'); printf 'version=1\\nprofile_sha256=%s\\nprofile_epoch=%s\\npeer_pin_sha256=%064d\\ndial_mode=DONOR_DIALS\\ntransport=DIRECT\\n' \"$profile_hash\" \"$RKA_EXPECTED_PROFILE_EPOCH\" 0 > \"$RKA_PROFILE_RECEIPT_PATH\"; chmod 600 \"$RKA_PROFILE_RECEIPT_PATH\"; fi\n[ \"${RKA_CHILD_MODE:-hold}\" = crash ] && exit 7\nif [ \"${RKA_CHILD_MODE:-hold}\" = crash-once ] && [ ! -e \"$RKA_CRASH_ONCE_FILE\" ]; then : > \"$RKA_CRASH_ONCE_FILE\"; sleep 1; exit 7; fi\ntrap 'printf term\\n >> \"$RKA_CHILD_LOG\"; exit 0' TERM INT\nwhile :; do sleep 1; done\n",
             encoding="utf-8",
         )
         child.chmod(0o755)

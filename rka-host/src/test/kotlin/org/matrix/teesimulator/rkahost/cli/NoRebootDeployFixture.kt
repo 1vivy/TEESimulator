@@ -77,9 +77,9 @@ if [ "${'$'}{1-}" = direct-probe ]; then
   profile_sha=${'$'}(sha256sum "${'$'}RKA_PROFILE_PATH" | awk '{print ${'$'}1}')
   epoch=${'$'}(sed -n '3s/^profile_epoch=//p' "${'$'}RKA_PROFILE_PATH")
   [ "${'$'}epoch" = "${'$'}RKA_EXPECTED_PROFILE_EPOCH" ] || exit 2
-  pin=${'$'}(sed -n '5s/^peer_spki_sha256=//p' "${'$'}RKA_PROFILE_PATH")
+  pin=${'$'}(sed -n '7s/^peer_spki_sha256=//p' "${'$'}RKA_PROFILE_PATH")
   pin_sha=${'$'}(printf %s "${'$'}pin" | xxd -r -p | sha256sum | awk '{print ${'$'}1}')
-  printf 'version=1\nprotocol=TLSv1.3\nprofile_sha256=%s\nprofile_epoch=%s\npeer_pin_sha256=%s\ntransport=DIRECT\n' "${'$'}profile_sha" "${'$'}epoch" "${'$'}pin_sha" > "${'$'}RKA_DIRECT_PROBE_RECEIPT_PATH"
+  printf 'version=1\nprotocol=TLSv1.3\nprofile_sha256=%s\nprofile_epoch=%s\npeer_pin_sha256=%s\ndial_mode=DONOR_DIALS\ntransport=DIRECT\n' "${'$'}profile_sha" "${'$'}epoch" "${'$'}pin_sha" > "${'$'}RKA_DIRECT_PROBE_RECEIPT_PATH"
   chmod 600 "${'$'}RKA_DIRECT_PROBE_RECEIPT_PATH"
   printf 'RESULT=DIRECT protocol=TLSv1.3 profile_sha256=%s\n' "${'$'}profile_sha"
   exit 0

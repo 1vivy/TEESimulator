@@ -115,7 +115,7 @@ fn direct_profile_is_consumed_before_readiness() -> Result<(), Box<dyn std::erro
     assert_eq!(
         receipt_text,
         format!(
-            "version=1\nprofile_sha256={expected_profile_hash}\nprofile_epoch=17\npeer_pin_sha256={}\ntransport=DIRECT\n",
+            "version=1\nprofile_sha256={expected_profile_hash}\nprofile_epoch=17\npeer_pin_sha256={}\ndial_mode=CANDIDATE_DIALS\ntransport=DIRECT\n",
             sha256_hex(&[0xab_u8; 32])
         )
     );

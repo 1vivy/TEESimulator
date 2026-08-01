@@ -58,20 +58,25 @@ direct_profile_valid() {
     profile=$state/profiles/direct.conf
     [ -f "$profile" ] && [ ! -L "$profile" ] || return 1
     [ "$(stat -c '%u:%a' "$profile")" = "$(id -u):600" ] || return 1
-    [ "$(sed -n '1p' "$profile")" = version=1 ] || return 1
+    [ "$(sed -n '1p' "$profile")" = version=2 ] || return 1
     [ "$(sed -n '2p' "$profile")" = "role=$1" ] || return 1
     [ "$(sed -n '3p' "$profile")" = "profile_epoch=$2" ] || return 1
-    endpoint_line=$(sed -n '4p' "$profile")
-    case $endpoint_line in peer_endpoint=*) ;; *) return 1 ;; esac
-    endpoint=${endpoint_line#peer_endpoint=}
+    [ "$(sed -n '4p' "$profile")" = dial_mode=DONOR_DIALS ] || return 1
+    endpoint_line=$(sed -n '5p' "$profile")
+    case $endpoint_line in dial_endpoint=*) ;; *) return 1 ;; esac
+    endpoint=${endpoint_line#dial_endpoint=}
     case $endpoint in ''|*[!0-9.]*) return 1 ;; esac
-    pin_line=$(sed -n '5p' "$profile")
+    listen_line=$(sed -n '6p' "$profile")
+    case $listen_line in listen_interface=*) ;; *) return 1 ;; esac
+    listen=${listen_line#listen_interface=}
+    case $listen in ''|*[!0-9.]*) return 1 ;; esac
+    pin_line=$(sed -n '7p' "$profile")
     case $pin_line in peer_spki_sha256=*) ;; *) return 1 ;; esac
     pin=${pin_line#peer_spki_sha256=}
     case $pin in *[!0-9a-f]*) return 1 ;; esac
     [ "$(printf %s "$pin" | wc -c)" -eq 64 ] || return 1
-    [ "$(sed -n '6p' "$profile")" = transport=DIRECT ] || return 1
-    [ "$(wc -l < "$profile")" -eq 6 ]
+    [ "$(sed -n '8p' "$profile")" = transport=DIRECT ] || return 1
+    [ "$(wc -l < "$profile")" -eq 8 ]
 }
 
 direct_ready() {
@@ -174,8 +179,9 @@ profile_receipt_valid() {
     pin_hash=${pin_receipt#peer_pin_sha256=}
     case $pin_hash in *[!0-9a-f]*) return 1 ;; esac
     [ "$(printf %s "$pin_hash" | wc -c)" -eq 64 ] || return 1
-    [ "$(sed -n '5p' "$receipt")" = transport=DIRECT ] || return 1
-    [ "$(wc -l < "$receipt")" -eq 5 ]
+    [ "$(sed -n '5p' "$receipt")" = dial_mode=DONOR_DIALS ] || return 1
+    [ "$(sed -n '6p' "$receipt")" = transport=DIRECT ] || return 1
+    [ "$(wc -l < "$receipt")" -eq 6 ]
 }
 
 start_sidecar() {

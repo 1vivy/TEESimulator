@@ -53,7 +53,7 @@ class NoRebootDeployFailureTest {
             val trace = fixture.trace()
             val pushes = trace.filter { " push " in " $it " }
             assertEquals(8, pushes.size)
-            val archives = pushes.filter { it.endsWith("/role-neutral-release.zip") }
+            val archives = pushes.filterNot { ".source-sha " in it }
             assertEquals(4, archives.size)
             assertEquals(
                 1,

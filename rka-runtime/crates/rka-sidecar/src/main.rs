@@ -21,6 +21,16 @@ use rka_sidecar::{
 const BROKER_SOCKET: &str = "/data/adb/teesimulator-rka/run/sockets/broker.sock";
 
 fn main() -> ExitCode {
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+    {
+        let _ = writeln!(
+            io::stderr().lock(),
+            "crypto_provider_status=configuration_error"
+        );
+        return ExitCode::FAILURE;
+    }
     let command = env::args_os().nth(1);
     if command.as_deref() == Some(OsStr::new("manager-appid")) {
         return match rka_ksu_manager::probe_manager_appid() {
@@ -99,14 +109,19 @@ fn execute(command: Option<&OsStr>) -> Result<(), Box<dyn Error>> {
         || run(OsStr::new("health"), &mut io::stdout().lock()),
         |selected| run(selected, &mut io::stdout().lock()),
     )?;
-    if role == Some(LifecycleRole::Donor) {
-        return run_donor();
-    }
-    if role.is_some() {
-        loop {
+    match role {
+        Some(LifecycleRole::Donor) => return run_donor(),
+        Some(LifecycleRole::Candidate)
+            if rka_sidecar::direct_profile::donor_dials(LifecycleRole::Candidate)? =>
+        {
+            return rka_sidecar::direct_session::run_candidate().map_err(Into::into);
+        }
+        Some(LifecycleRole::Candidate) => loop {
             dispatch_pending_rotation()?;
             thread::sleep(Duration::from_secs(1));
-        }
+        },
+        Some(_) => return Err("unsupported runtime role".into()),
+        None => {}
     }
     Ok(())
 }
@@ -126,6 +141,9 @@ fn run_donor() -> Result<(), Box<dyn Error>> {
     let broker_socket =
         env::var_os("RKA_DONOR_SOCKET").map_or_else(|| PathBuf::from(BROKER_SOCKET), PathBuf::from);
     let mut runtime = DonorRuntime::open(&state_root, &broker_socket);
+    if rka_sidecar::direct_profile::donor_dials(LifecycleRole::Donor)? {
+        return rka_sidecar::direct_session::run_donor(&mut runtime).map_err(Into::into);
+    }
     let ingress = DonorIngress::bind(&state_root)?;
     loop {
         ingress.serve_once(&mut runtime)?;

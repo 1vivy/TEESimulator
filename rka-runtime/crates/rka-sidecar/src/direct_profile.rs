@@ -19,10 +19,18 @@ const PROFILE_NAME: &str = "profiles/direct.conf";
 const RECEIPT_NAME: &str = "run/direct-profile.receipt";
 
 #[derive(Debug)]
-struct DirectProfile {
-    epoch: u64,
-    endpoint: Ipv4Addr,
-    peer_pin: [u8; 32],
+pub(crate) struct DirectProfile {
+    pub(crate) epoch: u64,
+    pub(crate) endpoint: Ipv4Addr,
+    pub(crate) listen_interface: Ipv4Addr,
+    pub(crate) dial_mode: DialMode,
+    pub(crate) peer_pin: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DialMode {
+    CandidateDials,
+    DonorDials,
 }
 
 impl DirectProfile {
@@ -37,12 +45,43 @@ impl DirectProfile {
             .ok_or(SidecarError::RuntimeContext)?
             .split('\n')
             .collect::<Vec<_>>();
-        let [version, role, epoch, endpoint, peer_pin, transport] = lines.as_slice() else {
-            return Err(SidecarError::RuntimeContext);
-        };
-        if *version != "version=1"
-            || *role != expected_role.profile_line()
-            || *transport != "transport=DIRECT"
+        let (version, role, epoch, endpoint, listen_interface, dial_mode, peer_pin, transport) =
+            match lines.as_slice() {
+                [version, role, epoch, endpoint, peer_pin, transport] => (
+                    *version,
+                    *role,
+                    *epoch,
+                    *endpoint,
+                    *endpoint,
+                    DialMode::CandidateDials,
+                    *peer_pin,
+                    *transport,
+                ),
+                [
+                    version,
+                    role,
+                    epoch,
+                    mode,
+                    endpoint,
+                    listen,
+                    peer_pin,
+                    transport,
+                ] => (
+                    *version,
+                    *role,
+                    *epoch,
+                    *endpoint,
+                    *listen,
+                    parse_mode(mode)?,
+                    *peer_pin,
+                    *transport,
+                ),
+                _ => return Err(SidecarError::RuntimeContext),
+            };
+        if role != expected_role.profile_line()
+            || transport != "transport=DIRECT"
+            || (version == "version=1" && dial_mode != DialMode::CandidateDials)
+            || (version != "version=1" && version != "version=2")
         {
             return Err(SidecarError::RuntimeContext);
         }
@@ -55,10 +94,28 @@ impl DirectProfile {
             return Err(SidecarError::RuntimeContext);
         }
         let parsed_endpoint = endpoint
-            .strip_prefix("peer_endpoint=")
+            .strip_prefix(if version == "version=1" {
+                "peer_endpoint="
+            } else {
+                "dial_endpoint="
+            })
             .ok_or(SidecarError::RuntimeContext)?
             .parse::<Ipv4Addr>()
             .map_err(|_| SidecarError::RuntimeContext)?;
+        let parsed_listen_interface = listen_interface
+            .strip_prefix(if version == "version=1" {
+                "peer_endpoint="
+            } else {
+                "listen_interface="
+            })
+            .ok_or(SidecarError::RuntimeContext)?
+            .parse::<Ipv4Addr>()
+            .map_err(|_| SidecarError::RuntimeContext)?;
+        if version == "version=2"
+            && (!global_ipv4(parsed_endpoint) || !global_ipv4(parsed_listen_interface))
+        {
+            return Err(SidecarError::RuntimeContext);
+        }
         let parsed_pin = decode_pin(
             peer_pin
                 .strip_prefix("peer_spki_sha256=")
@@ -67,6 +124,8 @@ impl DirectProfile {
         Ok(Self {
             epoch: parsed_epoch,
             endpoint: parsed_endpoint,
+            listen_interface: parsed_listen_interface,
+            dial_mode,
             peer_pin: parsed_pin,
         })
     }
@@ -151,8 +210,12 @@ pub fn probe() -> Result<String, &'static str> {
     )?;
     let profile_hash = digest(&SHA256, &raw);
     let pin_hash = digest(&SHA256, &profile.peer_pin);
+    let mode = match profile.dial_mode {
+        DialMode::CandidateDials => "CANDIDATE_DIALS",
+        DialMode::DonorDials => "DONOR_DIALS",
+    };
     let receipt = format!(
-        "version=1\nprotocol=TLSv1.3\nprofile_sha256={}\nprofile_epoch={}\npeer_pin_sha256={}\ntransport=DIRECT\n",
+        "version=1\nprotocol=TLSv1.3\nprofile_sha256={}\nprofile_epoch={}\npeer_pin_sha256={}\ndial_mode={mode}\ntransport=DIRECT\n",
         hex(profile_hash.as_ref()),
         profile.epoch,
         hex(pin_hash.as_ref()),
@@ -164,7 +227,7 @@ pub fn probe() -> Result<String, &'static str> {
     ))
 }
 
-fn load(role: LifecycleRole) -> Result<(PathBuf, DirectProfile, Vec<u8>), SidecarError> {
+pub(crate) fn load(role: LifecycleRole) -> Result<(PathBuf, DirectProfile, Vec<u8>), SidecarError> {
     let state_root =
         PathBuf::from(env::var_os("RKA_STATE_ROOT").ok_or(SidecarError::RuntimeContext)?);
     let profile_path =
@@ -191,15 +254,40 @@ fn load(role: LifecycleRole) -> Result<(PathBuf, DirectProfile, Vec<u8>), Sideca
     Ok((state_root, profile, raw))
 }
 
+#[doc(hidden)]
+pub fn donor_dials(role: LifecycleRole) -> Result<bool, SidecarError> {
+    load(role).map(|(_, profile, _)| profile.dial_mode == DialMode::DonorDials)
+}
+
 fn startup_receipt(profile: &DirectProfile, raw: &[u8]) -> String {
     let profile_hash = digest(&SHA256, raw);
     let pin_hash = digest(&SHA256, &profile.peer_pin);
+    let mode = match profile.dial_mode {
+        DialMode::CandidateDials => "CANDIDATE_DIALS",
+        DialMode::DonorDials => "DONOR_DIALS",
+    };
     format!(
-        "version=1\nprofile_sha256={}\nprofile_epoch={}\npeer_pin_sha256={}\ntransport=DIRECT\n",
+        "version=1\nprofile_sha256={}\nprofile_epoch={}\npeer_pin_sha256={}\ndial_mode={mode}\ntransport=DIRECT\n",
         hex(profile_hash.as_ref()),
         profile.epoch,
         hex(pin_hash.as_ref())
     )
+}
+
+fn parse_mode(line: &str) -> Result<DialMode, SidecarError> {
+    match line {
+        "dial_mode=CANDIDATE_DIALS" => Ok(DialMode::CandidateDials),
+        "dial_mode=DONOR_DIALS" => Ok(DialMode::DonorDials),
+        _ => Err(SidecarError::RuntimeContext),
+    }
+}
+
+const fn global_ipv4(address: Ipv4Addr) -> bool {
+    !address.is_unspecified()
+        && !address.is_loopback()
+        && !address.is_link_local()
+        && !address.is_multicast()
+        && !address.is_broadcast()
 }
 
 fn commit_receipt(receipt_path: &Path, receipt: &[u8]) -> Result<(), SidecarError> {

@@ -1,6 +1,6 @@
 use std::{net::IpAddr, time::Duration};
 
-use crate::{Endpoint, ProfileError, TransportKind};
+use crate::{DialMode, Endpoint, ProfileError, TransportKind};
 
 const MAX_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -22,6 +22,8 @@ pub struct DirectProfileInput {
     pub epoch: u64,
     /// Selected direct path.
     pub path: DirectPath,
+    /// Selected TCP establishment direction.
+    pub dial_mode: DialMode,
     /// Exact remote connect endpoint.
     pub connect_endpoint: Endpoint,
     /// Exact local non-wildcard listener interface.
@@ -39,6 +41,7 @@ pub struct DirectProfileInput {
 pub struct DirectEndpointProfile {
     epoch: u64,
     path: DirectPath,
+    dial_mode: DialMode,
     connect_endpoint: Endpoint,
     listen_interface: IpAddr,
     peer_spki: [u8; 32],
@@ -59,6 +62,7 @@ impl DirectEndpointProfile {
         Ok(Self {
             epoch: input.epoch,
             path: input.path,
+            dial_mode: input.dial_mode,
             connect_endpoint: input.connect_endpoint,
             listen_interface: input.listen_interface,
             peer_spki: input.peer_spki,
@@ -77,6 +81,12 @@ impl DirectEndpointProfile {
     #[must_use]
     pub const fn path(&self) -> DirectPath {
         self.path
+    }
+
+    /// Returns the TCP establishment direction.
+    #[must_use]
+    pub const fn dial_mode(&self) -> DialMode {
+        self.dial_mode
     }
 
     /// Returns the exact remote endpoint.
@@ -139,6 +149,7 @@ impl DirectEndpointProfile {
         let ready = evidence.is_some_and(|value| {
             value.path == self.path
                 && value.connect_endpoint == self.connect_endpoint
+                && value.dial_mode == self.dial_mode
                 && value.listen_interface == self.listen_interface
                 && value.epoch == self.epoch
                 && value.peer_spki == self.peer_spki
@@ -203,6 +214,8 @@ impl DirectPinnedTlsAdmission {
 pub struct DirectEvidenceInput {
     /// Observed selected direct path.
     pub path: DirectPath,
+    /// Observed TCP establishment direction.
+    pub dial_mode: DialMode,
     /// Observed remote endpoint.
     pub connect_endpoint: Endpoint,
     /// Observed local listener interface.
@@ -220,6 +233,7 @@ pub struct DirectEvidenceInput {
 #[derive(Clone, Debug)]
 struct DirectEvidence {
     path: DirectPath,
+    dial_mode: DialMode,
     connect_endpoint: Endpoint,
     listen_interface: IpAddr,
     epoch: u64,
@@ -249,6 +263,7 @@ impl DirectReachability {
         Self {
             evidence: Some(DirectEvidence {
                 path: input.path,
+                dial_mode: input.dial_mode,
                 connect_endpoint: input.connect_endpoint,
                 listen_interface: input.listen_interface,
                 epoch: input.epoch,

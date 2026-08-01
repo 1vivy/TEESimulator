@@ -303,9 +303,9 @@ case "${'$'}{1-}" in
     printf '501 501 1\n' > "${'$'}state/run/pids/sidecar.pid"
     profile_sha=${'$'}(/usr/bin/sha256sum "${'$'}RKA_DIRECT_PROFILE_PATH" | /usr/bin/awk '{print ${'$'}1}')
     epoch=${'$'}(/usr/bin/sed -n '3s/^profile_epoch=//p' "${'$'}RKA_DIRECT_PROFILE_PATH")
-    pin=${'$'}(/usr/bin/sed -n '5s/^peer_spki_sha256=//p' "${'$'}RKA_DIRECT_PROFILE_PATH")
+    pin=${'$'}(/usr/bin/sed -n '7s/^peer_spki_sha256=//p' "${'$'}RKA_DIRECT_PROFILE_PATH")
     pin_sha=${'$'}(printf %s "${'$'}pin" | /usr/bin/xxd -r -p | /usr/bin/sha256sum | /usr/bin/awk '{print ${'$'}1}')
-    printf 'version=1\nprofile_sha256=%s\nprofile_epoch=%s\npeer_pin_sha256=%s\ntransport=DIRECT\n' "${'$'}profile_sha" "${'$'}epoch" "${'$'}pin_sha" > "${'$'}state/run/direct-profile.receipt"
+    printf 'version=1\nprofile_sha256=%s\nprofile_epoch=%s\npeer_pin_sha256=%s\ndial_mode=DONOR_DIALS\ntransport=DIRECT\n' "${'$'}profile_sha" "${'$'}epoch" "${'$'}pin_sha" > "${'$'}state/run/direct-profile.receipt"
     ;;
   stop)
     rm -rf "${'$'}state/run/pids"

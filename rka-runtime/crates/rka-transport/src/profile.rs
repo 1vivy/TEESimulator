@@ -19,6 +19,25 @@ pub enum Role {
     Donor,
 }
 
+/// TCP establishment direction, independent of the fixed application roles.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DialMode {
+    /// Candidate opens the socket to the donor listener.
+    CandidateDials,
+    /// Donor opens the socket to the candidate listener.
+    DonorDials,
+}
+
+impl DialMode {
+    pub(crate) const fn tag(self) -> u64 {
+        match self {
+            Self::CandidateDials => 1,
+            Self::DonorDials => 2,
+        }
+    }
+}
+
 /// Transport kinds are disjoint capabilities.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -93,6 +112,7 @@ pub struct PairedProfile {
     epoch: u64,
     local_role: Role,
     transport: TransportKind,
+    dial_mode: DialMode,
     endpoint: Endpoint,
     local_spki: [u8; 32],
     peer_spki: [u8; 32],
@@ -123,6 +143,8 @@ pub struct ProfileInput {
     pub local_role: Role,
     /// Selected disjoint transport kind.
     pub transport: TransportKind,
+    /// Selected TCP establishment direction.
+    pub dial_mode: DialMode,
     /// Donor endpoint.
     pub endpoint: Endpoint,
     /// Local transport SPKI pin.
@@ -166,6 +188,7 @@ impl PairedProfile {
             epoch: input.epoch,
             local_role: input.local_role,
             transport: input.transport,
+            dial_mode: input.dial_mode,
             endpoint: input.endpoint,
             local_spki: input.local_spki,
             peer_spki: input.peer_spki,
@@ -199,6 +222,12 @@ impl PairedProfile {
     #[must_use]
     pub const fn transport(&self) -> TransportKind {
         self.transport
+    }
+
+    /// Returns the TCP establishment direction.
+    #[must_use]
+    pub const fn dial_mode(&self) -> DialMode {
+        self.dial_mode
     }
 
     /// Returns the local role.

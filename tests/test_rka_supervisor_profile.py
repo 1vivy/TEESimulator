@@ -28,8 +28,10 @@ class RkaSupervisorProfileConsumerTest(unittest.TestCase):
         profiles = (
             None,
             "version=1\nrole=DONOR\nprofile_epoch=0\n",
-            "version=1\nrole=DONOR\nprofile_epoch=1\n"
-            "peer_endpoint=192.0.2.44\n"
+            "version=2\nrole=DONOR\nprofile_epoch=1\n"
+            "dial_mode=DONOR_DIALS\n"
+            "dial_endpoint=100.88.0.2\n"
+            "listen_interface=100.88.0.2\n"
             f"peer_spki_sha256={'ab' * 32}\n"
             "transport=DIRECT\n",
         )

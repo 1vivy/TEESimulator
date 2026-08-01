@@ -32,7 +32,8 @@ pub use direct_profile::{
 pub use identity::{IdentityError, TransportIdentity};
 pub use probe::probe_pinned_tls;
 pub use profile::{
-    Endpoint, PairedProfile, ProfileError, ProfileInput, ProfileRotation, Role, TransportKind,
+    DialMode, Endpoint, PairedProfile, ProfileError, ProfileInput, ProfileRotation, Role,
+    TransportKind,
 };
 pub use session::SessionManager;
 pub use session_lifecycle::{LiveSessionLease, SessionLifecycle};
@@ -40,7 +41,10 @@ pub use session_types::{
     AcceptedResponse, CsRng, PendingRequest, RequestContext, ResponseContext, SessionError,
     SessionScope, SystemCsRng,
 };
-pub use tls::{PinnedTlsClient, PinnedTlsServer, peer_spki_hash};
+pub use tls::{
+    PinnedTlsCandidateServer, PinnedTlsClient, PinnedTlsDonorClient, PinnedTlsServer,
+    peer_spki_hash,
+};
 pub use tls_types::{
     AdmissionBinding, ClientPeer, ServerPeer, TlsAdmission, TlsCredentials, TlsError,
 };

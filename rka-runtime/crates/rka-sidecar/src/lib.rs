@@ -11,6 +11,8 @@ use thiserror::Error;
 
 pub mod direct_identity;
 pub mod direct_profile;
+#[doc(hidden)]
+pub mod direct_session;
 mod provision_activation;
 mod provisioning;
 mod provisioning_io;

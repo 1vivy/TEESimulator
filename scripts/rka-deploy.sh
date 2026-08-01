@@ -384,9 +384,19 @@ prepare-upload)
     chmod 700 "$state" "$state/upload"
     ;;
 network)
-    endpoint=$(ip -o -4 addr show up scope global 2>/dev/null | awk "\$2 ~ /^(tailscale|wlan)/ {split(\$4, value, \"/\"); print value[1]}" | head -n 1)
+    endpoints=$(ip -o -4 addr show up scope global 2>/dev/null | awk '$2 ~ /^tun/ {split($4, value, "/"); print value[1]}')
+    [ "$(printf '%s\n' "$endpoints" | sed '/^$/d' | wc -l)" -eq 1 ] || exit 1
+    endpoint=$endpoints
     case "$endpoint" in ""|*[!0-9.]*) exit 1 ;; esac
+    printf '%s\n' "$endpoint" | awk -F. 'NF == 4 && $1 > 0 && $1 < 224 && $1 != 127 && !($1 == 169 && $2 == 254) {for (i=1;i<=4;i++) if ($i !~ /^[0-9]+$/ || $i > 255) exit 1; exit 0} {exit 1}' || exit 1
     printf "RESULT=NETWORK endpoint=%s\n" "$endpoint"
+    ;;
+identity-public)
+    certificate=$state/trust/transport-self.pem
+    [ -f "$certificate" ] && [ ! -L "$certificate" ] && [ "$(stat -c '%u:%a' "$certificate")" = "$(id -u):600" ] || exit 1
+    certificate_hex=$(xxd -p "$certificate" | tr -d '\n') || exit 1
+    [ -n "$certificate_hex" ] && [ "$(printf %s "$certificate_hex" | wc -c)" -le 32768 ] || exit 1
+    printf 'RESULT=IDENTITY_PUBLIC certificate_hex=%s\n' "$certificate_hex"
     ;;
 deploy)
     tx=$1 archive=$2 role=$3 expected_archive_sha=$4 expected_source_sha=$5
@@ -508,18 +518,31 @@ deploy)
     printf "RESULT=DEPLOYED role=%s source_sha=%s archive_sha256=%s active_before=%s pending_before=%s staged_hash=%s bind_inode=%s pin=%s\n" "$role" "$expected_source_sha" "$expected_archive_sha" "$(cat "$txn/active.before")" "$(cat "$txn/pending.before")" "$(cat "$txn/staged.after")" "$active_inode" "$pin"
     ;;
 pair)
-    tx=$1 role=$2 peer_pin=$3 peer_endpoint=$4
+    tx=$1 role=$2 peer_pin=$3 dial_endpoint=$4 listen_interface=$5
+    shift 5
+    peer_certificate_hex=$(printf %s "$@")
     case "$role" in DONOR|CANDIDATE) ;; *) exit 2 ;; esac
     case "$peer_pin" in *[!0-9a-f]*) exit 2 ;; esac
     [ "$(printf %s "$peer_pin" | wc -c)" -eq 64 ] || exit 2
-    case "$peer_endpoint" in ""|*[!0-9.]*) exit 2 ;; esac
+    case "$dial_endpoint" in ""|*[!0-9.]*) exit 2 ;; esac
+    case "$listen_interface" in ""|*[!0-9.]*) exit 2 ;; esac
+    case "$peer_certificate_hex" in ""|*[!0-9a-f]*) exit 2 ;; esac
+    peer_certificate_length=$(printf %s "$peer_certificate_hex" | wc -c)
+    [ "$peer_certificate_length" -le 32768 ] && [ $((peer_certificate_length % 2)) -eq 0 ] || exit 2
     txn="$state/deploy-transactions/$tx"
     [ -f "$txn/installed" ] || exit 1
     profile_epoch=$(sed -n '3s/^profile_epoch=//p' "$state/profiles/active.conf") || exit 1
     case "$profile_epoch" in ""|*[!0-9]*) exit 1 ;; esac
     profile_tmp="$state/profiles/.direct.$tx.tmp"
     [ ! -e "$profile_tmp" ] && [ ! -L "$profile_tmp" ] || exit 1
-    printf "version=1\nrole=%s\nprofile_epoch=%s\npeer_endpoint=%s\npeer_spki_sha256=%s\ntransport=DIRECT\n" "$role" "$profile_epoch" "$peer_endpoint" "$peer_pin" > "$profile_tmp"
+    peer_trust_tmp="$state/trust/.transport-peer.$tx.tmp"
+    printf %s "$peer_certificate_hex" | xxd -r -p > "$peer_trust_tmp" || exit 1
+    [ "$(xxd -p "$peer_trust_tmp" | tr -d '\n')" = "$peer_certificate_hex" ] || exit 1
+    [ "$(sed -n '1p' "$peer_trust_tmp")" = '-----BEGIN CERTIFICATE-----' ] &&
+        [ "$(tail -n 1 "$peer_trust_tmp")" = '-----END CERTIFICATE-----' ] || exit 1
+    chmod 600 "$peer_trust_tmp"
+    mv "$peer_trust_tmp" "$state/trust/transport-peer.pem"
+    printf "version=2\nrole=%s\nprofile_epoch=%s\ndial_mode=DONOR_DIALS\ndial_endpoint=%s\nlisten_interface=%s\npeer_spki_sha256=%s\ntransport=DIRECT\n" "$role" "$profile_epoch" "$dial_endpoint" "$listen_interface" "$peer_pin" > "$profile_tmp"
     chmod 600 "$profile_tmp"
     profile_sha=$(sha256sum "$profile_tmp" | awk "{print \$1}")
     mv "$profile_tmp" "$state/profiles/direct.conf"
@@ -544,6 +567,7 @@ pair)
 profile_sha256=$profile_sha
 profile_epoch=$profile_epoch
 peer_pin_sha256=$peer_pin_sha
+dial_mode=DONOR_DIALS
 transport=DIRECT" ] || exit 1
     init_ns=$(readlink /proc/1/ns/mnt) || exit 1
     manager_process=me.weishu.kernelsu
@@ -888,16 +912,33 @@ candidate_result="$(remote "$candidate_serial" deploy "$transaction_id" "$REMOTE
 }
 donor_pin="$(sed -n 's/.* pin=\([0-9a-f]\{64\}\).*/\1/p' <<<"$donor_result")"
 candidate_pin="$(sed -n 's/.* pin=\([0-9a-f]\{64\}\).*/\1/p' <<<"$candidate_result")"
+donor_identity="$(remote "$donor_serial" identity-public)" || fail PAIR_PIN_INVALID 4
+candidate_identity="$(remote "$candidate_serial" identity-public)" || fail PAIR_PIN_INVALID 4
+donor_certificate="${donor_identity##* certificate_hex=}"
+candidate_certificate="${candidate_identity##* certificate_hex=}"
 donor_staged="$(sed -n 's/.* staged_hash=\([0-9a-f]\{64\}\).*/\1/p' <<<"$donor_result")"
 candidate_staged="$(sed -n 's/.* staged_hash=\([0-9a-f]\{64\}\).*/\1/p' <<<"$candidate_result")"
-[[ -n "$donor_pin" && -n "$candidate_pin" && "$donor_pin" != "$candidate_pin" && -n "$donor_staged" && -n "$candidate_staged" ]] || {
+[[ -n "$donor_pin" && -n "$candidate_pin" && "$donor_pin" != "$candidate_pin" && -n "$donor_staged" && -n "$candidate_staged" &&
+    "$donor_identity" == "RESULT=IDENTITY_PUBLIC certificate_hex=$donor_certificate" &&
+    "$candidate_identity" == "RESULT=IDENTITY_PUBLIC certificate_hex=$candidate_certificate" &&
+    "$donor_certificate" =~ ^[0-9a-f]+$ && "$candidate_certificate" =~ ^[0-9a-f]+$ &&
+    ${#donor_certificate} -le 32768 && ${#candidate_certificate} -le 32768 ]] || {
     rollback_pair
     trap - ERR INT TERM
     fail PAIR_PIN_INVALID 4
 }
+split_certificate() {
+    local value=$1
+    while [[ -n "$value" ]]; do
+        printf '%s\n' "${value:0:1024}"
+        value=${value:1024}
+    done
+}
+mapfile -t donor_certificate_arguments < <(split_certificate "$donor_certificate")
+mapfile -t candidate_certificate_arguments < <(split_certificate "$candidate_certificate")
 complete_pair() {
-    donor_pair_result="$(remote "$donor_serial" pair "$transaction_id" DONOR "$candidate_pin" "$candidate_endpoint")" || return 1
-    candidate_pair_result="$(remote "$candidate_serial" pair "$transaction_id" CANDIDATE "$donor_pin" "$donor_endpoint")" || return 1
+    donor_pair_result="$(remote "$donor_serial" pair "$transaction_id" DONOR "$candidate_pin" "$candidate_endpoint" "$donor_endpoint" "${candidate_certificate_arguments[@]}")" || return 1
+    candidate_pair_result="$(remote "$candidate_serial" pair "$transaction_id" CANDIDATE "$donor_pin" "$candidate_endpoint" "$candidate_endpoint" "${donor_certificate_arguments[@]}")" || return 1
     remote "$donor_serial" direct-probe "$transaction_id" DONOR >/dev/null || return 1
     remote "$candidate_serial" direct-probe "$transaction_id" CANDIDATE >/dev/null || return 1
     remote "$donor_serial" verify "$transaction_id" "$donor_boot" >/dev/null || return 1

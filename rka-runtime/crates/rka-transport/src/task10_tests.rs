@@ -24,7 +24,7 @@ use rka_state::{ReplayManager, StateError, StateStore, TombstoneTime};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
 
 use super::{
-    AdmissionBinding, AuditChain, AuditEntry, ClientPeer, CsRng, Endpoint, PairedProfile,
+    AdmissionBinding, AuditChain, AuditEntry, ClientPeer, CsRng, DialMode, Endpoint, PairedProfile,
     PinnedTlsClient, PinnedTlsServer, ProfileError, ProfileInput, ProfileRotation, ReceiptContext,
     ReceiptVerifier, RequestContext, ResponseContext, Role, ServerPeer, SessionError,
     SessionLifecycle, SessionManager, SessionScope, TlsAdmission, TlsCredentials, TlsError,
@@ -889,6 +889,7 @@ fn profile_roles_hash_the_same_public_map() -> Result<(), Box<dyn std::error::Er
         epoch: 3,
         local_role: Role::Donor,
         transport: TransportKind::DirectPinnedTls,
+        dial_mode: DialMode::CandidateDials,
         endpoint: endpoint.clone(),
         local_spki: pki.server.pin,
         peer_spki: pki.client.pin,
@@ -901,6 +902,21 @@ fn profile_roles_hash_the_same_public_map() -> Result<(), Box<dyn std::error::Er
         epoch: 3,
         local_role: Role::Candidate,
         transport: TransportKind::DirectPinnedTls,
+        dial_mode: DialMode::CandidateDials,
+        endpoint: endpoint.clone(),
+        local_spki: pki.client.pin,
+        peer_spki: pki.server.pin,
+        peer_trust: trust.clone(),
+        allowed_identities: vec![[1; 32]],
+        root_hash: [2; 32],
+        policy_version: 1,
+    })?;
+    assert_eq!(donor.id(), candidate.id());
+    let reversed_dial = PairedProfile::parse(ProfileInput {
+        epoch: 3,
+        local_role: Role::Candidate,
+        transport: TransportKind::DirectPinnedTls,
+        dial_mode: DialMode::DonorDials,
         endpoint,
         local_spki: pki.client.pin,
         peer_spki: pki.server.pin,
@@ -909,7 +925,7 @@ fn profile_roles_hash_the_same_public_map() -> Result<(), Box<dyn std::error::Er
         root_hash: [2; 32],
         policy_version: 1,
     })?;
-    assert_eq!(donor.id(), candidate.id());
+    assert_ne!(candidate.id(), reversed_dial.id());
     assert!(candidate.transport().satisfies_direct());
     let lifecycle = SessionLifecycle::new();
     let mut rotation = ProfileRotation::new(candidate.clone(), lifecycle.clone());
@@ -930,6 +946,7 @@ fn profile_roles_hash_the_same_public_map() -> Result<(), Box<dyn std::error::Er
         epoch: 4,
         local_role: Role::Candidate,
         transport: TransportKind::DirectPinnedTls,
+        dial_mode: DialMode::CandidateDials,
         endpoint: Endpoint::parse("localhost", 443)?,
         local_spki: rotated.client.pin,
         peer_spki: rotated.server.pin,

@@ -17,12 +17,6 @@ if [ "${1-}" = push ]; then
     if [ "${RKA_FAKE_UPLOAD_FAULT:-}" = truncate ] && [[ "$3" = /data/local/tmp/rka-adb-upload-* ]]; then
         printf 'truncated\n' >> "$root$3"
     fi
-    if [ "${RKA_FAKE_CORRUPT_ARCHIVE_SERIAL:-}" = "$serial" ] && [ "$3" = /data/adb/teesimulator-rka/upload/role-neutral-release.zip ]; then
-        printf 'corrupt\n' >> "$root$3"
-    fi
-    if [ "${RKA_FAKE_CORRUPT_SOURCE_SERIAL:-}" = "$serial" ] && [ "$3" = /data/adb/teesimulator-rka/upload/role-neutral-release.zip.source-sha ]; then
-        printf '%040d\n' 0 > "$root$3"
-    fi
     if [ "${RKA_FAKE_NEXT_MUTATION:-}" = probe-hash-mismatch ] && [[ "$3" = /data/local/tmp/rka-adb-upload-*-probe ]]; then
         printf 'corrupt\n' >> "$root$3"
     fi
@@ -51,6 +45,12 @@ if [ "$mode" = network ] && [ "${RKA_FAKE_FAIL_NETWORK:-}" = "$serial" ]; then
 fi
 if [ "$mode" = deploy ] && [ "${RKA_FAKE_FAIL_DEPLOY:-}" = "$serial" ]; then
     exit 1
+fi
+if [ "$mode" = deploy ] && [ "${RKA_FAKE_CORRUPT_ARCHIVE_SERIAL:-}" = "$serial" ]; then
+    printf 'corrupt\n' >> "$root/data/adb/teesimulator-rka/upload/role-neutral-release.zip"
+fi
+if [ "$mode" = deploy ] && [ "${RKA_FAKE_CORRUPT_SOURCE_SERIAL:-}" = "$serial" ]; then
+    printf '%040d\n' 0 > "$root/data/adb/teesimulator-rka/upload/role-neutral-release.zip.source-sha"
 fi
 
 mkdir -p "$root"/{data/adb/modules,data/adb/modules_update,data/adb/teesimulator-rka,data/adb/ksu/bin,data/local/tmp,data/system,dev,etc,proc,shim,tmp,usr,bin,lib,lib64,run}
@@ -225,8 +225,8 @@ case "${1-}" in
 esac'
 write_shim ip '
 case "$RKA_FAKE_SERIAL" in
-  DONOR_A) printf "1: tailscale0 inet 127.0.0.1/32 scope global tailscale0\n" ;;
-  *) printf "1: tailscale0 inet 127.0.0.2/32 scope global tailscale0\n" ;;
+  DONOR_A) printf "1: tun0 inet 100.88.0.1/32 scope global tun0\n" ;;
+  *) printf "1: tun0 inet 100.88.0.2/32 scope global tun0\n" ;;
 esac'
 write_shim ping 'exit 0'
 write_shim logcat 'exit 0'
@@ -277,6 +277,8 @@ case "$last" in
   /data/adb/ksud)
     if [ "${1-}" = -c ] && [ "${2-}" = %u:%g:%a ]; then printf "0:0:755\n"; exit 0; fi ;;
   /data/adb/ksu/.metadata/ksud.provenance)
+    if [ "${1-}" = -c ] && [ "${2-}" = %u:%a ]; then printf "0:600\n"; exit 0; fi ;;
+  /data/adb/teesimulator-rka/trust/transport-self.pem)
     if [ "${1-}" = -c ] && [ "${2-}" = %u:%a ]; then printf "0:600\n"; exit 0; fi ;;
   /data/adb/modules/tricky_store/module.prop|/data/adb/modules_update/tricky_store/module.prop)
     if [ -f /data/adb/teesimulator-rka/.bound ] && [ "${RKA_NSENTER:-}" = 1 ] && [ "$last" = /data/adb/modules/tricky_store/module.prop ]; then

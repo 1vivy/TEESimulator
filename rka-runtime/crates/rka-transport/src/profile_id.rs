@@ -13,7 +13,7 @@ pub fn profile_id(input: &ProfileInput) -> [u8; 32] {
         Role::Donor => input.peer_spki,
     };
     let mut map = CborWriter::with_capacity(512);
-    map.map(9);
+    map.map(10);
     map.unsigned(0);
     map.unsigned(2);
     map.unsigned(1);
@@ -35,6 +35,8 @@ pub fn profile_id(input: &ProfileInput) -> [u8; 32] {
     map.bytes(&input.root_hash);
     map.unsigned(8);
     map.unsigned(input.policy_version);
+    map.unsigned(9);
+    map.unsigned(input.dial_mode.tag());
     let map = map.finish();
     let mut preimage = Vec::with_capacity(map.len().saturating_add(14));
     preimage.extend_from_slice(&[0xa2, 0x00, 0x6a]);

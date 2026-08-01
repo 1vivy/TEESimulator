@@ -23,11 +23,52 @@ use rustls::{
 };
 
 use super::{
-    AdmissionBinding, ClientPeer, PinnedTlsClient, PinnedTlsServer, ServerPeer, TlsAdmission,
-    TlsCredentials, TlsError,
+    AdmissionBinding, ClientPeer, PinnedTlsCandidateServer, PinnedTlsClient, PinnedTlsDonorClient,
+    PinnedTlsServer, ServerPeer, TlsAdmission, TlsCredentials, TlsError,
     tls_handshake::{complete_client_handshake, complete_server_handshake},
     tls_io::{Deadline, flush_bytes, read_exact, read_frame, write_bytes, write_frame},
 };
+
+#[test]
+fn donor_dials_while_candidate_originates_the_request() -> Result<(), Box<dyn std::error::Error>> {
+    // Given: the donor-to-candidate socket direction is the only established TCP path.
+    let _serial = serial_tls_tests();
+    let pki = test_pki(Validity::Current)?;
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let address = listener.local_addr()?;
+    let candidate = PinnedTlsCandidateServer::new(
+        pki.server.identity(),
+        &ServerPeer::new(vec![pki.root.clone()], pki.client.pin),
+        TlsAdmission::new(binding(), PEER_BUDGET),
+    )?;
+    let worker = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().map_err(|_| TlsError::Io)?;
+        candidate.exchange(socket, b"candidate-request")
+    });
+    let donor = PinnedTlsDonorClient::new(
+        pki.client.identity(),
+        ClientPeer::new(
+            vec![pki.root.clone()],
+            ServerName::try_from("localhost".to_owned())?,
+            pki.server.pin,
+        ),
+        TlsAdmission::new(binding(), PEER_BUDGET),
+    )?;
+
+    // When: the donor opens the socket and dispatches the candidate's request once.
+    let donor_result = donor.serve_once(TcpStream::connect(address)?, |request| {
+        assert_eq!(request, b"candidate-request");
+        Ok(b"donor-response".to_vec())
+    });
+
+    // Then: the candidate receives the response over the donor-established connection.
+    donor_result?;
+    assert_eq!(
+        worker.join().map_err(|_| "candidate thread failed")??,
+        b"donor-response"
+    );
+    Ok(())
+}
 
 const BUDGET: Duration = Duration::from_millis(35);
 const TOLERANCE: Duration = Duration::from_millis(180);
@@ -180,29 +221,38 @@ fn roots(certificate: &CertificateDer<'static>) -> Result<RootCertStore, TlsErro
 }
 
 fn custom_server(pki: &TestPki) -> Result<ServerConnection, TlsError> {
-    let verifier = WebPkiClientVerifier::builder(Arc::new(roots(&pki.root)?))
-        .build()
-        .map_err(|_| TlsError::Configuration)?;
-    let mut config = ServerConfig::builder_with_protocol_versions(&[&TLS13])
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(
-            pki.server.chain.clone(),
-            PrivatePkcs8KeyDer::from(pki.server.key.clone()).into(),
-        )
-        .map_err(|_| TlsError::Configuration)?;
+    let verifier = WebPkiClientVerifier::builder_with_provider(
+        Arc::new(roots(&pki.root)?),
+        Arc::new(rustls::crypto::ring::default_provider()),
+    )
+    .build()
+    .map_err(|_| TlsError::Configuration)?;
+    let mut config =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_protocol_versions(&[&TLS13])
+            .expect("TLS 1.3 is supported")
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(
+                pki.server.chain.clone(),
+                PrivatePkcs8KeyDer::from(pki.server.key.clone()).into(),
+            )
+            .map_err(|_| TlsError::Configuration)?;
     config.session_storage = Arc::new(NoServerSessionStorage {});
     config.send_tls13_tickets = 0;
     ServerConnection::new(Arc::new(config)).map_err(|_| TlsError::Configuration)
 }
 
 fn custom_client(pki: &TestPki) -> Result<ClientConnection, TlsError> {
-    let mut config = ClientConfig::builder_with_protocol_versions(&[&TLS13])
-        .with_root_certificates(roots(&pki.root)?)
-        .with_client_auth_cert(
-            pki.client.chain.clone(),
-            PrivatePkcs8KeyDer::from(pki.client.key.clone()).into(),
-        )
-        .map_err(|_| TlsError::Configuration)?;
+    let mut config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_protocol_versions(&[&TLS13])
+            .expect("TLS 1.3 is supported")
+            .with_root_certificates(roots(&pki.root)?)
+            .with_client_auth_cert(
+                pki.client.chain.clone(),
+                PrivatePkcs8KeyDer::from(pki.client.key.clone()).into(),
+            )
+            .map_err(|_| TlsError::Configuration)?;
     config.enable_early_data = false;
     config.resumption = Resumption::disabled();
     ClientConnection::new(

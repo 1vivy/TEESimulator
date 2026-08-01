@@ -1,7 +1,7 @@
 use std::{net::IpAddr, time::Duration};
 
 use crate::{
-    DirectEndpointProfile, DirectPath, DirectProfileInput, DirectProfileRotation,
+    DialMode, DirectEndpointProfile, DirectPath, DirectProfileInput, DirectProfileRotation,
     DirectReachability, DirectReadinessStatus, Endpoint, ProfileError, TransportKind,
     direct_profile::{DirectEvidenceInput, DirectPinnedTlsAdmission},
 };
@@ -16,6 +16,7 @@ fn endpoint_profile_selects_pinned_lan_and_tailscale_vectors()
     assert_eq!(tailscale.connect_endpoint().host(), "100.88.0.8");
     assert_eq!(lan.listen_interface(), "192.168.50.9".parse::<IpAddr>()?);
     assert_eq!(tailscale.peer_spki(), [0x22; 32]);
+    assert_eq!(tailscale.dial_mode(), DialMode::DonorDials);
     let profiles = vec![lan.clone(), tailscale.clone()];
     assert_eq!(
         DirectEndpointProfile::select(&profiles, DirectPath::Lan)?,
@@ -30,6 +31,7 @@ fn endpoint_profile_selects_pinned_lan_and_tailscale_vectors()
         DirectEndpointProfile::parse(DirectProfileInput {
             epoch: 7,
             path: DirectPath::Lan,
+            dial_mode: DialMode::CandidateDials,
             connect_endpoint: Endpoint::parse("192.168.50.8", 8443)?,
             listen_interface: "0.0.0.0".parse()?,
             peer_spki: [0x11; 32],
@@ -42,6 +44,7 @@ fn endpoint_profile_selects_pinned_lan_and_tailscale_vectors()
         DirectEndpointProfile::parse(DirectProfileInput {
             epoch: 7,
             path: DirectPath::Lan,
+            dial_mode: DialMode::CandidateDials,
             connect_endpoint: Endpoint::parse("192.168.50.8", 8443)?,
             listen_interface: "192.168.50.9".parse()?,
             peer_spki: [0x11; 32],
@@ -128,6 +131,7 @@ struct Vector {
     host: &'static str,
     listen_interface: &'static str,
     pin: u8,
+    dial_mode: DialMode,
 }
 
 impl Vector {
@@ -138,6 +142,7 @@ impl Vector {
             host: "192.168.50.8",
             listen_interface: "192.168.50.9",
             pin: 0x11,
+            dial_mode: DialMode::CandidateDials,
         }
     }
 
@@ -148,6 +153,7 @@ impl Vector {
             host: "192.168.50.10",
             listen_interface: "192.168.50.9",
             pin: 0x22,
+            dial_mode: DialMode::CandidateDials,
         }
     }
 
@@ -158,6 +164,7 @@ impl Vector {
             host: "100.88.0.8",
             listen_interface: "100.88.0.9",
             pin: 0x22,
+            dial_mode: DialMode::DonorDials,
         }
     }
 }
@@ -166,6 +173,7 @@ fn profile(vector: Vector) -> Result<DirectEndpointProfile, ProfileError> {
     DirectEndpointProfile::parse(DirectProfileInput {
         epoch: vector.epoch,
         path: vector.path,
+        dial_mode: vector.dial_mode,
         connect_endpoint: Endpoint::parse(vector.host, 8443)?,
         listen_interface: vector
             .listen_interface
@@ -180,6 +188,7 @@ fn profile(vector: Vector) -> Result<DirectEndpointProfile, ProfileError> {
 fn evidence(profile: &DirectEndpointProfile) -> DirectEvidenceInput {
     DirectEvidenceInput {
         path: profile.path(),
+        dial_mode: profile.dial_mode(),
         connect_endpoint: profile.connect_endpoint().clone(),
         listen_interface: profile.listen_interface(),
         epoch: profile.epoch(),

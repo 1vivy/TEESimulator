@@ -10,9 +10,9 @@ use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
 use zeroize::Zeroizing;
 
 use super::{
-    AdmissionBinding, AuditChain, AuditEntry, ClientPeer, Endpoint, ProfileInput, ReceiptContext,
-    RequestContext, ResponseContext, Role, SessionScope, TlsAdmission, TlsCredentials,
-    TransportKind,
+    AdmissionBinding, AuditChain, AuditEntry, ClientPeer, DialMode, Endpoint, ProfileInput,
+    ReceiptContext, RequestContext, ResponseContext, Role, SessionScope, TlsAdmission,
+    TlsCredentials, TransportKind,
 };
 
 const RECEIPT_DOMAIN: &[u8] = b"TEESIM-RKA-V2/AUDIT-RECEIPT\0";
@@ -346,6 +346,7 @@ fn capture_canaries(
         epoch: 1,
         local_role: Role::Candidate,
         transport: TransportKind::DirectPinnedTls,
+        dial_mode: DialMode::CandidateDials,
         endpoint,
         local_spki: local_pin,
         peer_spki: peer_pin,

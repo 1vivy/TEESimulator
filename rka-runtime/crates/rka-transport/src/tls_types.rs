@@ -22,6 +22,19 @@ pub struct AdmissionBinding {
 }
 
 impl AdmissionBinding {
+    /// Creates exact persisted coordinates for reciprocal transport admission.
+    #[must_use]
+    pub const fn new(
+        [profile_id, session_id, candidate_nonce, transcript_hash]: [[u8; 32]; 4],
+    ) -> Self {
+        Self {
+            profile_id,
+            session_id,
+            candidate_nonce,
+            transcript_hash,
+        }
+    }
+
     pub(crate) fn token(self) -> [u8; 32] {
         let mut bytes = Vec::with_capacity(ADMISSION_DOMAIN.len().saturating_add(128));
         bytes.extend_from_slice(ADMISSION_DOMAIN);

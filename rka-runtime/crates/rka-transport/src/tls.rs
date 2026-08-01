@@ -33,10 +33,13 @@ impl PinnedTlsClient {
         admission: TlsAdmission,
     ) -> Result<Self, TlsError> {
         let roots = roots(&peer.trust)?;
-        let mut config = ClientConfig::builder_with_protocol_versions(&[&TLS13])
-            .with_root_certificates(roots)
-            .with_client_auth_cert(credentials.chain, credentials.key)
-            .map_err(|_| TlsError::Configuration)?;
+        let mut config =
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_protocol_versions(&[&TLS13])
+                .map_err(|_| TlsError::Configuration)?
+                .with_root_certificates(roots)
+                .with_client_auth_cert(credentials.chain, credentials.key)
+                .map_err(|_| TlsError::Configuration)?;
         config.enable_early_data = false;
         config.resumption = Resumption::disabled();
         Ok(Self {
@@ -82,6 +85,129 @@ pub struct PinnedTlsServer {
     budget: Duration,
 }
 
+/// TLS 1.3 donor that dials the candidate while retaining donor dispatch semantics.
+#[derive(Debug)]
+pub struct PinnedTlsDonorClient {
+    config: Arc<ClientConfig>,
+    name: ServerName<'static>,
+    expected_pin: [u8; 32],
+    binding: AdmissionBinding,
+    budget: Duration,
+}
+
+impl PinnedTlsDonorClient {
+    /// Builds a donor dialer with mutual authentication and exact candidate pinning.
+    pub fn new(
+        credentials: TlsCredentials,
+        peer: ClientPeer,
+        admission: TlsAdmission,
+    ) -> Result<Self, TlsError> {
+        let roots = roots(&peer.trust)?;
+        let mut config =
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_protocol_versions(&[&TLS13])
+                .map_err(|_| TlsError::Configuration)?
+                .with_root_certificates(roots)
+                .with_client_auth_cert(credentials.chain, credentials.key)
+                .map_err(|_| TlsError::Configuration)?;
+        config.enable_early_data = false;
+        config.resumption = Resumption::disabled();
+        Ok(Self {
+            config: Arc::new(config),
+            name: peer.name,
+            expected_pin: peer.pin,
+            binding: admission.binding,
+            budget: admission.budget,
+        })
+    }
+
+    /// Reads and dispatches one candidate-originated request on a donor-opened socket.
+    pub fn serve_once<F>(&self, socket: TcpStream, handler: F) -> Result<(), TlsError>
+    where
+        F: FnOnce(&[u8]) -> Result<Vec<u8>, TlsError>,
+    {
+        let deadline = Deadline::new(self.budget)?;
+        let connection = ClientConnection::new(Arc::clone(&self.config), self.name.clone())
+            .map_err(|_| TlsError::Configuration)?;
+        let mut stream = StreamOwned::new(connection, socket);
+        complete_client_handshake(&mut stream, &deadline)?;
+        verify_common(
+            stream.conn.protocol_version(),
+            stream.conn.peer_certificates(),
+            self.expected_pin,
+        )?;
+        write_bytes(&mut stream, &self.binding.token(), &deadline)?;
+        flush_bytes(&mut stream, &deadline)?;
+        let request = read_frame(&mut stream, &deadline)?;
+        let response = handler(&request)?;
+        write_frame(&mut stream, &response, &deadline)
+    }
+}
+
+/// TLS 1.3 candidate listener that originates the application request after admission.
+#[derive(Debug)]
+pub struct PinnedTlsCandidateServer {
+    config: Arc<ServerConfig>,
+    expected_pin: [u8; 32],
+    binding: AdmissionBinding,
+    budget: Duration,
+}
+
+impl PinnedTlsCandidateServer {
+    /// Builds a one-request candidate listener requiring the exact donor identity.
+    pub fn new(
+        credentials: TlsCredentials,
+        peer: &ServerPeer,
+        admission: TlsAdmission,
+    ) -> Result<Self, TlsError> {
+        let verifier = WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots(&peer.trust)?),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .map_err(|_| TlsError::Configuration)?;
+        let mut config =
+            ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_protocol_versions(&[&TLS13])
+                .map_err(|_| TlsError::Configuration)?
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(credentials.chain, credentials.key)
+                .map_err(|_| TlsError::Configuration)?;
+        config.session_storage = Arc::new(NoServerSessionStorage {});
+        config.send_tls13_tickets = 0;
+        Ok(Self {
+            config: Arc::new(config),
+            expected_pin: peer.pin,
+            binding: admission.binding,
+            budget: admission.budget,
+        })
+    }
+
+    /// Sends one canonical request only after mutual TLS, pin, and admission checks.
+    pub fn exchange(&self, socket: TcpStream, request: &[u8]) -> Result<Vec<u8>, TlsError> {
+        if request.is_empty() || request.len() > MAX_FRAME_BYTES {
+            return Err(TlsError::Frame);
+        }
+        let deadline = Deadline::new(self.budget)?;
+        let connection =
+            ServerConnection::new(Arc::clone(&self.config)).map_err(|_| TlsError::Configuration)?;
+        let mut stream = StreamOwned::new(connection, socket);
+        complete_server_handshake(&mut stream, &deadline)?;
+        verify_common(
+            stream.conn.protocol_version(),
+            stream.conn.peer_certificates(),
+            self.expected_pin,
+        )?;
+        let mut token = [0_u8; 32];
+        read_exact(&mut stream, &mut token, &deadline)?;
+        if token != self.binding.token() {
+            return Err(TlsError::Admission);
+        }
+        write_frame(&mut stream, request, &deadline)?;
+        read_frame(&mut stream, &deadline)
+    }
+}
+
 impl PinnedTlsServer {
     /// Builds a TLS1.3-only server requiring a WebPKI-valid client certificate.
     pub fn new(
@@ -89,13 +215,19 @@ impl PinnedTlsServer {
         peer: &ServerPeer,
         admission: TlsAdmission,
     ) -> Result<Self, TlsError> {
-        let verifier = WebPkiClientVerifier::builder(Arc::new(roots(&peer.trust)?))
-            .build()
-            .map_err(|_| TlsError::Configuration)?;
-        let mut config = ServerConfig::builder_with_protocol_versions(&[&TLS13])
-            .with_client_cert_verifier(verifier)
-            .with_single_cert(credentials.chain, credentials.key)
-            .map_err(|_| TlsError::Configuration)?;
+        let verifier = WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots(&peer.trust)?),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .map_err(|_| TlsError::Configuration)?;
+        let mut config =
+            ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_protocol_versions(&[&TLS13])
+                .map_err(|_| TlsError::Configuration)?
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(credentials.chain, credentials.key)
+                .map_err(|_| TlsError::Configuration)?;
         config.session_storage = Arc::new(NoServerSessionStorage {});
         config.send_tls13_tickets = 0;
         Ok(Self {

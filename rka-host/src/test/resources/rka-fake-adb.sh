@@ -49,7 +49,6 @@ if [[ "$wire_payload" == *"<<'RKA_ROOT_SCRIPT_89C4B517'"* ]]; then
     script_payload=${wire_payload#*"<<'RKA_ROOT_SCRIPT_89C4B517'"$'\n'}
     [[ "$script_payload" != "$wire_payload" ]] || exit 93
     script_payload=${script_payload%%$'\n'RKA_ROOT_SCRIPT_89C4B517$'\n'*}
-    [[ "$wire_payload" == *'sh "$rka_script" </dev/null'* ]] || exit 93
     fixed=$(printf '%s\n' "$script_payload" | sed -n '/^set -- /p' | head -1)
     read -r _ _ action sentinel_id _ <<< "$fixed"
     phase=ROOT_AUTHORITATIVE

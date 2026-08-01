@@ -59,6 +59,12 @@ object BaselineStore {
 
     fun read(path: Path): SentinelBaseline = readPrivate(path)
 
+    fun delete(path: Path, baseline: SentinelBaseline) {
+        if (read(path) != baseline) throw HostCliException("BASELINE_INVALID")
+        Files.delete(path)
+        fsyncParent(path)
+    }
+
     private fun writeExclusive(path: Path, baseline: SentinelBaseline) {
         val parent = safeParent(path)
         if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(path)) {

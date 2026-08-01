@@ -82,6 +82,21 @@ class HostOrchestrationTest {
     }
 
     @Test
+    fun donorScopeRetainsPairBindingWithoutAddressingCandidate() {
+        val path = Files.createTempDirectory("sentinel-donor-").resolve("baseline.json")
+        val runner = RecordingRunner()
+        val host = HostOrchestrator(pair, runner)
+
+        val baseline = host.sentinelStart(path, "nonce-A", SentinelScope.DONOR)
+        host.sentinelStop(path)
+
+        assertEquals(SentinelScope.DONOR, baseline.scope)
+        assertEquals(PairBinding.from(pair), baseline.binding)
+        assertFalse(runner.calls.any { it.getOrNull(2) == "CANDIDATE_B" })
+        assertFalse(Files.exists(path))
+    }
+
+    @Test
     fun pendingStartIsCleanedBeforeDeterministicRetry() {
         val path = Files.createTempDirectory("sentinel-pending-").resolve("baseline.json")
         val pending =
@@ -101,7 +116,7 @@ class HostOrchestrationTest {
         HostOrchestrator(pair, runner).sentinelStart(path, "nonce-A")
 
         assertFalse(BaselineStore.hasPending(path))
-        val cleanupIndex = runner.calls.indexOfFirst { "cleanup" in it }
+        val cleanupIndex = runner.calls.indexOfFirst { "stop" in it }
         val startIndex = runner.calls.indexOfFirst { "start" in it }
         assertTrue(cleanupIndex >= 0)
         assertTrue(startIndex > cleanupIndex)
@@ -144,7 +159,7 @@ class HostOrchestrationTest {
 
         assertFalse(Files.exists(path))
         assertFalse(BaselineStore.hasPending(path))
-        assertTrue(runner.calls.any { "cleanup" in it })
+        assertTrue(runner.calls.any { "stop" in it })
     }
 
     private class RecordingRunner(private val failingStart: Int? = null) : HostCommandRunner {
@@ -177,6 +192,24 @@ class HostOrchestrationTest {
                         }
                 }
             return HostCommandResult(0, output, "")
+        }
+
+        override fun runRoot(
+            serial: BoundSerial,
+            script: String,
+            arguments: List<String>,
+        ): HostCommandResult {
+            calls += listOf("adb", "-s", serial.value, "shell", "su", "0", "sh") + arguments
+            val action = arguments[0]
+            if (action == "start" && ++starts == failingStart) {
+                return HostCommandResult(1, "", "injected")
+            }
+            val phase = if (action == "stop") "STOPPED" else "ROOT_AUTHORITATIVE"
+            return HostCommandResult(
+                0,
+                "sentinel_id=${arguments[1]} action=$action phase=$phase samples=2\n",
+                "",
+            )
         }
     }
 }

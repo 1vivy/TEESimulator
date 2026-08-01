@@ -29,28 +29,34 @@ data class SentinelBaseline(
     val candidateBootId: String,
     val donorStartMillis: Long,
     val candidateStartMillis: Long,
+    val authority: SentinelPhase = SentinelPhase.ROOT_AUTHORITATIVE,
+    val samplerSha256: String = "0".repeat(64),
+    val scope: SentinelScope = SentinelScope.PAIR,
 ) {
     fun canonical(): String =
-        """{"candidate_boot_id":"$candidateBootId","candidate_serial_sha256":"${binding.candidateSerialHash}","candidate_start_millis":$candidateStartMillis,"donor_boot_id":"$donorBootId","donor_serial_sha256":"${binding.donorSerialHash}","donor_start_millis":$donorStartMillis,"nonce":"$nonce","pair_sha256":"${binding.pairHash}","profile_sha256":"${binding.profileSha256}","sentinel_id":"$sentinelId","version":2}
+        """{"authority":"${authority.name}","candidate_boot_id":"$candidateBootId","candidate_serial_sha256":"${binding.candidateSerialHash}","candidate_start_millis":$candidateStartMillis,"donor_boot_id":"$donorBootId","donor_serial_sha256":"${binding.donorSerialHash}","donor_start_millis":$donorStartMillis,"nonce":"$nonce","pair_sha256":"${binding.pairHash}","profile_sha256":"${binding.profileSha256}","sampler_sha256":"$samplerSha256","scope":"${scope.name}","sentinel_id":"$sentinelId","version":4}
 """
 
     companion object {
         private val pattern =
             Regex(
-                """\{"candidate_boot_id":"([A-Za-z0-9._-]{1,128})","candidate_serial_sha256":"([0-9a-f]{64})","candidate_start_millis":([0-9]+),"donor_boot_id":"([A-Za-z0-9._-]{1,128})","donor_serial_sha256":"([0-9a-f]{64})","donor_start_millis":([0-9]+),"nonce":"([A-Za-z0-9._-]{1,128})","pair_sha256":"([0-9a-f]{64})","profile_sha256":"([0-9a-f]{64})","sentinel_id":"([A-Za-z0-9._-]{1,128})","version":2\}\n"""
+                """\{"authority":"(ROOT_AUTHORITATIVE)","candidate_boot_id":"([A-Za-z0-9._-]{1,128})","candidate_serial_sha256":"([0-9a-f]{64})","candidate_start_millis":([0-9]+),"donor_boot_id":"([A-Za-z0-9._-]{1,128})","donor_serial_sha256":"([0-9a-f]{64})","donor_start_millis":([0-9]+),"nonce":"([A-Za-z0-9._-]{1,128})","pair_sha256":"([0-9a-f]{64})","profile_sha256":"([0-9a-f]{64})","sampler_sha256":"([0-9a-f]{64})","scope":"(PAIR|DONOR)","sentinel_id":"([A-Za-z0-9._-]{1,128})","version":4\}\n"""
             )
 
         fun parse(raw: String): SentinelBaseline {
             val value =
                 pattern.matchEntire(raw)?.groupValues ?: throw HostCliException("BASELINE_INVALID")
             return SentinelBaseline(
-                value[10],
-                value[7],
-                PairBinding(value[8], value[5], value[2], value[9]),
-                value[4],
-                value[1],
-                value[6].toLong(),
-                value[3].toLong(),
+                value[13],
+                value[8],
+                PairBinding(value[9], value[6], value[3], value[10]),
+                value[5],
+                value[2],
+                value[7].toLong(),
+                value[4].toLong(),
+                SentinelPhase.valueOf(value[1]),
+                value[11],
+                SentinelScope.valueOf(value[12]),
             )
         }
     }

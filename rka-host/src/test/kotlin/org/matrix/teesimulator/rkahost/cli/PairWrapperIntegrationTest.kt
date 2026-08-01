@@ -24,6 +24,16 @@ set -euo pipefail
 serial=${'$'}2
 shift 2
 printf '%s\n' "${'$'}serial ${'$'}*" >> "${'$'}RKA_SYNTH_TRACE"
+if [[ " ${'$'}* " == *' shell su 0 sh '* ]]; then
+    IFS= read -r fixed
+    [[ "${'$'}fixed" == 'set -- '* ]]
+    fixed=${'$'}{fixed#'set -- '}
+    read -r action id _ <<< "${'$'}fixed"
+    phase=ROOT_AUTHORITATIVE
+    [[ "${'$'}action" != stop ]] || phase=STOPPED
+    printf 'sentinel_id=%s action=%s phase=%s samples=2\n' "${'$'}id" "${'$'}action" "${'$'}phase"
+    exit 0
+fi
 case "${'$'}{*: -1}" in
     /proc/sys/kernel/random/boot_id) printf 'synth-%s-boot\n' "${'$'}serial" ;;
     /proc/uptime) printf '123.45 1.0\n' ;;
@@ -61,8 +71,14 @@ esac
             assertFalse(result.stdout.contains(DONOR))
             assertFalse(result.stdout.contains(CANDIDATE))
             assertTrue(Files.exists(root.resolve("baseline.json")))
-            assertTrue(Files.readString(trace).contains(DONOR))
-            assertTrue(Files.readString(trace).contains(CANDIDATE))
+            val traceText = Files.readString(trace)
+            assertTrue(traceText.contains(DONOR))
+            assertTrue(traceText.contains(CANDIDATE))
+            assertTrue(traceText.contains("shell su 0 sh"))
+            assertFalse(traceText.contains(RKA_CONTROL_PATH))
+            val baseline = Files.readString(root.resolve("baseline.json"))
+            assertFalse(baseline.contains(DONOR))
+            assertFalse(baseline.contains(CANDIDATE))
         }
     }
 

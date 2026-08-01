@@ -148,10 +148,21 @@ object HostCli {
         val values = options(arguments.drop(2))
         return when (arguments[1]) {
             "start" -> {
-                requireKeys(values, setOf("--baseline", "--nonce"))
+                if (
+                    values.keys != setOf("--baseline", "--nonce") &&
+                        values.keys != setOf("--baseline", "--nonce", "--scope")
+                ) {
+                    invalid()
+                }
+                if (values.values.any(String::isBlank)) invalid()
                 host.sentinelStart(
                     Path.of(values.getValue("--baseline")),
                     values.getValue("--nonce"),
+                    when (values["--scope"] ?: "pair") {
+                        "pair" -> SentinelScope.PAIR
+                        "donor" -> SentinelScope.DONOR
+                        else -> invalid()
+                    },
                 )
                 "SENTINEL_STARTED"
             }
@@ -169,6 +180,16 @@ object HostCli {
                 requireKeys(values, setOf("--baseline"))
                 host.sentinelVerify(Path.of(values.getValue("--baseline")))
                 "SENTINEL_VERIFIED"
+            }
+            "assert-live" -> {
+                requireKeys(values, setOf("--baseline"))
+                host.sentinelAssertLive(Path.of(values.getValue("--baseline")))
+                "SENTINEL_LIVE"
+            }
+            "stop" -> {
+                requireKeys(values, setOf("--baseline"))
+                host.sentinelStop(Path.of(values.getValue("--baseline")))
+                "SENTINEL_STOPPED"
             }
             else -> invalid()
         }
@@ -229,8 +250,8 @@ object HostCli {
             """
             Usage: rka-host <fixed-command>
               device-pair bind --donor SERIAL --candidate SERIAL --profile FILE
-              sentinel start --baseline FILE --nonce NONCE
-              sentinel sample|finish|verify --baseline FILE
+              sentinel start --baseline FILE --nonce NONCE [--scope pair|donor]
+              sentinel sample|finish|verify|assert-live|stop --baseline FILE
               profile pair
               deploy-no-reboot --zip FILE
               snapshot capability|config

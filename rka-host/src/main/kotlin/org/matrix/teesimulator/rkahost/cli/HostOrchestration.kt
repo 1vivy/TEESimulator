@@ -8,6 +8,14 @@ class HostOrchestrator(
 ) {
     private val calls = mutableListOf<List<String>>()
     private val binding = PairBinding.from(pair)
+    private val sentinelScript =
+        checkNotNull(javaClass.getResourceAsStream("/rka-preinstall-sentinel.sh")) {
+                "SENTINEL_RESOURCE_MISSING"
+            }
+            .bufferedReader()
+            .readText()
+            .also { if (!it.endsWith('\n')) throw HostCliException("SENTINEL_RESOURCE_INVALID") }
+    private val sentinelScriptHash = Hashes.sha256(sentinelScript.toByteArray())
 
     fun profilePair() {
         control(pair.donor, "profile-pair", "DONOR")
@@ -48,7 +56,11 @@ class HostOrchestrator(
         serials().forEach { control(it, "cleanup") }
     }
 
-    fun sentinelStart(path: Path, nonce: String): SentinelBaseline {
+    fun sentinelStart(
+        path: Path,
+        nonce: String,
+        scope: SentinelScope = SentinelScope.PAIR,
+    ): SentinelBaseline {
         recoverPending(path)
         BaselineStore.requireReadyAbsent(path)
         val baseline =
@@ -56,15 +68,21 @@ class HostOrchestrator(
                 sentinelId = Hashes.sha256("${binding.pairHash}:$nonce".toByteArray()),
                 nonce = nonce,
                 binding = binding,
-                donorBootId = bootId(pair.donor),
-                candidateBootId = bootId(pair.candidate),
+                donorBootId = bootIdentityHash(pair.donor),
+                candidateBootId =
+                    if (scope == SentinelScope.PAIR) bootIdentityHash(pair.candidate)
+                    else "DONOR_SCOPE",
                 donorStartMillis = monotonicMillis(pair.donor),
-                candidateStartMillis = monotonicMillis(pair.candidate),
+                candidateStartMillis =
+                    if (scope == SentinelScope.PAIR) monotonicMillis(pair.candidate) else 0,
+                authority = SentinelPhase.ROOT_AUTHORITATIVE,
+                samplerSha256 = sentinelScriptHash,
+                scope = scope,
             )
         BaselineStore.createPending(path, baseline)
         try {
             sentinelOne(pair.donor, baseline, "start")
-            sentinelOne(pair.candidate, baseline, "start")
+            if (scope == SentinelScope.PAIR) sentinelOne(pair.candidate, baseline, "start")
             validateStarted(baseline)
             BaselineStore.commitPending(path, baseline)
             return baseline
@@ -77,22 +95,19 @@ class HostOrchestrator(
     fun sentinelSample(path: Path): SentinelSample {
         val baseline = BaselineStore.read(path)
         requirePair(baseline)
-        sentinelAction(baseline, "sample")
-        return sample(baseline)
+        return sample(baseline, sentinelAction(baseline, "sample"))
     }
 
     fun sentinelFinish(path: Path): SentinelSample {
         val baseline = BaselineStore.read(path)
         requirePair(baseline)
-        sentinelAction(baseline, "finish")
-        return sample(baseline)
+        return sample(baseline, sentinelAction(baseline, "assert-live"))
     }
 
     fun sentinelVerify(path: Path) {
         val baseline = BaselineStore.read(path)
         requirePair(baseline)
-        sentinelAction(baseline, "verify")
-        val current = sample(baseline)
+        val current = sample(baseline, sentinelAction(baseline, "assert-live"))
         if (
             current.donorBootId != baseline.donorBootId ||
                 current.candidateBootId != baseline.candidateBootId
@@ -101,59 +116,98 @@ class HostOrchestrator(
         }
         if (
             current.donorMillis <= baseline.donorStartMillis ||
-                current.candidateMillis <= baseline.candidateStartMillis
+                (baseline.scope == SentinelScope.PAIR &&
+                    current.candidateMillis <= baseline.candidateStartMillis)
         ) {
             throw HostCliException("SENTINEL_MONOTONIC_INVALID")
         }
     }
 
-    fun trace(): List<List<String>> = calls.map { it.toList() }
+    fun sentinelAssertLive(path: Path): SentinelSample = sentinelFinish(path)
 
-    private fun sample(baseline: SentinelBaseline): SentinelSample =
-        SentinelSample(
-            baseline.sentinelId,
-            bootId(pair.donor),
-            bootId(pair.candidate),
-            monotonicMillis(pair.donor),
-            monotonicMillis(pair.candidate),
-        )
-
-    private fun sentinelAction(baseline: SentinelBaseline, action: String) {
-        serials().forEach { sentinelOne(it, baseline, action) }
+    fun sentinelStop(path: Path) {
+        val baseline = BaselineStore.read(path)
+        requirePair(baseline)
+        sentinelAction(baseline, "stop")
+        BaselineStore.delete(path, baseline)
     }
 
-    private fun sentinelOne(serial: BoundSerial, baseline: SentinelBaseline, action: String) {
+    fun trace(): List<List<String>> = calls.map { it.toList() }
+
+    private fun sample(
+        baseline: SentinelBaseline,
+        phase: SentinelPhase = SentinelPhase.ROOT_AUTHORITATIVE,
+    ): SentinelSample =
+        SentinelSample(
+            baseline.sentinelId,
+            bootIdentityHash(pair.donor),
+            if (baseline.scope == SentinelScope.PAIR) bootIdentityHash(pair.candidate)
+            else baseline.candidateBootId,
+            monotonicMillis(pair.donor),
+            if (baseline.scope == SentinelScope.PAIR) monotonicMillis(pair.candidate)
+            else baseline.candidateStartMillis,
+            phase,
+        )
+
+    private fun sentinelAction(baseline: SentinelBaseline, action: String): SentinelPhase =
+        sentinelSerials(baseline)
+            .map { sentinelOne(it, baseline, action) }
+            .let { phases ->
+                if (phases.all { it == SentinelPhase.INSTALLED_OBSERVED }) {
+                    SentinelPhase.INSTALLED_OBSERVED
+                } else {
+                    SentinelPhase.ROOT_AUTHORITATIVE
+                }
+            }
+
+    private fun sentinelOne(
+        serial: BoundSerial,
+        baseline: SentinelBaseline,
+        action: String,
+    ): SentinelPhase {
+        val role = if (serial == pair.donor) "DONOR" else "CANDIDATE"
+        val argv = listOf("adb", "-s", serial.value, "shell", "su", "0", "sh")
+        calls += argv
         val result =
-            invoke(
-                adb(
-                    serial,
-                    listOf(
-                        "shell",
-                        "sh",
-                        RKA_CONTROL_PATH,
-                        "sentinel",
-                        action,
-                        "--id",
-                        baseline.sentinelId,
-                        "--nonce",
-                        baseline.nonce,
-                    ),
-                )
+            runner.runRoot(
+                serial,
+                sentinelScript,
+                listOf(
+                    action,
+                    baseline.sentinelId,
+                    Hashes.sha256(baseline.nonce.toByteArray()),
+                    role,
+                    sentinelScriptHash,
+                ),
             )
-        val expected = "sentinel_id=${baseline.sentinelId} nonce=${baseline.nonce} action=$action"
-        if (result.stdout.trim() != expected) throw HostCliException("SENTINEL_RESPONSE_INVALID")
+        if (result.exitCode != 0) throw HostCliException("ADB_COMMAND_FAILED")
+        val response =
+            Regex(
+                    "sentinel_id=${baseline.sentinelId} action=${Regex.escape(action)} phase=([A-Z_]+) samples=([0-9]+)"
+                )
+                .matchEntire(result.stdout.trim())
+                ?: throw HostCliException("SENTINEL_RESPONSE_INVALID")
+        response.groupValues[2].toIntOrNull() ?: throw HostCliException("SENTINEL_RESPONSE_INVALID")
+        return when (response.groupValues[1]) {
+            "INSTALLED_OBSERVED" -> SentinelPhase.INSTALLED_OBSERVED
+            "ROOT_AUTHORITATIVE",
+            "STOPPED" -> SentinelPhase.ROOT_AUTHORITATIVE
+            else -> throw HostCliException("SENTINEL_RESPONSE_INVALID")
+        }
     }
 
     private fun validateStarted(baseline: SentinelBaseline) {
         if (
-            bootId(pair.donor) != baseline.donorBootId ||
-                bootId(pair.candidate) != baseline.candidateBootId
+            bootIdentityHash(pair.donor) != baseline.donorBootId ||
+                (baseline.scope == SentinelScope.PAIR &&
+                    bootIdentityHash(pair.candidate) != baseline.candidateBootId)
         ) {
             throw HostCliException("BOOT_ID_DRIFT")
         }
         if (
             monotonicMillis(pair.donor) < baseline.donorStartMillis ||
-                monotonicMillis(pair.candidate) < baseline.candidateStartMillis
+                (baseline.scope == SentinelScope.PAIR &&
+                    monotonicMillis(pair.candidate) < baseline.candidateStartMillis)
         ) {
             throw HostCliException("SENTINEL_MONOTONIC_INVALID")
         }
@@ -170,17 +224,9 @@ class HostOrchestrator(
 
     private fun cleanupSentinel(baseline: SentinelBaseline): Boolean {
         var succeeded = true
-        for (serial in serials()) {
+        for (serial in sentinelSerials(baseline)) {
             try {
-                control(
-                    serial,
-                    "sentinel",
-                    "cleanup",
-                    "--id",
-                    baseline.sentinelId,
-                    "--nonce",
-                    baseline.nonce,
-                )
+                sentinelOne(serial, baseline, "stop")
             } catch (_: HostCliException) {
                 succeeded = false
             }
@@ -192,15 +238,16 @@ class HostOrchestrator(
         if (baseline.binding != binding) throw HostCliException("PAIR_BINDING_MISMATCH")
     }
 
-    private fun bootId(serial: BoundSerial): String =
-        invoke(adb(serial, listOf("shell", "cat", "/proc/sys/kernel/random/boot_id")))
-            .stdout
-            .trim()
-            .also {
-                if (!it.matches(Regex("[A-Za-z0-9._-]{1,128}"))) {
-                    throw HostCliException("BOOT_ID_INVALID")
-                }
-            }
+    private fun bootIdentityHash(serial: BoundSerial): String {
+        val raw =
+            invoke(adb(serial, listOf("shell", "cat", "/proc/sys/kernel/random/boot_id")))
+                .stdout
+                .trim()
+        if (!raw.matches(Regex("[A-Za-z0-9._-]{1,128}"))) {
+            throw HostCliException("BOOT_ID_INVALID")
+        }
+        return Hashes.sha256(raw.toByteArray())
+    }
 
     private fun monotonicMillis(serial: BoundSerial): Long {
         val seconds =
@@ -238,6 +285,9 @@ class HostOrchestrator(
     }
 
     private fun serials(): List<BoundSerial> = listOf(pair.donor, pair.candidate)
+
+    private fun sentinelSerials(baseline: SentinelBaseline): List<BoundSerial> =
+        if (baseline.scope == SentinelScope.DONOR) listOf(pair.donor) else serials()
 
     private fun serialValues(): Set<String> = serials().mapTo(mutableSetOf()) { it.value }
 }

@@ -1,6 +1,8 @@
 package org.matrix.teesimulator.rkahost.cli
 
 import java.nio.file.Path
+import org.matrix.teesimulator.rkahost.evidence.AdbCommandTracePolicy
+import org.matrix.teesimulator.rkahost.evidence.CommandRejected
 import org.matrix.teesimulator.rkahost.evidence.donorPropertyPrivateInput
 
 class HostOrchestrator(
@@ -168,7 +170,7 @@ class HostOrchestrator(
     ): SentinelPhase {
         val role = if (serial == pair.donor) "DONOR" else "CANDIDATE"
         val argv = listOf("adb", "-s", serial.value, "shell", "su", "0", "sh")
-        calls += argv
+        record(argv)
         val result =
             runner.runRoot(
                 serial,
@@ -281,18 +283,10 @@ class HostOrchestrator(
         listOf("adb", "-s", serial.value) + arguments
 
     private fun invoke(argv: List<String>): HostCommandResult {
-        if (
-            argv.any {
-                it.lowercase() in setOf("reboot", "killall", "pkill", "stop", "start") &&
-                    it !in setOf("start", "stop")
-            }
-        ) {
-            throw HostCliException("FORBIDDEN_DEVICE_COMMAND")
-        }
         if (argv.take(2) != listOf("adb", "-s") || argv.getOrNull(2) !in serialValues()) {
             throw HostCliException("UNBOUND_DEVICE_COMMAND")
         }
-        calls += argv.toList()
+        record(argv)
         val result = runner.run(argv)
         if (result.exitCode != 0) throw HostCliException("ADB_COMMAND_FAILED")
         return result
@@ -304,4 +298,13 @@ class HostOrchestrator(
         if (baseline.scope == SentinelScope.DONOR) listOf(pair.donor) else serials()
 
     private fun serialValues(): Set<String> = serials().mapTo(mutableSetOf()) { it.value }
+
+    private fun record(argv: List<String>) {
+        try {
+            AdbCommandTracePolicy.requireAllowed(argv)
+        } catch (failure: CommandRejected) {
+            throw HostCliException(failure.message ?: "FORBIDDEN_DEVICE_COMMAND")
+        }
+        calls += argv.toList()
+    }
 }

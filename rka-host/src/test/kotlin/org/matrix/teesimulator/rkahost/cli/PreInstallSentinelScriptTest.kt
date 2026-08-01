@@ -3,6 +3,7 @@ package org.matrix.teesimulator.rkahost.cli
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
+import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -10,10 +11,20 @@ import org.junit.Test
 
 class PreInstallSentinelScriptTest {
     @Test
+    fun hostileBlockingLogcatIsNeverInvokedByAuthoritativeIdentitySampler() =
+        withFixture { fixture ->
+            val started = fixture.action("start", 2_000)
+
+            assertEquals(started.stderr, 0, started.exitCode)
+            assertEquals(0, fixture.logcatInvocations())
+        }
+
+    @Test
     fun shippedSamplerIsPolicyAgnosticAndReadsPrivateSyntheticKeys() = withFixture { fixture ->
         val source = Files.readString(fixture.script)
         assertFalse(source.contains("ro.build."))
         assertFalse(source.contains("ro.vendor."))
+        assertFalse(source.contains("logcat"))
 
         val started = fixture.action("start")
         assertEquals(started.stderr, 0, started.exitCode)
@@ -94,7 +105,7 @@ class PreInstallSentinelScriptTest {
             listOf<(Fixture) -> Unit>(
                 { it.appendToFirstSample("duplicate=1\n") },
                 { it.appendToFirstSample("oversized=${"x".repeat(1_024)}\n") },
-                { it.replaceInFirstSample("trace=", "trace=${"x".repeat(300)}") },
+                { it.replaceInFirstSample("version=", "version=2") },
                 { it.replaceInFirstSample("nonce_sha256=", "nonce_sha256=${"d".repeat(64)}") },
                 { it.replaceInFirstSample("sentinel_id=", "sentinel_id=${"e".repeat(64)}") },
                 { it.replaceInFirstSample("role=", "role=CANDIDATE") },
@@ -155,7 +166,7 @@ class PreInstallSentinelScriptTest {
         }
 
     @Test
-    fun rejectsBootPropertyServiceTraceAndMalformedSampleDrift() {
+    fun rejectsBootPropertyServiceForbiddenAndMalformedSampleDrift() {
         val mutations =
             listOf<(Fixture) -> Unit>(
                 { it.replaceInFirstSample("boot_sha256=", "boot_sha256=${"d".repeat(64)}") },
@@ -163,7 +174,6 @@ class PreInstallSentinelScriptTest {
                     it.replaceInFirstSample("property_sha256=", "property_sha256=${"e".repeat(64)}")
                 },
                 { it.replaceInFirstSample("keystore2=", "keystore2=7:9:${"f".repeat(64)}") },
-                { it.replaceInFirstSample("trace=", "trace=FORBIDDEN") },
                 { it.replaceInFirstSample("forbidden_pids=", "forbidden_pids=7") },
                 { it.appendToFirstSample("unexpected=true\n") },
             )
@@ -240,7 +250,10 @@ class PreInstallSentinelScriptTest {
                 "getprop",
                 "#!/bin/sh\nprintf '%s\\n' \"${'$'}1\" >> \"${propertyTrace}\"\nprintf 'stable-value\\n'\n",
             )
-            executable("logcat", "#!/bin/sh\nexit 0\n")
+            executable(
+                "logcat",
+                "#!/bin/sh\nprintf 'invoked\\n' >> '${root.resolve("logcat-invocations")}'\nwhile sleep 1; do :; done\n",
+            )
             Files.writeString(privateProperties, "synthetic.alpha\nsynthetic.beta\n")
             Files.setPosixFilePermissions(
                 privateProperties,
@@ -248,7 +261,7 @@ class PreInstallSentinelScriptTest {
             )
         }
 
-        fun action(action: String): Result {
+        fun action(action: String, timeoutMillis: Long = 5_000): Result {
             val process =
                 ProcessBuilder(
                         "sh",
@@ -278,9 +291,19 @@ class PreInstallSentinelScriptTest {
                         environment()["RKA_SENTINEL_STATE_ROOT"] = state.toString()
                     }
                     .start()
+            if (!process.waitFor(timeoutMillis, TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly()
+                process.waitFor()
+                return Result(124, "", "SAMPLER_TIMEOUT")
+            }
             val stdout = process.inputStream.bufferedReader().readText()
             val stderr = process.errorStream.bufferedReader().readText()
-            return Result(process.waitFor(), stdout, stderr)
+            return Result(process.exitValue(), stdout, stderr)
+        }
+
+        fun logcatInvocations(): Int {
+            val path = root.resolve("logcat-invocations")
+            return if (Files.exists(path)) Files.readAllLines(path).size else 0
         }
 
         fun sampleCount(): Int = Files.readString(sentinel.resolve("count")).trim().toInt()
@@ -357,7 +380,7 @@ class PreInstallSentinelScriptTest {
         }
 
         fun addPartialFrame() {
-            Files.writeString(sentinel.resolve("samples/.sample-partial.tmp"), "version=2\n")
+            Files.writeString(sentinel.resolve("samples/.sample-partial.tmp"), "version=3\n")
         }
 
         fun replaceFirstFrameWithSymlink() {

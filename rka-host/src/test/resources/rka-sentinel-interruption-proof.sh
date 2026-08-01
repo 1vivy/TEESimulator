@@ -45,7 +45,8 @@ printf 'stable-synthetic-value\n'
 EOF
 cat > "$fixture/device-tools/logcat" <<'EOF'
 #!/bin/sh
-exit 0
+printf 'invoked\n' >> "$RKA_INTERRUPT_ROOT/control/logcat-invocations"
+while sleep 1; do :; done
 EOF
 chmod 700 "$fixture/device-tools"/*
 
@@ -248,6 +249,7 @@ run_host sentinel stop --baseline "$baseline" >/dev/null
 [ ! -e "$baseline" ]
 [ ! -e "$fixture/devices/SYNTH_DONOR/sentinel" ]
 [ ! -e "$fixture/devices/SYNTH_CANDIDATE/sentinel" ]
+[ ! -e "$fixture/control/logcat-invocations" ]
 [ ! -e "$baseline" ]
 [ ! -e "$fixture/devices/SYNTH_DONOR/sentinel" ]
 [ ! -e "$fixture/devices/SYNTH_CANDIDATE/sentinel" ]
@@ -258,4 +260,5 @@ printf 'interruption_statuses=%s,%s\n' "$status_transition" "$status_installed"
 printf 'sample_counts_donor=%s,%s,%s,%s\n' "$initial_donor" "$count_transition_donor" "$count_installed_donor" "$final_donor"
 printf 'sample_counts_candidate=%s,%s,%s,%s\n' "$initial_candidate" "$count_transition_candidate" "$count_installed_candidate" "$final_candidate"
 printf 'maximum_gap_ms=%s,%s\n' "$max_gap_donor" "$max_gap_candidate"
+printf 'logcat_invocations=0\n'
 printf 'same_lifecycle=true\nlock_reacquired_each=true\npartial_transition_not_installed=true\nstale_success_rejected=true\nsequence_advanced_each=true\ninstalled_resume=true\ncleanup_idempotent=true\nresult=PASS\n'

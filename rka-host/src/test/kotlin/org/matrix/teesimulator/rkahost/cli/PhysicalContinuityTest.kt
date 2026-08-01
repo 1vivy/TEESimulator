@@ -5,7 +5,9 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PhysicalContinuityTest {
@@ -68,6 +70,80 @@ class PhysicalContinuityTest {
     }
 
     @Test
+    fun baselineAndFinalReceiptBindSharedCleanCommandTracePolicy() {
+        val baseline =
+            SentinelBaseline("sentinel", "nonce", binding, "donor-boot", "candidate-boot", 100, 100)
+        val manifest = validManifest(baseline)
+
+        assertTrue(baseline.canonical().contains("\"command_trace_policy_sha256\":"))
+        assertTrue(manifest.contains("\"command_trace_policy_sha256\":"))
+        assertTrue(manifest.contains("\"command_trace_verdict\":\"CLEAN\""))
+        assertFalse(manifest.contains("contains_reboot"))
+    }
+
+    @Test
+    fun finalReceiptRejectsMissingMalformedTruncatedReplayAndCrossPairTraceState() {
+        val baseline =
+            SentinelBaseline("sentinel", "nonce", binding, "donor-boot", "candidate-boot", 100, 100)
+        val manifest = validManifest(baseline)
+        val corruptions =
+            listOf(
+                manifest.replace(Regex("\"command_trace_b64\":\"[^\"]+\","), ""),
+                manifest.replace(
+                    Regex("\"command_trace_b64\":\"[^\"]+\""),
+                    "\"command_trace_b64\":\"*\"",
+                ),
+                manifest.replace(Regex("(\"command_trace_b64\":\"[^\"]{4})[^\"]+\""), "$1\""),
+                manifest.replace("\"nonce\":\"nonce\"", "\"nonce\":\"replayed\""),
+                manifest.replace(binding.pairHash, "e".repeat(64)),
+            )
+
+        corruptions.forEach { corrupted ->
+            assertThrows(HostCliException::class.java) {
+                PhysicalReceipt.verify(
+                    corrupted,
+                    baseline,
+                    binding,
+                    "a".repeat(40),
+                    "b".repeat(64),
+                    "nonce",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun signedCommandTraceRejectsCasePathQuotedSplitAndShellVariants() {
+        val baseline =
+            SentinelBaseline("sentinel", "nonce", binding, "donor-boot", "candidate-boot", 100, 100)
+        val variants =
+            listOf(
+                listOf("adb", "-s", "DONOR_A", "shell", "ReBoOt"),
+                listOf("adb", "-s", "DONOR_A", "shell", "/system/bin/reboot"),
+                listOf("adb", "-s", "DONOR_A", "shell", "'reboot'"),
+                listOf("adb", "-s", "DONOR_A", "shell", "re", "boot"),
+                listOf("adb", "-s", "DONOR_A", "shell", "r", "e", "boot"),
+                listOf("adb", "-s", "DONOR_A", "shell", "sh", "-c", "re boot"),
+                listOf("adb", "-s", "DONOR_A", "shell", "stop", "keystore2"),
+            )
+
+        variants.forEach { forbidden ->
+            assertThrows(HostCliException::class.java) {
+                PhysicalReceipt.create(
+                    baseline,
+                    "donor-boot",
+                    "candidate-boot",
+                    200,
+                    200,
+                    "a".repeat(40),
+                    "b".repeat(64),
+                    listOf(forbidden),
+                )
+            }
+        }
+    }
+
+    @Test
     fun baselineStoreRejectsSymlinkAndUsesPrivateMode() {
         val root = Files.createTempDirectory("baseline-store-")
         val target = Files.writeString(root.resolve("target"), "x")
@@ -107,4 +183,16 @@ class PhysicalContinuityTest {
         assertEquals(1, values.count { it == "CREATED" })
         assertEquals(1, values.count { it == "BASELINE_ALREADY_EXISTS" })
     }
+
+    private fun validManifest(baseline: SentinelBaseline): String =
+        PhysicalReceipt.create(
+            baseline,
+            "donor-boot",
+            "candidate-boot",
+            200,
+            200,
+            "a".repeat(40),
+            "b".repeat(64),
+            listOf(listOf("adb", "-s", "DONOR_A", "shell", "cat", "/proc/uptime")),
+        )
 }

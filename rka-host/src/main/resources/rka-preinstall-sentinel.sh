@@ -165,7 +165,7 @@ take_sample_locked() {
     boot_hash=$(cat /proc/sys/kernel/random/boot_id | tr -d '\n' | sha256sum | awk '{print $1}') || return 1
     uptime_ms=$(awk '{printf "%d", $1 * 1000}' /proc/uptime) || return 1
     case $uptime_ms in ''|*[!0-9]*) return 1 ;; esac
-    started_uptime=$(sed -n '7s/^started_uptime_ms=//p' "$sentinel/metadata") || return 1
+    started_uptime=$(sed -n '6s/^started_uptime_ms=//p' "$sentinel/metadata") || return 1
     case $started_uptime in ''|*[!0-9]*) return 1 ;; esac
     if [ $((uptime_ms - started_uptime)) -gt $((max_duration_seconds * 1000)) ]; then
         publish_terminal SENTINEL_DURATION_LIMIT || return 1
@@ -179,17 +179,10 @@ take_sample_locked() {
     runtime=$(runtime_phase) || return 1
     phase=${runtime%%|*}
     runtime_hash=${runtime#*|}
-    trace=CLEAN
-    started_epoch=$(sed -n '6s/^started_epoch=//p' "$sentinel/metadata") || return 1
-    if logcat -b all -v epoch -d 2>/dev/null |
-        awk -v started="$started_epoch" '$1 + 0 >= started' |
-        grep -Eiq 'sys[.]powerctl|reboot|Restarting.*(keystore2|rkpd)'; then
-        trace=FORBIDDEN
-    fi
     temporary=$sentinel/samples/.sample-$next.tmp
     [ ! -e "$temporary" ] && [ ! -L "$temporary" ] || return 1
     {
-        printf 'version=2\n'
+        printf 'version=3\n'
         printf 'sentinel_id=%s\n' "$sentinel_id"
         printf 'nonce_sha256=%s\n' "$nonce_hash"
         printf 'role=%s\n' "$role"
@@ -202,7 +195,6 @@ take_sample_locked() {
         printf 'forbidden_pids=NONE\n'
         printf 'property_sha256=%s\n' "$properties"
         printf 'runtime_sha256=%s\n' "$runtime_hash"
-        printf 'trace=%s\n' "$trace"
         printf 'complete=1\n'
     } > "$temporary"
     bounded_text_file "$temporary" "$max_frame_bytes" || return 1
@@ -228,21 +220,20 @@ take_sample() {
 
 validate_metadata() {
     metadata=$sentinel/metadata
-    bounded_text_file "$metadata" 2048 && [ "$(wc -l < "$metadata")" -eq 13 ] || return 1
-    [ "$(sed -n '1p' "$metadata")" = version=2 ] || return 1
+    bounded_text_file "$metadata" 2048 && [ "$(wc -l < "$metadata")" -eq 12 ] || return 1
+    [ "$(sed -n '1p' "$metadata")" = version=3 ] || return 1
     [ "$(sed -n '2s/^sentinel_id=//p' "$metadata")" = "$sentinel_id" ] || return 1
     [ "$(sed -n '3s/^nonce_sha256=//p' "$metadata")" = "$nonce_hash" ] || return 1
     [ "$(sed -n '4s/^role=//p' "$metadata")" = "$role" ] || return 1
     [ "$(sed -n '5s/^sampler_sha256=//p' "$metadata")" = "$sampler_hash" ] || return 1
-    started_epoch=$(sed -n '6s/^started_epoch=//p' "$metadata")
-    started_uptime=$(sed -n '7s/^started_uptime_ms=//p' "$metadata")
-    case $started_epoch:$started_uptime in *[!0-9:]*) return 1 ;; esac
-    [ "$(sed -n '8s/^max_samples=//p' "$metadata")" = "$max_samples" ] || return 1
-    [ "$(sed -n '9s/^max_duration_seconds=//p' "$metadata")" = "$max_duration_seconds" ] || return 1
-    [ "$(sed -n '10s/^max_frame_bytes=//p' "$metadata")" = "$max_frame_bytes" ] || return 1
-    [ "$(sed -n '11s/^max_total_bytes=//p' "$metadata")" = "$max_total_bytes" ] || return 1
-    [ "$(sed -n '12s/^max_state_files=//p' "$metadata")" = "$max_state_files" ] || return 1
-    [ "$(sed -n '13s/^max_field_bytes=//p' "$metadata")" = "$max_field_bytes" ] || return 1
+    started_uptime=$(sed -n '6s/^started_uptime_ms=//p' "$metadata")
+    case $started_uptime in ''|*[!0-9]*) return 1 ;; esac
+    [ "$(sed -n '7s/^max_samples=//p' "$metadata")" = "$max_samples" ] || return 1
+    [ "$(sed -n '8s/^max_duration_seconds=//p' "$metadata")" = "$max_duration_seconds" ] || return 1
+    [ "$(sed -n '9s/^max_frame_bytes=//p' "$metadata")" = "$max_frame_bytes" ] || return 1
+    [ "$(sed -n '10s/^max_total_bytes=//p' "$metadata")" = "$max_total_bytes" ] || return 1
+    [ "$(sed -n '11s/^max_state_files=//p' "$metadata")" = "$max_state_files" ] || return 1
+    [ "$(sed -n '12s/^max_field_bytes=//p' "$metadata")" = "$max_field_bytes" ] || return 1
 }
 
 validate_samples_locked() {
@@ -275,8 +266,8 @@ validate_samples_locked() {
     sequence=1
     while [ "$sequence" -le "$count" ]; do
         sample=$sentinel/samples/$sequence
-        bounded_text_file "$sample" "$max_frame_bytes" && [ "$(wc -l < "$sample")" -eq 15 ] || return 1
-        [ "$(sed -n '1p' "$sample")" = version=2 ] || return 1
+        bounded_text_file "$sample" "$max_frame_bytes" && [ "$(wc -l < "$sample")" -eq 14 ] || return 1
+        [ "$(sed -n '1p' "$sample")" = version=3 ] || return 1
         [ "$(sed -n '2s/^sentinel_id=//p' "$sample")" = "$sentinel_id" ] || return 1
         [ "$(sed -n '3s/^nonce_sha256=//p' "$sample")" = "$nonce_hash" ] || return 1
         [ "$(sed -n '4s/^role=//p' "$sample")" = "$role" ] || return 1
@@ -289,8 +280,7 @@ validate_samples_locked() {
         forbidden_value=$(sed -n '11s/^forbidden_pids=//p' "$sample")
         property=$(sed -n '12s/^property_sha256=//p' "$sample")
         runtime_hash=$(sed -n '13s/^runtime_sha256=//p' "$sample")
-        trace=$(sed -n '14s/^trace=//p' "$sample")
-        [ "$(sed -n '15s/^complete=//p' "$sample")" = 1 ] || return 1
+        [ "$(sed -n '14s/^complete=//p' "$sample")" = 1 ] || return 1
         case $boot in *[!0-9a-f]*|'') return 1 ;; esac
         [ "$(printf %s "$boot" | wc -c)" -eq 64 ] || return 1
         [ "$forbidden_value" = NONE ] || return 1
@@ -298,7 +288,6 @@ validate_samples_locked() {
         case $keystore:$rkpd_value in *[!A-Z0-9a-f:]*|:) return 1 ;; esac
         case $property in NONE) [ "$role" = CANDIDATE ] || return 1 ;; *[!0-9a-f]*|'') return 1 ;; esac
         case $runtime_hash in ABSENT) ;; *[!0-9a-f]*|'') return 1 ;; esac
-        [ "$trace" = CLEAN ] || return 1
         case $phase in PRE_INSTALL) [ "$previous_phase" = PRE_INSTALL ] || return 1 ;; STAGED) [ "$previous_phase" != INSTALLED ] || return 1 ;; INSTALLED) installed_seen=true ;; *) return 1 ;; esac
         if [ -z "$baseline_boot" ]; then
             baseline_boot=$boot
@@ -399,12 +388,11 @@ case $action in
         exec 3<&-
         started_uptime=$(awk '{printf "%d", $1 * 1000}' /proc/uptime) || exit 1
         {
-            printf 'version=2\n'
+            printf 'version=3\n'
             printf 'sentinel_id=%s\n' "$sentinel_id"
             printf 'nonce_sha256=%s\n' "$nonce_hash"
             printf 'role=%s\n' "$role"
             printf 'sampler_sha256=%s\n' "$sampler_hash"
-            printf 'started_epoch=%s\n' "$(date +%s)"
             printf 'started_uptime_ms=%s\n' "$started_uptime"
             printf 'max_samples=%s\n' "$max_samples"
             printf 'max_duration_seconds=%s\n' "$max_duration_seconds"

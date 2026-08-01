@@ -65,6 +65,22 @@ class CommandReceiptTest {
     }
 
     @Test
+    fun rejectsMisleadingCleanTextWhenReadOnlyCommandExitsNonzero() {
+        val runner = RecordingRunner(CommandResult(1, "clean"))
+
+        val failure =
+            assertThrows(CommandRejected::class.java) {
+                AdbCommandPolicy(runner)
+                    .execute(
+                        listOf("adb", "-s", "serial-A", "shell", "getprop", "ro.build.fingerprint")
+                    )
+            }
+
+        assertEquals("ADB_COMMAND_FAILED", failure.message)
+        assertEquals(1, runner.calls)
+    }
+
+    @Test
     fun receipts_reject_nonce_binding_signature_and_chain_attacks() {
         // Given: a deterministic signer and a sentinel-derived canonical signed receipt.
         val signer = ReceiptTestKeys.signer
@@ -234,12 +250,13 @@ class CommandReceiptTest {
         )
     }
 
-    private class RecordingRunner : LiteralCommandRunner {
+    private class RecordingRunner(private val result: CommandResult = CommandResult(0, "ok")) :
+        LiteralCommandRunner {
         var calls = 0
 
         override fun run(argv: List<String>): CommandResult {
             calls += 1
-            return CommandResult(0, "ok")
+            return result
         }
     }
 }

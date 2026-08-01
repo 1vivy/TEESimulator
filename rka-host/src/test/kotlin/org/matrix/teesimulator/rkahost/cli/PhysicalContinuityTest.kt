@@ -217,6 +217,17 @@ class PhysicalContinuityTest {
                 HostCommandResult(0, "", "")
             }
         }
+        journal.beginStopping(
+            SentinelSample(
+                tracedBaseline.sentinelId,
+                "donor-boot",
+                "candidate-boot",
+                200,
+                200,
+                SentinelPhase.ROOT_AUTHORITATIVE,
+            )
+        )
+        journal.seal()
         return Fixture(path, tracedBaseline, journal.snapshotForReceipt(), journal)
     }
 

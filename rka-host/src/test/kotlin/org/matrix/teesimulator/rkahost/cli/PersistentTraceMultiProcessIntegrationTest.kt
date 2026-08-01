@@ -4,6 +4,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.Base64
+import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -11,14 +12,15 @@ import org.junit.Test
 
 class PersistentTraceMultiProcessIntegrationTest {
     @Test
-    fun standardWrapperDeployAdapterAndLaterHostProcessShareCompleteTrace() {
+    fun separateInstalledCliProcessesContendOnFilesystemLock() {
         val project = Path.of(System.getProperty("user.dir")).parent
-        val runtime = Files.createTempDirectory("trace-multiprocess-")
+        val installed = project.resolve("rka-host/build/install/rka-host/bin/rka-host")
+        assertTrue("installDist launcher missing", Files.isExecutable(installed))
+        val runtime = Files.createTempDirectory("trace-cross-process-")
         Files.setPosixFilePermissions(runtime, PosixFilePermissions.fromString("rwx------"))
         val donor = "DONOR_SERIAL"
         val candidate = "CANDIDATE_SERIAL"
-        val profile = "d".repeat(64)
-        val pair = pair(runtime, donor, candidate, profile)
+        val pair = pair(runtime, donor, candidate)
         val binding = PairBinding.from(pair)
         val baselinePath = runtime.resolve("baseline.json")
         val journal = PersistentAdbTrace.create(baselinePath, binding, "sentinel", "nonce")
@@ -38,91 +40,74 @@ class PersistentTraceMultiProcessIntegrationTest {
             )
         BaselineStore.create(baselinePath, baseline)
         TraceContextStore.write(runtime, baselinePath, baseline)
-        val tools = runtime.resolve("tools")
-        Files.createDirectory(tools)
-        val host = executable(tools.resolve("rka-host"), hostLauncher())
-        val fakeAdbScript =
-            "#!/bin/sh\nprintf '%s\\n' \"\$*\" >> \"\$RKA_FAKE_ADB_LOG\"\ncase \"\$*\" in *controlled-failure*) exit 19 ;; esac\n"
-        val fakeAdb = executable(tools.resolve("fake-adb"), fakeAdbScript)
-        executable(tools.resolve("adb"), fakeAdbScript)
-        val deploy =
-            executable(
-                runtime.resolve("rka-deploy.sh"),
-                "#!/bin/sh\nset -eu\n\"\$RKA_DEPLOY_ADB\" -s '$donor' shell getprop ro.build.version.release\n\"\$RKA_DEPLOY_ADB\" -s '$candidate' shell getprop controlled-failure || :\n",
-            )
-        val log = runtime.resolve("adb.log")
-        val environment =
-            mapOf(
-                "PATH" to "$tools:${System.getenv("PATH")}",
-                "RKA_DEPLOY_ADB" to fakeAdb.toString(),
-                "RKA_FAKE_ADB_LOG" to log.toString(),
-            )
-        val deployResult = wrapper(project, runtime, deploy.toString(), environment)
-        assertEquals(deployResult.stderr, 0, deployResult.exitCode)
-        val later =
-            wrapper(
-                project,
+        val tools = Files.createDirectory(runtime.resolve("tools"))
+        val fakeAdb = tools.resolve("adb")
+        Files.writeString(fakeAdb, "#!/bin/sh\nsleep 0.2\nprintf '%s\\n' \"${'$'}*\"\n")
+        Files.setPosixFilePermissions(fakeAdb, PosixFilePermissions.fromString("rwx------"))
+        val environment = mapOf("PATH" to "$tools:${System.getenv("PATH")}")
+
+        val first =
+            startInstalled(
                 runtime,
-                host.toString(),
+                installed,
                 environment,
                 "trace-adb",
                 "-s",
                 donor,
                 "shell",
-                "cat",
-                "/proc/uptime",
+                "getprop",
+                "property.one",
             )
-        assertEquals(later.stderr, 0, later.exitCode)
-        val completed = PersistentAdbTrace.open(baselinePath, baseline).snapshotForReceipt()
-        val receipt =
-            PhysicalReceipt.create(
-                baseline,
-                "donor-boot",
-                "candidate-boot",
-                2,
-                2,
-                "a".repeat(40),
-                "b".repeat(64),
-                completed,
+        val second =
+            startInstalled(
+                runtime,
+                installed,
+                environment,
+                "trace-adb",
+                "-s",
+                candidate,
+                "shell",
+                "getprop",
+                "property.two",
             )
+        first.outputStream.close()
+        second.outputStream.close()
 
-        assertEquals(6, completed.binding.eventCount)
-        assertTrue(completed.canonical.toString(Charsets.UTF_8).contains("EXIT_NONZERO|19|"))
+        assertTrue(first.waitFor(10, TimeUnit.SECONDS))
+        assertTrue(second.waitFor(10, TimeUnit.SECONDS))
+        assertEquals(first.errorStream.bufferedReader().readText(), 0, first.exitValue())
+        assertEquals(second.errorStream.bufferedReader().readText(), 0, second.exitValue())
+        val completed = PersistentAdbTrace.open(baselinePath, baseline).validateClean()
+        val lines =
+            completed.canonical
+                .toString(Charsets.UTF_8)
+                .lineSequence()
+                .drop(1)
+                .filter(String::isNotEmpty)
+                .toList()
+
+        assertEquals(4, completed.binding.eventCount)
+        assertEquals(listOf("1", "2", "3", "4"), lines.map { it.substringBefore('|') })
+        assertEquals(2, lines.count { "|START|" in it })
+        assertEquals(2, lines.count { "|EXIT_OK|0|" in it })
         assertFalse(completed.canonical.toString(Charsets.UTF_8).contains(donor))
-        assertTrue(receipt.contains("\"command_trace_event_count\":6"))
-        println(
-            "TRACE_EVENT_COUNT=${completed.binding.eventCount} TRACE_HEAD=${completed.binding.headSha256} " +
-                "VERDICT=${completed.verdict} CONTROLLED_NONZERO=true RAW_SERIAL_PRESENT=false RECEIPT_VERIFIED=true"
-        )
-        assertEquals(
-            "b".repeat(64),
-            PhysicalReceipt.verify(
-                receipt,
-                baselinePath,
-                baseline,
-                binding,
-                "a".repeat(40),
-                "b".repeat(64),
-                "nonce",
-            ),
-        )
+        assertFalse(completed.canonical.toString(Charsets.UTF_8).contains(candidate))
     }
 
-    private fun pair(
-        runtime: Path,
-        donor: String,
-        candidate: String,
-        profile: String,
-    ): DevicePairSnapshot {
+    private fun pair(runtime: Path, donor: String, candidate: String): DevicePairSnapshot {
         val snapshot =
-            DevicePairSnapshot(BoundSerial.parse(donor), BoundSerial.parse(candidate), profile)
+            DevicePairSnapshot(
+                BoundSerial.parse(donor),
+                BoundSerial.parse(candidate),
+                "d".repeat(64),
+            )
         val donorB64 = Base64.getUrlEncoder().withoutPadding().encodeToString(donor.toByteArray())
         val candidateB64 =
             Base64.getUrlEncoder().withoutPadding().encodeToString(candidate.toByteArray())
         Files.writeString(runtime.resolve("device-pair.json"), snapshot.canonical())
         Files.writeString(
             runtime.resolve("device-pair.env"),
-            "RKA_DEVICE_PAIR_VERSION=1\nRKA_DONOR_SERIAL_B64=$donorB64\nRKA_CANDIDATE_SERIAL_B64=$candidateB64\nRKA_PROFILE_SHA256=$profile\n",
+            "RKA_DEVICE_PAIR_VERSION=1\nRKA_DONOR_SERIAL_B64=$donorB64\nRKA_CANDIDATE_SERIAL_B64=$candidateB64\nRKA_PROFILE_SHA256=${"d".repeat(64)}\n",
         )
         Files.writeString(runtime.resolve("device-pair.lock"), "")
         listOf("device-pair.json", "device-pair.env", "device-pair.lock").forEach {
@@ -134,39 +119,41 @@ class PersistentTraceMultiProcessIntegrationTest {
         return snapshot
     }
 
-    private fun wrapper(
-        project: Path,
+    private fun startInstalled(
         runtime: Path,
-        command: String,
+        installed: Path,
         environment: Map<String, String>,
         vararg arguments: String,
-    ): HostCommandResult {
-        val process =
-            ProcessBuilder(
-                    listOf(
-                        project.resolve("scripts/rka-with-device-pair.sh").toString(),
-                        "--pair",
-                        runtime.resolve("device-pair.json").toString(),
-                        "--",
-                        command,
-                    ) + arguments
-                )
-                .apply { environment().putAll(environment) }
-                .start()
-        val stdout = process.inputStream.bufferedReader().readText()
-        val stderr = process.errorStream.bufferedReader().readText()
-        return HostCommandResult(process.waitFor(), stdout, stderr)
-    }
+    ): Process =
+        ProcessBuilder(
+                listOf(
+                    "python3",
+                    "-c",
+                    INSTALLED_LAUNCHER,
+                    installed.toString(),
+                    runtime.resolve("device-pair.json").toString(),
+                ) + arguments
+            )
+            .apply {
+                environment().putAll(environment)
+                environment()["RKA_RUNTIME_DIR"] = runtime.toString()
+                environment()["RKA_DEVICE_PAIR_FD"] = "3"
+            }
+            .start()
 
-    private fun hostLauncher(): String {
-        val java = Path.of(System.getProperty("java.home"), "bin", "java")
-        val classpath = System.getProperty("java.class.path")
-        return "#!/bin/sh\nexec '$java' --enable-native-access=ALL-UNNAMED -cp '$classpath' ${HostCli::class.java.name} \"\$@\"\n"
-    }
-
-    private fun executable(path: Path, value: String): Path {
-        Files.writeString(path, value)
-        Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwx------"))
-        return path
+    private companion object {
+        val INSTALLED_LAUNCHER =
+            """
+            import fcntl, json, os, sys
+            host, pair_path, *args = sys.argv[1:]
+            raw = open(pair_path, "rb").read()
+            fd = os.memfd_create("rka-device-pair", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+            os.write(fd, raw)
+            fcntl.fcntl(fd, fcntl.F_ADD_SEALS, 15)
+            readonly = os.open(f"/proc/self/fd/{fd}", os.O_RDONLY)
+            os.dup2(readonly, 3, inheritable=True)
+            os.execve(host, [host] + args, os.environ)
+            """
+                .trimIndent()
     }
 }

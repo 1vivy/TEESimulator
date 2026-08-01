@@ -1,6 +1,5 @@
 package org.matrix.teesimulator.rkahost.cli
 
-import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -10,9 +9,10 @@ import java.nio.file.attribute.PosixFilePermission
 
 object BaselineStore {
     private val fileMode = setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)
+    private val creationLock = Any()
 
     fun create(path: Path, baseline: SentinelBaseline) {
-        writeExclusive(path, baseline)
+        synchronized(creationLock) { writeExclusive(path, baseline) }
     }
 
     fun requireReadyAbsent(path: Path) {
@@ -32,13 +32,10 @@ object BaselineStore {
 
     fun commitPending(path: Path, baseline: SentinelBaseline) {
         if (readPending(path) != baseline) throw HostCliException("BASELINE_PENDING_INVALID")
-        try {
-            Files.createLink(path, pending(path))
-        } catch (_: java.nio.file.FileAlreadyExistsException) {
+        if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
             throw HostCliException("BASELINE_ALREADY_EXISTS")
         }
-        Files.delete(pending(path))
-        fsyncParent(path)
+        TraceIo.atomicMove(pending(path), path, false)
     }
 
     fun abortPending(path: Path) {
@@ -66,48 +63,34 @@ object BaselineStore {
     }
 
     private fun writeExclusive(path: Path, baseline: SentinelBaseline) {
-        val parent = safeParent(path)
+        safeParent(path)
         if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(path)) {
             throw HostCliException(
                 if (Files.isSymbolicLink(path)) "BASELINE_PATH_UNSAFE"
                 else "BASELINE_ALREADY_EXISTS"
             )
         }
-        val temporary = Files.createTempFile(parent, ".baseline-", ".tmp")
         try {
-            Files.setPosixFilePermissions(temporary, fileMode)
-            FileChannel.open(temporary, StandardOpenOption.WRITE).use {
-                it.write(ByteBuffer.wrap(baseline.canonical().toByteArray()))
-                it.force(true)
-            }
-            try {
-                Files.createLink(path, temporary)
-            } catch (_: java.nio.file.FileAlreadyExistsException) {
+            TraceIo.atomicWrite(path, baseline.canonical().toByteArray(), false)
+        } catch (failure: HostCliException) {
+            if (failure.message == "COMMAND_TRACE_EXISTS") {
                 throw HostCliException("BASELINE_ALREADY_EXISTS")
             }
-            fsyncParent(path)
-        } finally {
-            Files.deleteIfExists(temporary)
+            throw failure
         }
     }
 
     private fun readPrivate(path: Path): SentinelBaseline {
-        if (
-            Files.isSymbolicLink(path) ||
-                !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) ||
-                Files.getPosixFilePermissions(path) != fileMode
-        ) {
-            throw HostCliException("BASELINE_PATH_UNSAFE")
-        }
+        TraceIo.requirePrivate(path, "BASELINE_PATH_UNSAFE")
         return SentinelBaseline.parse(Files.readString(path))
     }
 
     private fun safeParent(path: Path): Path {
-        val parent = path.toAbsolutePath().parent ?: throw HostCliException("BASELINE_PATH_UNSAFE")
-        if (Files.isSymbolicLink(parent) || !Files.isDirectory(parent, LinkOption.NOFOLLOW_LINKS)) {
+        return try {
+            TraceIo.requireOwnedDirectory(path)
+        } catch (_: HostCliException) {
             throw HostCliException("BASELINE_PATH_UNSAFE")
         }
-        return parent
     }
 
     private fun pending(path: Path): Path = path.resolveSibling(".${path.fileName}.pending")

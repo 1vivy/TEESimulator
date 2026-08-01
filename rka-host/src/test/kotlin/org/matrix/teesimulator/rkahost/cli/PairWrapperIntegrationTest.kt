@@ -12,6 +12,81 @@ import org.junit.Test
 
 class PairWrapperIntegrationTest {
     @Test
+    fun modifiedStandardDeploySourceIsRejectedBeforeExecutionWhenTraceIsActive() {
+        withFixture { root ->
+            Files.writeString(root.resolve("active-adb-trace-v1"), "active\n")
+            Files.setPosixFilePermissions(
+                root.resolve("active-adb-trace-v1"),
+                PosixFilePermissions.fromString("rw-------"),
+            )
+            val tools = Files.createDirectory(root.resolve("tools"))
+            val fakeHost = tools.resolve("rka-host")
+            Files.writeString(fakeHost, "#!/bin/sh\nexit 0\n")
+            Files.setPosixFilePermissions(fakeHost, PosixFilePermissions.fromString("rwx------"))
+            val mutation = root.resolve("rka-deploy.sh")
+            val marker = root.resolve("mutated-deploy-ran")
+            Files.writeString(mutation, "#!/bin/sh\nprintf ran > '$marker'\n")
+            Files.setPosixFilePermissions(mutation, PosixFilePermissions.fromString("rwx------"))
+
+            val result =
+                runWrapper(
+                    root,
+                    listOf(mutation.toString()),
+                    mapOf("PATH" to "$tools:${System.getenv("PATH")}"),
+                )
+
+            assertEquals(2, result.exitCode)
+            assertTrue(result.stderr.contains("RESULT=DEPLOY_SOURCE_MISMATCH"))
+            assertFalse(Files.exists(marker))
+        }
+    }
+
+    @Test
+    fun absoluteAlternateBasenameMasqueradeAndAdapterUnsetChildrenAreRejected() {
+        withFixture { root ->
+            Files.writeString(root.resolve("active-adb-trace-v1"), "active\n")
+            Files.setPosixFilePermissions(
+                root.resolve("active-adb-trace-v1"),
+                PosixFilePermissions.fromString("rw-------"),
+            )
+            val tools = Files.createDirectory(root.resolve("tools"))
+            val fakeHost = tools.resolve("rka-host")
+            Files.writeString(fakeHost, "#!/bin/sh\nexit 0\n")
+            Files.setPosixFilePermissions(fakeHost, PosixFilePermissions.fromString("rwx------"))
+            val alternate = root.resolve("alternate.sh")
+            val masquerade = root.resolve("rka-deploy.sh")
+            listOf(alternate, masquerade).forEach {
+                Files.writeString(it, "#!/bin/sh\nexit 0\n")
+                Files.setPosixFilePermissions(it, PosixFilePermissions.fromString("rwx------"))
+            }
+            val environment = mapOf("PATH" to "$tools:${System.getenv("PATH")}")
+
+            val absolute = runWrapper(root, listOf("/bin/true"), environment)
+            val alternateResult = runWrapper(root, listOf(alternate.toString()), environment)
+            val masqueradeResult = runWrapper(root, listOf(masquerade.toString()), environment)
+            val adapterUnset =
+                runWrapper(
+                    root,
+                    listOf(
+                        "/usr/bin/env",
+                        "-u",
+                        "RKA_DEPLOY_ADB",
+                        Path.of(System.getProperty("user.dir"))
+                            .parent
+                            .resolve("scripts/rka-deploy.sh")
+                            .toString(),
+                    ),
+                    environment,
+                )
+
+            assertTrue(absolute.stderr.contains("RESULT=TRACE_CHILD_UNAUTHORIZED"))
+            assertTrue(alternateResult.stderr.contains("RESULT=TRACE_CHILD_UNAUTHORIZED"))
+            assertTrue(masqueradeResult.stderr.contains("RESULT=DEPLOY_SOURCE_MISMATCH"))
+            assertTrue(adapterUnset.stderr.contains("RESULT=TRACE_CHILD_UNAUTHORIZED"))
+        }
+    }
+
+    @Test
     fun standardWrapperCanonicalizesLegacyPairAndReachesSentinelWithoutJvmOpening() {
         withFixture { root ->
             val trace = root.resolve("adb.log")

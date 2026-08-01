@@ -23,8 +23,39 @@ if [ "${1-}" = push ]; then
     exit 0
 fi
 
+if [ "${1-}" = shell ] && [ "${2-}" = cat ] && [ "${3-}" = /proc/sys/kernel/random/boot_id ]; then
+    printf 'fixture-%s-boot\n' "$serial"
+    exit 0
+fi
+if [ "${1-}" = shell ] && [ "${2-}" = cat ] && [ "${3-}" = /proc/uptime ]; then
+    mkdir -p "$device"
+    uptime_file="$device/uptime-sample"
+    uptime_sample=12345
+    [ ! -f "$uptime_file" ] || uptime_sample=$(cat "$uptime_file")
+    uptime_sample=$((uptime_sample + 1))
+    printf '%s\n' "$uptime_sample" > "$uptime_file"
+    printf '%s.%02d 1.0\n' "$((uptime_sample / 100))" "$((uptime_sample % 100))"
+    exit 0
+fi
+if [ "${1-}" = shell ] && [ "${2-}" = getprop ] && [ "${3-}" = ro.build.version.release ]; then
+    printf 'MISLEADING_SUCCESS_STDOUT\n'
+    printf 'controlled failure remains visible\n' >&2
+    exit 19
+fi
+
 [[ "$#" -eq 4 && "$1" = shell && "$2" = su && "$3" = 0 && "$4" = sh ]] || exit 92
 wire_payload=$(cat)
+if [[ "$wire_payload" == exec\ 3\<\<* ]]; then
+    fixed=$(printf '%s\n' "$wire_payload" | sed -n '/^set -- /p' | head -1)
+    read -r _ _ action sentinel_id _ <<< "$fixed"
+    phase=ROOT_AUTHORITATIVE
+    samples=2
+    [ "$action" != start ] || samples=1
+    [ "$action" != stop ] || phase=STOPPED
+    printf 'sentinel_id=%s action=%s phase=%s samples=%s\n' "$sentinel_id" "$action" "$phase" "$samples"
+    printf '%s shell su 0 sh %s\n' "$serial" "${fixed#set -- }" >> "$RKA_FAKE_LOG"
+    exit 0
+fi
 payload=${wire_payload#*"<<'RKA_ADB_ROOT_PAYLOAD_7D4C2A91'"$'\n'}
 [[ "$payload" != "$wire_payload" ]] || exit 93
 payload=${payload%%$'\n'RKA_ADB_ROOT_PAYLOAD_7D4C2A91$'\n'*}

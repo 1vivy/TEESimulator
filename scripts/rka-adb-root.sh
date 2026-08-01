@@ -138,11 +138,10 @@ rka_adb_protected_push() (
         return 64
     fi
 
-    local parent
     case "$target" in
-        /data/adb/teesimulator-rka/probes/*.manager-appid) parent=/data/adb/teesimulator-rka/probes ;;
+        /data/adb/teesimulator-rka/probes/*.manager-appid) ;;
         /data/adb/teesimulator-rka/upload/role-neutral-release.zip|\
-        /data/adb/teesimulator-rka/upload/role-neutral-release.zip.source-sha) parent=/data/adb/teesimulator-rka/upload ;;
+        /data/adb/teesimulator-rka/upload/role-neutral-release.zip.source-sha) ;;
         *) printf 'RKA_ADB_PROTECTED_UPLOAD_INVALID\n' >&2; return 64 ;;
     esac
 

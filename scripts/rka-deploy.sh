@@ -73,7 +73,9 @@ raw = os.read(fd, 65537)
 if len(raw) > 65536:
     raise SystemExit(2)
 value = json.loads(raw)
-if set(value) != {"candidate_serial", "donor_serial", "profile_sha256", "schema_version"}:
+legacy_keys = {"candidate_serial", "donor_serial", "profile_sha256", "schema_version"}
+canonical_keys = legacy_keys | {"candidate_serial_sha256", "donor_serial_sha256"}
+if set(value) not in (legacy_keys, canonical_keys):
     raise SystemExit(2)
 if value["schema_version"] != 1 or not re.fullmatch(r"[0-9a-f]{64}", value["profile_sha256"]):
     raise SystemExit(2)
@@ -82,6 +84,15 @@ for name in ("donor_serial", "candidate_serial"):
     if not isinstance(serial, str) or not serial or len(serial) > 255 or "\n" in serial or "\0" in serial:
         raise SystemExit(2)
     print(serial)
+if set(value) == canonical_keys:
+    import hashlib
+    if (
+        value["donor_serial_sha256"]
+        != hashlib.sha256(value["donor_serial"].encode("ascii")).hexdigest()
+        or value["candidate_serial_sha256"]
+        != hashlib.sha256(value["candidate_serial"].encode("ascii")).hexdigest()
+    ):
+        raise SystemExit(2)
 print(value["profile_sha256"])
 PY
 ) || fail PAIR_DESCRIPTOR_INVALID
@@ -113,7 +124,17 @@ done
 
 adb_command="${RKA_DEPLOY_ADB:-adb}"
 if [[ -n "${RKA_RUNTIME_DIR:-}" && -e "$RKA_RUNTIME_DIR/active-adb-trace-v1" ]]; then
-    [[ "${RKA_TRACE_REQUIRED:-}" == 1 && "$adb_command" == */rka-traced-adb.sh ]] ||
+    observed_deploy_path="$(realpath -- "${BASH_SOURCE[0]}")" || fail DEPLOY_SOURCE_UNSAFE
+    observed_deploy_sha="$(sha256sum -- "$observed_deploy_path" | awk '{print $1}')"
+    observed_deploy_path_sha="$(printf %s "$observed_deploy_path" | sha256sum | awk '{print $1}')"
+    [[
+        "${RKA_TRACE_REQUIRED:-}" == 1 &&
+        "$adb_command" == "$project_root/scripts/rka-traced-adb.sh" &&
+        "${RKA_TRACE_DEPLOY_REALPATH:-}" == "$observed_deploy_path" &&
+        "${RKA_TRACE_DEPLOY_SHA256:-}" == "$observed_deploy_sha" &&
+        "${RKA_TRACE_DEPLOY_PATH_SHA256:-}" == "$observed_deploy_path_sha" &&
+        "${RKA_TRACE_SURFACE_SHA256:-}" =~ ^[0-9a-f]{64}$
+    ]] ||
         fail ADB_TRACE_REQUIRED
 fi
 command -v "$adb_command" >/dev/null 2>&1 || [[ -x "$adb_command" ]] || fail ADB_UNAVAILABLE

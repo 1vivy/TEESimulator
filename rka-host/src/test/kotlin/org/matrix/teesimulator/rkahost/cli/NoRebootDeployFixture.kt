@@ -245,6 +245,7 @@ exit 0
         Files.setPosixFilePermissions(adb, PosixFilePermissions.fromString("rwx------"))
         Files.createDirectory(devices)
         Files.createDirectory(tools)
+        Files.createSymbolicLink(tools.resolve("adb"), adb)
         tools.resolve("git").also {
             Files.writeString(it, fixtureGit(sourceSha))
             Files.setPosixFilePermissions(it, PosixFilePermissions.fromString("rwx------"))
@@ -253,6 +254,170 @@ exit 0
 
     fun run(network: String = "direct-auto"): DeployResult =
         execute(network, sealedDescriptor = true, activeMutation = mutation)
+
+    fun runAuthoritativeTraceLifecycle(installedHost: Path): AuthoritativeTraceLifecycleResult {
+        val projectRoot = Path.of(System.getProperty("user.dir")).parent
+        val baseline = root.resolve("physical-baseline.json")
+        val receiptPath = root.resolve("physical-receipt.json")
+        val sourceSha =
+            ProcessBuilder("git", "rev-parse", "HEAD")
+                .directory(projectRoot.toFile())
+                .start()
+                .let { process ->
+                    val value = process.inputStream.bufferedReader().readText().trim()
+                    check(process.waitFor() == 0)
+                    value
+                }
+        fun command(vararg arguments: String): DeployResult {
+            val process =
+                ProcessBuilder(
+                        listOf(
+                            projectRoot.resolve("scripts/rka-with-device-pair.sh").toString(),
+                            "--pair",
+                            pair.toString(),
+                            "--",
+                        ) + arguments
+                    )
+                    .directory(projectRoot.toFile())
+                    .apply {
+                        environment()["RKA_DEPLOY_ADB"] = adb.toString()
+                        environment()["RKA_FAKE_LOG"] = log.toString()
+                        environment()["RKA_FAKE_DEVICE_ROOT"] = devices.toString()
+                        environment()["RKA_FAKE_TLS_ROOT"] = root.resolve("tls").toString()
+                        environment()["RKA_FAKE_KSU_PROFILE"] = kernelProfile.fixtureName
+                        environment()["RKA_FAKE_FIRST_INSTALL"] =
+                            kernelProfile.firstInstall.toString()
+                        environment()["RKA_FAKE_FIRST_INSTALL_PARENTS"] =
+                            kernelProfile.firstInstallParentLayout.fixtureValue
+                        environment()["RKA_FAKE_SYSTEM_OPENSSL"] =
+                            kernelProfile.systemOpenSsl.toString()
+                        environment()["RKA_FAKE_KSU_MODE_MUTATION"] = ""
+                        environment()["RKA_FAKE_PACKAGE_RUNTIME"] = packagedArchive.toString()
+                        environment()["PATH"] =
+                            "${installedHost.parent}:$tools:${environment()["PATH"]}"
+                    }
+                    .start()
+            return DeployResult(
+                process.waitFor(),
+                process.inputStream.bufferedReader().readText(),
+                process.errorStream.bufferedReader().readText(),
+            )
+        }
+
+        return tlsServers.withServers(mutation) {
+            val start =
+                command(
+                    installedHost.toString(),
+                    "sentinel",
+                    "start",
+                    "--baseline",
+                    baseline.toString(),
+                    "--nonce",
+                    "AUTHORITATIVE_NONCE",
+                )
+            val deploy =
+                command(
+                    projectRoot.resolve("scripts/rka-deploy.sh").toString(),
+                    "--pair-fd-env",
+                    "RKA_DEVICE_PAIR_FD",
+                    "--zip",
+                    zip.toString(),
+                    "--network",
+                    "direct-auto",
+                    "--no-reboot",
+                    "--evidence",
+                    evidence.toString(),
+                )
+            val controlled =
+                command(
+                    installedHost.toString(),
+                    "trace-adb",
+                    "-s",
+                    "DONOR_A",
+                    "shell",
+                    "getprop",
+                    "ro.build.version.release",
+                )
+            val stop =
+                command(
+                    installedHost.toString(),
+                    "sentinel",
+                    "stop",
+                    "--baseline",
+                    baseline.toString(),
+                )
+            val writeReceipt =
+                command(
+                    installedHost.toString(),
+                    "evidence",
+                    "manifest",
+                    "--baseline",
+                    baseline.toString(),
+                    "--artifact",
+                    zip.toString(),
+                    "--source-sha",
+                    sourceSha,
+                    "--nonce",
+                    "AUTHORITATIVE_NONCE",
+                    "--output",
+                    receiptPath.toString(),
+                )
+            val verify =
+                command(
+                    installedHost.toString(),
+                    "verify-physical",
+                    "--manifest",
+                    receiptPath.toString(),
+                    "--baseline",
+                    baseline.toString(),
+                    "--artifact",
+                    zip.toString(),
+                    "--source-sha",
+                    sourceSha,
+                    "--nonce",
+                    "AUTHORITATIVE_NONCE",
+                )
+            check(start.exitCode == 0) {
+                "START_FAILED stdout=${start.stdout} stderr=${start.stderr} adb=${Files.readString(log)}"
+            }
+            check(deploy.exitCode == 0) {
+                "DEPLOY_FAILED stdout=${deploy.stdout} stderr=${deploy.stderr} adb=${Files.readString(log)}"
+            }
+            check(controlled.exitCode == 19) {
+                "CONTROLLED_EXIT_DRIFT stdout=${controlled.stdout} stderr=${controlled.stderr}"
+            }
+            check(stop.exitCode == 0) { "STOP_FAILED stdout=${stop.stdout} stderr=${stop.stderr}" }
+            check(writeReceipt.exitCode == 0) {
+                "RECEIPT_FAILED stdout=${writeReceipt.stdout} stderr=${writeReceipt.stderr}"
+            }
+            check(verify.exitCode == 0) {
+                "VERIFY_FAILED stdout=${verify.stdout} stderr=${verify.stderr}"
+            }
+            val storedBaseline = BaselineStore.read(baseline)
+            val trace = PersistentAdbTrace.open(baseline, storedBaseline).snapshotForReceipt()
+            val canonicalReceipt = EvidenceStore.read(receiptPath)
+            val cleanup =
+                command(
+                    installedHost.toString(),
+                    "sentinel",
+                    "cleanup",
+                    "--baseline",
+                    baseline.toString(),
+                )
+            AuthoritativeTraceLifecycleResult(
+                start,
+                deploy,
+                controlled,
+                stop,
+                writeReceipt,
+                verify,
+                cleanup,
+                trace,
+                canonicalReceipt,
+                Files.readString(log),
+            )
+        }
+    }
 
     private fun execute(
         network: String,

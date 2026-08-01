@@ -25,4 +25,7 @@ application {
     applicationDefaultJvmArgs = listOf("--enable-native-access=ALL-UNNAMED")
 }
 
-tasks.test { jvmArgs("--enable-native-access=ALL-UNNAMED") }
+tasks.test {
+    dependsOn(tasks.installDist)
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
+}

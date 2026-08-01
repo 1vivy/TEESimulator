@@ -37,6 +37,8 @@ object HostCli {
                 arguments.take(2) == listOf("device-pair", "bind") -> bind(arguments, runtime)
                 arguments.firstOrNull() == "verify-physical" -> verify(arguments)
                 arguments.firstOrNull() == "trace-adb" -> traceAdb(arguments.drop(1), runtime)
+                arguments.take(2) == listOf("sentinel", "cleanup") ->
+                    cleanupTrace(arguments, runtime)
                 arguments.firstOrNull() in physicalRoots -> physical(arguments, runner, runtime)
                 else -> throw HostCliException("COMMAND_INVALID")
             }
@@ -175,6 +177,7 @@ object HostCli {
                             "donor" -> SentinelScope.DONOR
                             else -> invalid()
                         },
+                        DeploySurfaceBinding.fromEnvironment(),
                     )
                 TraceContextStore.write(runtime, baselinePath, baseline)
                 "SENTINEL_STARTED"
@@ -203,10 +206,6 @@ object HostCli {
                 requireKeys(values, setOf("--baseline"))
                 val baselinePath = Path.of(values.getValue("--baseline"))
                 host.sentinelStop(baselinePath)
-                val tracePath = PersistentAdbTrace.pathFor(baselinePath)
-                Files.deleteIfExists(tracePath)
-                Files.deleteIfExists(PersistentAdbTrace.lockPathFor(tracePath))
-                TraceContextStore.delete(runtime)
                 "SENTINEL_STOPPED"
             }
             else -> invalid()
@@ -222,7 +221,7 @@ object HostCli {
         )
         val baseline = BaselineStore.read(Path.of(values.getValue("--baseline")))
         if (baseline.nonce != values.getValue("--nonce")) throw HostCliException("NONCE_STALE")
-        val sample = host.sentinelFinish(Path.of(values.getValue("--baseline")))
+        val sample = host.terminalSample()
         val receipt =
             PhysicalReceipt.create(
                 baseline,
@@ -235,7 +234,29 @@ object HostCli {
                 host.persistentTrace(),
             )
         EvidenceStore.write(Path.of(values.getValue("--output")), receipt)
+        if (EvidenceStore.read(Path.of(values.getValue("--output"))) != receipt) {
+            throw HostCliException("EVIDENCE_PAIR_MISMATCH")
+        }
+        host.markReceipted(receipt)
         return "EVIDENCE_WRITTEN"
+    }
+
+    private fun cleanupTrace(arguments: Array<String>, runtime: Path): Int {
+        val values = options(arguments.drop(2))
+        requireKeys(values, setOf("--baseline"))
+        val path = Path.of(values.getValue("--baseline"))
+        val binding = PairBinding.from(NativePairDescriptor.readOnce())
+        val baseline =
+            if (Files.exists(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                BaselineStore.read(path).also {
+                    if (it.binding != binding) throw HostCliException("PAIR_BINDING_MISMATCH")
+                }
+            } else {
+                null
+            }
+        PersistentAdbTrace.cleanupAfterReceipt(path, baseline, runtime)
+        println("""{"result":"SENTINEL_CLEANED"}""")
+        return 0
     }
 
     private fun digest(path: String): String =
@@ -252,9 +273,13 @@ object HostCli {
             TraceContextStore.read(runtime, PairBinding.from(snapshot))
                 ?: throw HostCliException("COMMAND_TRACE_MISSING")
         val executable = System.getenv("RKA_TRACE_REAL_ADB")?.takeIf(String::isNotBlank) ?: "adb"
+        val stdin = System.`in`.readNBytes(MAX_TRACE_ADB_STDIN_BYTES + 1)
+        if (stdin.size > MAX_TRACE_ADB_STDIN_BYTES) {
+            throw HostCliException("ADB_STDIN_INVALID")
+        }
         val result =
             TracedHostCommandRunner(
-                    ProcessHostCommandRunner(executable),
+                    ProcessHostCommandRunner(executable, stdin),
                     PersistentAdbTrace.open(context.first, context.second),
                 )
                 .run(listOf("adb") + arguments)
@@ -287,7 +312,7 @@ object HostCli {
             Usage: rka-host <fixed-command>
               device-pair bind --donor SERIAL --candidate SERIAL --profile FILE
               sentinel start --baseline FILE --nonce NONCE [--scope pair|donor]
-              sentinel sample|finish|verify|assert-live|stop --baseline FILE
+              sentinel sample|finish|verify|assert-live|stop|cleanup --baseline FILE
               profile pair
               deploy-no-reboot --zip FILE
               snapshot capability|config
@@ -301,4 +326,6 @@ object HostCli {
                 .trimIndent()
         )
     }
+
+    private const val MAX_TRACE_ADB_STDIN_BYTES = 65_536
 }

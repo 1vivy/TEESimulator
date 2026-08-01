@@ -26,6 +26,11 @@ PAIR_ENVIRONMENT_NAMES = {
     "RKA_CANDIDATE_SERIAL_B64",
     "RKA_PROFILE_SHA256",
 }
+SURFACE_FILES = (
+    "scripts/rka-deploy.sh",
+    "scripts/rka-adb-root.sh",
+    "scripts/rka-traced-adb.sh",
+)
 
 def fail(code):
     raise WrapperFailure(code)
@@ -50,6 +55,55 @@ def decode_serial(value):
     if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", decoded):
         fail("PAIR_SNAPSHOT_INVALID")
     return decoded
+
+def attest_deploy_surface(wrapper_directory):
+    project_root = os.path.realpath(os.path.join(wrapper_directory, ".."))
+    manifest_path = os.path.join(wrapper_directory, "rka-command-surface.sha256")
+    manifest_facts = os.lstat(manifest_path)
+    if (
+        not stat.S_ISREG(manifest_facts.st_mode)
+        or manifest_facts.st_uid != os.getuid()
+        or stat.S_IMODE(manifest_facts.st_mode) & 0o022
+    ):
+        fail("DEPLOY_SOURCE_UNSAFE")
+    with open(manifest_path, "rb") as source:
+        manifest = source.read()
+    if len(manifest) > 4096 or not manifest.endswith(b"\n"):
+        fail("DEPLOY_SOURCE_MANIFEST_INVALID")
+    records = {}
+    for raw_line in manifest.decode("ascii").splitlines():
+        match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9._/-]+)", raw_line)
+        if match is None or match.group(2) in records:
+            fail("DEPLOY_SOURCE_MANIFEST_INVALID")
+        records[match.group(2)] = match.group(1)
+    if tuple(records) != SURFACE_FILES:
+        fail("DEPLOY_SOURCE_MANIFEST_INVALID")
+    expected_modes = {
+        "scripts/rka-deploy.sh": 0o755,
+        "scripts/rka-adb-root.sh": 0o644,
+        "scripts/rka-traced-adb.sh": 0o755,
+    }
+    for relative, expected in records.items():
+        source_path = os.path.join(project_root, relative)
+        facts = os.lstat(source_path)
+        if (
+            not stat.S_ISREG(facts.st_mode)
+            or facts.st_uid != os.getuid()
+            or stat.S_IMODE(facts.st_mode) != expected_modes[relative]
+            or os.path.islink(source_path)
+        ):
+            fail("DEPLOY_SOURCE_UNSAFE")
+        with open(source_path, "rb") as source:
+            observed = hashlib.sha256(source.read()).hexdigest()
+        if observed != expected:
+            fail("DEPLOY_SOURCE_MISMATCH")
+    deploy = os.path.realpath(os.path.join(project_root, "scripts/rka-deploy.sh"))
+    return {
+        "deploy": deploy,
+        "deploy_sha": records["scripts/rka-deploy.sh"],
+        "deploy_path_sha": hashlib.sha256(deploy.encode("utf-8")).hexdigest(),
+        "surface_sha": hashlib.sha256(manifest).hexdigest(),
+    }
 
 def main():
     args = sys.argv[1:]
@@ -159,7 +213,7 @@ def main():
         os.path.basename(command[0]) == "rka-host"
         or "org.matrix.teesimulator.rkahost.cli.HostCli" in command
     )
-    child_snapshot = canonical if host_cli_child else raw_json
+    child_snapshot = canonical
 
     memfd = os.memfd_create("rka-device-pair", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
     os.write(memfd, child_snapshot)
@@ -187,16 +241,29 @@ def main():
             del environment[name]
     environment["RKA_DEVICE_PAIR_FD"] = "3"
     environment["RKA_RUNTIME_DIR"] = runtime
-    if (
-        os.path.exists(os.path.join(runtime, "active-adb-trace-v1"))
-        and os.path.basename(command[0]) == "rka-deploy.sh"
-    ):
+    surface = attest_deploy_surface(environment["RKA_PAIR_WRAPPER_DIR"])
+    environment["RKA_TRACE_DEPLOY_SHA256"] = surface["deploy_sha"]
+    environment["RKA_TRACE_DEPLOY_PATH_SHA256"] = surface["deploy_path_sha"]
+    environment["RKA_TRACE_SURFACE_SHA256"] = surface["surface_sha"]
+    active_trace = os.path.exists(os.path.join(runtime, "active-adb-trace-v1"))
+    resolved_command = (
+        os.path.realpath(command[0])
+        if os.path.sep in command[0]
+        else shutil.which(command[0], path=environment.get("PATH"))
+    )
+    deploy_named = os.path.basename(command[0]) == "rka-deploy.sh"
+    if deploy_named and resolved_command != surface["deploy"]:
+        fail("DEPLOY_SOURCE_MISMATCH")
+    if active_trace and not host_cli_child and resolved_command != surface["deploy"]:
+        fail("TRACE_CHILD_UNAUTHORIZED")
+    if active_trace and resolved_command == surface["deploy"]:
         host_cli = shutil.which("rka-host", path=environment.get("PATH"))
         if host_cli is None:
             fail("TRACE_HOST_UNAVAILABLE")
         environment["RKA_TRACE_HOST_CLI"] = host_cli
         environment["RKA_TRACE_REAL_ADB"] = configured_adb
         environment["RKA_TRACE_REQUIRED"] = "1"
+        environment["RKA_TRACE_DEPLOY_REALPATH"] = surface["deploy"]
         environment["RKA_DEPLOY_ADB"] = os.path.join(
             environment["RKA_PAIR_WRAPPER_DIR"], "rka-traced-adb.sh"
         )

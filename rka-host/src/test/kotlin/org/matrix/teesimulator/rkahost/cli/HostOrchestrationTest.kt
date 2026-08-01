@@ -93,7 +93,11 @@ class HostOrchestrationTest {
         assertEquals(SentinelScope.DONOR, baseline.scope)
         assertEquals(PairBinding.from(pair), baseline.binding)
         assertFalse(runner.calls.any { it.getOrNull(2) == "CANDIDATE_B" })
-        assertFalse(Files.exists(path))
+        assertTrue(Files.exists(path))
+        assertTrue(
+            Files.readString(path.resolveSibling(".${path.fileName}.trace-state-v2"))
+                .startsWith("SEALED|")
+        )
     }
 
     @Test
@@ -165,7 +169,11 @@ class HostOrchestrationTest {
         host.sentinelAssertLive(path)
         host.sentinelStop(path)
 
-        assertFalse(Files.exists(path))
+        assertTrue(Files.exists(path))
+        assertTrue(
+            Files.readString(path.resolveSibling(".${path.fileName}.trace-state-v2"))
+                .startsWith("SEALED|")
+        )
     }
 
     @Test
@@ -177,9 +185,10 @@ class HostOrchestrationTest {
 
         assertThrows(HostCliException::class.java) { host.sentinelStop(path) }
         assertTrue(Files.exists(path))
-        host.sentinelStop(path)
+        val retry = assertThrows(HostCliException::class.java) { host.sentinelStop(path) }
 
-        assertFalse(Files.exists(path))
+        assertEquals("COMMAND_TRACE_TERMINAL_INCOMPLETE", retry.message)
+        assertTrue(Files.exists(path))
     }
 
     @Test

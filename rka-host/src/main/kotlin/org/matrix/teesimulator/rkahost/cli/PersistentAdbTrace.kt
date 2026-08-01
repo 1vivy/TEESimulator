@@ -29,7 +29,11 @@ data class ValidatedPersistentTrace(
 )
 
 class PersistentAdbTrace
-private constructor(private val path: Path, private val expected: Expected) {
+private constructor(
+    private val baselinePath: Path,
+    private val path: Path,
+    private val expected: Expected,
+) {
     data class Expected(
         val pairSha256: String,
         val donorSha256: String,
@@ -38,10 +42,23 @@ private constructor(private val path: Path, private val expected: Expected) {
         val nonceSha256: String,
         val baselinePathSha256: String,
         val sessionId: String,
+        val deploySurface: DeploySurfaceBinding,
     )
 
     fun execute(argv: List<String>, block: () -> HostCommandResult): HostCommandResult {
+        requireLifecycle(TraceLifecycleState.ACTIVE)
         return executionLocked { executeLocked(argv, block) }
+    }
+
+    fun executeTerminal(argv: List<String>, block: () -> HostCommandResult): HostCommandResult {
+        requireLifecycle(TraceLifecycleState.STOPPING)
+        return executionLocked { executeLocked(argv, block) }
+    }
+
+    private fun requireLifecycle(expectedState: TraceLifecycleState) {
+        if (TraceLifecycleStore.read(baselinePath).state != expectedState) {
+            throw HostCliException("COMMAND_TRACE_SEALED")
+        }
     }
 
     private fun executeLocked(
@@ -104,7 +121,83 @@ private constructor(private val path: Path, private val expected: Expected) {
 
     fun validateClean(): ValidatedPersistentTrace = locked { validate(it, false) }
 
-    fun snapshotForReceipt(): ValidatedPersistentTrace = validateClean()
+    fun beginStopping(sample: SentinelSample) {
+        val current = validateClean()
+        val lifecycle = TraceLifecycleStore.read(baselinePath)
+        TraceLifecycleStore.transition(
+            baselinePath,
+            TraceLifecycleState.ACTIVE,
+            lifecycle.copy(
+                state = TraceLifecycleState.STOPPING,
+                headSha256 = current.binding.headSha256,
+                eventCount = current.binding.eventCount,
+                donorBootId = sample.donorBootId,
+                candidateBootId = sample.candidateBootId,
+                donorEndMillis = sample.donorMillis,
+                candidateEndMillis = sample.candidateMillis,
+            ),
+        )
+    }
+
+    fun seal() {
+        val current = validateClean()
+        val lifecycle = TraceLifecycleStore.read(baselinePath)
+        TraceLifecycleStore.transition(
+            baselinePath,
+            TraceLifecycleState.STOPPING,
+            lifecycle.copy(
+                state = TraceLifecycleState.SEALED,
+                headSha256 = current.binding.headSha256,
+                eventCount = current.binding.eventCount,
+            ),
+        )
+    }
+
+    fun snapshotForReceipt(): ValidatedPersistentTrace {
+        val lifecycle = TraceLifecycleStore.read(baselinePath)
+        if (lifecycle.state !in setOf(TraceLifecycleState.SEALED, TraceLifecycleState.RECEIPTED)) {
+            throw HostCliException("COMMAND_TRACE_NOT_SEALED")
+        }
+        return validateClean().also {
+            if (
+                it.binding.sessionId != lifecycle.sessionId ||
+                    it.binding.headSha256 != lifecycle.headSha256 ||
+                    it.binding.eventCount != lifecycle.eventCount
+            ) {
+                throw HostCliException("COMMAND_TRACE_STATE_INVALID")
+            }
+        }
+    }
+
+    fun terminalSample(): SentinelSample {
+        val lifecycle = TraceLifecycleStore.read(baselinePath)
+        if (lifecycle.state !in setOf(TraceLifecycleState.SEALED, TraceLifecycleState.RECEIPTED)) {
+            throw HostCliException("COMMAND_TRACE_NOT_SEALED")
+        }
+        return SentinelSample(
+            expected.sentinelId,
+            lifecycle.donorBootId,
+            lifecycle.candidateBootId,
+            lifecycle.donorEndMillis,
+            lifecycle.candidateEndMillis,
+            SentinelPhase.ROOT_AUTHORITATIVE,
+        )
+    }
+
+    fun markReceipted(receipt: String) {
+        val lifecycle = TraceLifecycleStore.read(baselinePath)
+        if (lifecycle.state != TraceLifecycleState.SEALED) {
+            throw HostCliException("COMMAND_TRACE_ALREADY_RECEIPTED")
+        }
+        TraceLifecycleStore.transition(
+            baselinePath,
+            TraceLifecycleState.SEALED,
+            lifecycle.copy(
+                state = TraceLifecycleState.RECEIPTED,
+                receiptSha256 = Hashes.sha256(receipt.toByteArray()),
+            ),
+        )
+    }
 
     private fun append(
         operation: String,
@@ -116,9 +209,6 @@ private constructor(private val path: Path, private val expected: Expected) {
         val current = validate(channel, attempt != null)
         if (current.verdict != "CLEAN" && attempt == null) {
             throw HostCliException("COMMAND_TRACE_DIRTY")
-        }
-        if (current.binding.eventCount >= MAX_EVENTS || current.canonical.size >= MAX_BYTES) {
-            throw HostCliException("COMMAND_TRACE_LIMIT")
         }
         val sequence = current.binding.eventCount + 1
         val attemptSequence = attempt ?: sequence
@@ -144,9 +234,7 @@ private constructor(private val path: Path, private val expected: Expected) {
                 .joinToString("|")
         val line = "$body|${Hashes.sha256(body.toByteArray())}\n"
         val bytes = line.toByteArray()
-        if (current.canonical.size + bytes.size > MAX_BYTES) {
-            throw HostCliException("COMMAND_TRACE_LIMIT")
-        }
+        requireAppendCapacity(current.binding.eventCount, current.canonical.size, bytes.size)
         channel.position(channel.size())
         channel.write(ByteBuffer.wrap(bytes))
         channel.force(true)
@@ -190,6 +278,7 @@ private constructor(private val path: Path, private val expected: Expected) {
             pair: PairBinding,
             sentinelId: String,
             nonce: String,
+            deploySurface: DeploySurfaceBinding = DeploySurfaceBinding.TEST,
         ): PersistentAdbTrace {
             val session = UUID.randomUUID().toString().replace("-", "")
             val expected =
@@ -201,36 +290,33 @@ private constructor(private val path: Path, private val expected: Expected) {
                     Hashes.sha256(nonce.toByteArray()),
                     baselinePathHash(baselinePath),
                     session,
+                    deploySurface,
                 )
             val path = pathFor(baselinePath)
             val lockPath = lockPathFor(path)
-            val parent = safeParent(path)
-            if (
-                Files.exists(path, LinkOption.NOFOLLOW_LINKS) ||
-                    Files.exists(lockPath, LinkOption.NOFOLLOW_LINKS)
-            )
-                throw HostCliException("COMMAND_TRACE_EXISTS")
+            val statePath = TraceLifecycleStore.pathFor(baselinePath)
+            safeParent(path)
+            val present =
+                listOf(path, lockPath, statePath).map {
+                    Files.exists(it, LinkOption.NOFOLLOW_LINKS)
+                }
+            if (present.any { it }) {
+                if (present.all { it }) throw HostCliException("COMMAND_TRACE_EXISTS")
+                TraceIo.quarantine(listOf(path, lockPath, statePath))
+                throw HostCliException("COMMAND_TRACE_RECOVERY_REQUIRED")
+            }
             val body = genesisBody(expected)
             val genesis = Hashes.sha256(body.toByteArray())
             val bytes = "$body|$genesis\n".toByteArray()
-            val temporary = Files.createTempFile(parent, ".adb-trace-", ".tmp")
             try {
-                Files.setPosixFilePermissions(temporary, mode)
-                FileChannel.open(temporary, StandardOpenOption.WRITE).use {
-                    it.write(ByteBuffer.wrap(bytes))
-                    it.force(true)
-                }
-                Files.move(temporary, path)
-                Files.createFile(lockPath)
-                Files.setPosixFilePermissions(lockPath, mode)
-                FileChannel.open(lockPath, StandardOpenOption.WRITE).use { it.force(true) }
-                FileChannel.open(parent, StandardOpenOption.READ).use { it.force(true) }
-            } catch (_: Exception) {
+                TraceIo.atomicWrite(lockPath, byteArrayOf(), false)
+                TraceIo.atomicWrite(path, bytes, false)
+                TraceLifecycleStore.create(baselinePath, TraceBinding(genesis, session, genesis, 0))
+            } catch (failure: HostCliException) {
+                if (failure.message == "COMMAND_TRACE_PERSIST_FAILED") throw failure
                 throw HostCliException("COMMAND_TRACE_CREATE_FAILED")
-            } finally {
-                Files.deleteIfExists(temporary)
             }
-            return PersistentAdbTrace(path, expected).also { it.validateClean() }
+            return PersistentAdbTrace(baselinePath, path, expected).also { it.validateClean() }
         }
 
         fun open(baselinePath: Path, baseline: SentinelBaseline): PersistentAdbTrace {
@@ -243,8 +329,15 @@ private constructor(private val path: Path, private val expected: Expected) {
                     Hashes.sha256(baseline.nonce.toByteArray()),
                     baselinePathHash(baselinePath),
                     baseline.commandTraceSessionId,
+                    baseline.deploySurface,
                 )
-            return PersistentAdbTrace(pathFor(baselinePath), expected).also { it.validateClean() }
+            val path = pathFor(baselinePath)
+            requireSafe(lockPathFor(path))
+            val lifecycle = TraceLifecycleStore.read(baselinePath)
+            if (lifecycle.sessionId != expected.sessionId) {
+                throw HostCliException("COMMAND_TRACE_STATE_INVALID")
+            }
+            return PersistentAdbTrace(baselinePath, path, expected).also { it.validateClean() }
         }
 
         fun validateSnapshot(
@@ -262,6 +355,7 @@ private constructor(private val path: Path, private val expected: Expected) {
                     Hashes.sha256(baseline.nonce.toByteArray()),
                     baselinePathHash(baselinePath),
                     baseline.commandTraceSessionId,
+                    baseline.deploySurface,
                 ),
                 false,
             )
@@ -271,6 +365,45 @@ private constructor(private val path: Path, private val expected: Expected) {
 
         fun lockPathFor(tracePath: Path): Path =
             tracePath.resolveSibling("${tracePath.fileName}.lock")
+
+        fun cleanupAfterReceipt(baselinePath: Path, baseline: SentinelBaseline?, runtime: Path) {
+            val tracePath = pathFor(baselinePath)
+            val lockPath = lockPathFor(tracePath)
+            val statePath = TraceLifecycleStore.pathFor(baselinePath)
+            if (Files.notExists(statePath, LinkOption.NOFOLLOW_LINKS)) {
+                if (
+                    listOf(baselinePath, tracePath, lockPath).any {
+                        Files.exists(it, LinkOption.NOFOLLOW_LINKS)
+                    }
+                ) {
+                    throw HostCliException("COMMAND_TRACE_CLEANUP_INCOMPLETE")
+                }
+                TraceContextStore.delete(runtime)
+                return
+            }
+            val lifecycle = TraceLifecycleStore.read(baselinePath)
+            if (
+                lifecycle.state != TraceLifecycleState.RECEIPTED ||
+                    baseline == null ||
+                    lifecycle.sessionId != baseline.commandTraceSessionId
+            ) {
+                throw HostCliException("COMMAND_TRACE_CLEANUP_FORBIDDEN")
+            }
+            TraceIo.deleteDurably(tracePath)
+            TraceIo.deleteDurably(lockPath)
+            TraceContextStore.delete(runtime)
+            if (Files.exists(baselinePath, LinkOption.NOFOLLOW_LINKS)) {
+                BaselineStore.delete(baselinePath, baseline)
+            }
+            TraceIo.deleteDurably(statePath)
+        }
+
+        fun discardAbortedStart(baselinePath: Path) {
+            val tracePath = pathFor(baselinePath)
+            TraceIo.deleteDurably(tracePath)
+            TraceIo.deleteDurably(lockPathFor(tracePath))
+            TraceIo.deleteDurably(TraceLifecycleStore.pathFor(baselinePath))
+        }
 
         private fun validateBytes(
             raw: ByteArray,
@@ -335,6 +468,9 @@ private constructor(private val path: Path, private val expected: Expected) {
                     value.sessionId,
                     AdbCommandTracePolicy.policySha256,
                     value.baselinePathSha256,
+                    value.deploySurface.entrypointSha256,
+                    value.deploySurface.entrypointPathSha256,
+                    value.deploySurface.surfaceSha256,
                 )
                 .joinToString("|")
 
@@ -362,36 +498,38 @@ private constructor(private val path: Path, private val expected: Expected) {
         }
 
         private fun requireSafe(path: Path) {
-            if (
-                Files.isSymbolicLink(path) ||
-                    !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) ||
-                    Files.getPosixFilePermissions(path) != mode
-            )
-                throw HostCliException("COMMAND_TRACE_PATH_UNSAFE")
+            TraceIo.requirePrivate(path)
         }
 
         private fun safeParent(path: Path): Path {
-            val parent =
-                path.toAbsolutePath().parent ?: throw HostCliException("COMMAND_TRACE_PATH_UNSAFE")
-            if (
-                Files.isSymbolicLink(parent) ||
-                    !Files.isDirectory(parent, LinkOption.NOFOLLOW_LINKS)
-            )
-                throw HostCliException("COMMAND_TRACE_PATH_UNSAFE")
-            return parent
+            return TraceIo.requireOwnedDirectory(path)
         }
 
         private const val MAX_EVENTS = 20_000
         private const val MAX_BYTES = 8 * 1024 * 1024
+
+        internal fun requireAppendCapacity(eventCount: Int, currentBytes: Int, nextBytes: Int) {
+            if (
+                eventCount !in 0 until MAX_EVENTS ||
+                    currentBytes !in 0..MAX_BYTES ||
+                    nextBytes < 0 ||
+                    currentBytes + nextBytes > MAX_BYTES
+            ) {
+                throw HostCliException("COMMAND_TRACE_LIMIT")
+            }
+        }
+
+        internal const val maximumEventsForTests = MAX_EVENTS
+        internal const val maximumBytesForTests = MAX_BYTES
     }
 }
 
 class TracedHostCommandRunner(
     private val delegate: HostCommandRunner,
     private val trace: PersistentAdbTrace,
+    private val terminal: Boolean = false,
 ) : HostCommandRunner {
-    override fun run(argv: List<String>): HostCommandResult =
-        trace.execute(argv) { delegate.run(argv) }
+    override fun run(argv: List<String>): HostCommandResult = execute(argv) { delegate.run(argv) }
 
     override fun runRoot(
         serial: BoundSerial,
@@ -399,9 +537,12 @@ class TracedHostCommandRunner(
         arguments: List<String>,
         privateInput: RootPrivateInput,
     ): HostCommandResult =
-        trace.execute(listOf("adb", "-s", serial.value, "shell", "su", "0", "sh")) {
+        execute(listOf("adb", "-s", serial.value, "shell", "su", "0", "sh")) {
             delegate.runRoot(serial, script, arguments, privateInput)
         }
+
+    private fun execute(argv: List<String>, block: () -> HostCommandResult): HostCommandResult =
+        if (terminal) trace.executeTerminal(argv, block) else trace.execute(argv, block)
 }
 
 object TraceContextStore {
@@ -417,24 +558,12 @@ object TraceContextStore {
             Base64.getUrlEncoder()
                 .withoutPadding()
                 .encodeToString(baselinePath.toAbsolutePath().normalize().toString().toByteArray())
-        val value = "$encoded|${baseline.binding.pairHash}|${baseline.commandTraceSessionId}\n"
-        val temporary = Files.createTempFile(parent, ".trace-context-", ".tmp")
-        try {
-            Files.setPosixFilePermissions(temporary, mode)
-            FileChannel.open(temporary, StandardOpenOption.WRITE).use {
-                it.write(ByteBuffer.wrap(value.toByteArray()))
-                it.force(true)
-            }
-            Files.move(
-                temporary,
-                path,
-                java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-            )
-            FileChannel.open(parent, StandardOpenOption.READ).use { it.force(true) }
-        } finally {
-            Files.deleteIfExists(temporary)
-        }
+        val value =
+            "$encoded|${baseline.binding.pairHash}|${baseline.commandTraceSessionId}|" +
+                "${baseline.deploySurface.entrypointSha256}|" +
+                "${baseline.deploySurface.entrypointPathSha256}|" +
+                "${baseline.deploySurface.surfaceSha256}\n"
+        TraceIo.atomicWrite(path, value.toByteArray(), true)
     }
 
     fun read(runtime: Path, pair: PairBinding): Pair<Path, SentinelBaseline>? {
@@ -442,7 +571,7 @@ object TraceContextStore {
         if (Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) return null
         requireSafe(path)
         val values = Files.readString(path).removeSuffix("\n").split('|')
-        if (values.size != 3 || !Files.readString(path).endsWith('\n'))
+        if (values.size != 6 || !Files.readString(path).endsWith('\n'))
             throw HostCliException("TRACE_CONTEXT_INVALID")
         val baselinePath =
             try {
@@ -454,7 +583,10 @@ object TraceContextStore {
         if (
             baseline.binding != pair ||
                 values[1] != pair.pairHash ||
-                values[2] != baseline.commandTraceSessionId
+                values[2] != baseline.commandTraceSessionId ||
+                values[3] != baseline.deploySurface.entrypointSha256 ||
+                values[4] != baseline.deploySurface.entrypointPathSha256 ||
+                values[5] != baseline.deploySurface.surfaceSha256
         ) {
             throw HostCliException("PAIR_BINDING_MISMATCH")
         }
@@ -465,19 +597,12 @@ object TraceContextStore {
     fun delete(runtime: Path) {
         val path = path(runtime)
         if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) requireSafe(path)
-        Files.deleteIfExists(path)
-        FileChannel.open(runtime.toAbsolutePath(), StandardOpenOption.READ).use { it.force(true) }
+        TraceIo.deleteDurably(path)
     }
 
     private fun path(runtime: Path): Path = runtime.resolve("active-adb-trace-v1")
 
     private fun requireSafe(path: Path) {
-        if (
-            Files.isSymbolicLink(path) ||
-                !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) ||
-                Files.getPosixFilePermissions(path) != mode
-        ) {
-            throw HostCliException("TRACE_CONTEXT_PATH_UNSAFE")
-        }
+        TraceIo.requirePrivate(path, "TRACE_CONTEXT_PATH_UNSAFE")
     }
 }

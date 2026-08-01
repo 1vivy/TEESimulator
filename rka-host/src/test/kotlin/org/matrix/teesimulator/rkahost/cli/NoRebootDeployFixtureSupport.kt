@@ -4,6 +4,19 @@ import java.nio.file.Files
 
 internal data class DeployResult(val exitCode: Int, val stdout: String, val stderr: String)
 
+internal data class AuthoritativeTraceLifecycleResult(
+    val start: DeployResult,
+    val deploy: DeployResult,
+    val controlledNonzero: DeployResult,
+    val stop: DeployResult,
+    val receipt: DeployResult,
+    val verify: DeployResult,
+    val cleanup: DeployResult,
+    val trace: ValidatedPersistentTrace,
+    val canonicalReceipt: String,
+    val rawAdbLog: String,
+)
+
 internal enum class CandidateManagerMode(val cliValue: String) {
     AUTHORIZED_HEADLESS("authorized_headless")
 }

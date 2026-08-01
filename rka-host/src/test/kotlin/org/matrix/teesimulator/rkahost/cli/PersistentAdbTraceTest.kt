@@ -1,6 +1,8 @@
 package org.matrix.teesimulator.rkahost.cli
 
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -138,11 +140,160 @@ class PersistentAdbTraceTest {
     }
 
     @Test
-    fun wrongModeAndSymlinkAreRejected() {
+    fun wrongModeIsRejected() {
         val fixture = fixture()
         val journal = PersistentAdbTrace.pathFor(fixture.path)
         Files.setPosixFilePermissions(journal, PosixFilePermissions.fromString("rw-r-----"))
         assertThrows(HostCliException::class.java) { fixture.trace.validateClean() }
+    }
+
+    @Test
+    fun actualSymlinkIsRejected() {
+        val fixture = fixture()
+        val journal = PersistentAdbTrace.pathFor(fixture.path)
+        val target = journal.resolveSibling("trace-target")
+        Files.move(journal, target, StandardCopyOption.ATOMIC_MOVE)
+        Files.createSymbolicLink(journal, target)
+
+        val failure = assertThrows(HostCliException::class.java) { fixture.trace.validateClean() }
+
+        assertEquals("COMMAND_TRACE_PATH_UNSAFE", failure.message)
+    }
+
+    @Test
+    fun wrongOwnerIsRejectedByInjectedIdentitySeam() {
+        val fixture = fixture()
+        val journal = PersistentAdbTrace.pathFor(fixture.path).toAbsolutePath()
+        val trusted = Files.getOwner(java.nio.file.Path.of("/proc/self")).name
+        TraceIo.ownerForTests = { path ->
+            if (path.toAbsolutePath() == journal) "untrusted-owner" else trusted
+        }
+        try {
+            val failure =
+                assertThrows(HostCliException::class.java) { fixture.trace.validateClean() }
+            assertEquals("COMMAND_TRACE_PATH_UNSAFE", failure.message)
+        } finally {
+            TraceIo.resetTestSeams()
+        }
+    }
+
+    @Test
+    fun atomicRenameFailureLeavesNoAmbiguousContinuation() {
+        val directory = Files.createTempDirectory("trace-rename-fault-")
+        val path = directory.resolve("baseline.json")
+        TraceIo.faultForTests = { point ->
+            if (point == TraceIoPoint.BEFORE_ATOMIC_MOVE) throw java.io.IOException("rename")
+        }
+        try {
+            val failure =
+                assertThrows(HostCliException::class.java) {
+                    PersistentAdbTrace.create(path, binding, "sentinel", "nonce")
+                }
+            assertEquals("COMMAND_TRACE_PERSIST_FAILED", failure.message)
+            assertFalse(Files.exists(PersistentAdbTrace.pathFor(path), LinkOption.NOFOLLOW_LINKS))
+            assertFalse(
+                Files.exists(
+                    PersistentAdbTrace.lockPathFor(PersistentAdbTrace.pathFor(path)),
+                    LinkOption.NOFOLLOW_LINKS,
+                )
+            )
+            assertTrue(
+                Files.list(directory).use { entries ->
+                    entries.noneMatch { it.fileName.toString().endsWith(".tmp") }
+                }
+            )
+        } finally {
+            TraceIo.resetTestSeams()
+        }
+    }
+
+    @Test
+    fun lockOnlyCreationCrashIsQuarantinedBeforeFreshStart() {
+        val path = Files.createTempDirectory("trace-parent-fsync-fault-").resolve("baseline.json")
+        var parentFsyncs = 0
+        TraceIo.faultForTests = { point ->
+            if (point == TraceIoPoint.BEFORE_PARENT_FSYNC && parentFsyncs++ == 0) {
+                throw java.io.IOException("parent fsync")
+            }
+        }
+        try {
+            assertThrows(HostCliException::class.java) {
+                PersistentAdbTrace.create(path, binding, "sentinel", "nonce")
+            }
+        } finally {
+            TraceIo.resetTestSeams()
+        }
+        assertTrue(
+            Files.exists(
+                PersistentAdbTrace.lockPathFor(PersistentAdbTrace.pathFor(path)),
+                LinkOption.NOFOLLOW_LINKS,
+            )
+        )
+
+        val recovery =
+            assertThrows(HostCliException::class.java) {
+                PersistentAdbTrace.create(path, binding, "sentinel", "nonce")
+            }
+        assertEquals("COMMAND_TRACE_RECOVERY_REQUIRED", recovery.message)
+        assertEquals(
+            "CLEAN",
+            PersistentAdbTrace.create(path, binding, "sentinel", "nonce").validateClean().verdict,
+        )
+    }
+
+    @Test
+    fun journalOnlyCreationCrashIsQuarantinedBeforeFreshStart() {
+        val fixture = fixture()
+        val journal = PersistentAdbTrace.pathFor(fixture.path)
+        Files.delete(PersistentAdbTrace.lockPathFor(journal))
+        Files.delete(TraceLifecycleStore.pathFor(fixture.path))
+
+        val recovery =
+            assertThrows(HostCliException::class.java) {
+                PersistentAdbTrace.create(fixture.path, binding, "sentinel", "nonce")
+            }
+
+        assertEquals("COMMAND_TRACE_RECOVERY_REQUIRED", recovery.message)
+        assertEquals(
+            "CLEAN",
+            PersistentAdbTrace.create(fixture.path, binding, "sentinel", "nonce")
+                .validateClean()
+                .verdict,
+        )
+    }
+
+    @Test
+    fun fsyncFailureLeavesNoAmbiguousContinuation() {
+        val path = Files.createTempDirectory("trace-fsync-fault-").resolve("baseline.json")
+        TraceIo.faultForTests = { point ->
+            if (point == TraceIoPoint.BEFORE_FILE_FSYNC) throw java.io.IOException("fsync")
+        }
+        try {
+            val failure =
+                assertThrows(HostCliException::class.java) {
+                    PersistentAdbTrace.create(path, binding, "sentinel", "nonce")
+                }
+            assertEquals("COMMAND_TRACE_PERSIST_FAILED", failure.message)
+            assertFalse(Files.exists(PersistentAdbTrace.pathFor(path), LinkOption.NOFOLLOW_LINKS))
+        } finally {
+            TraceIo.resetTestSeams()
+        }
+    }
+
+    @Test
+    fun lastAllowedEventAndByteBoundaryPassAndNextAreRejected() {
+        PersistentAdbTrace.requireAppendCapacity(PersistentAdbTrace.maximumEventsForTests - 1, 1, 1)
+        assertThrows(HostCliException::class.java) {
+            PersistentAdbTrace.requireAppendCapacity(PersistentAdbTrace.maximumEventsForTests, 1, 1)
+        }
+        PersistentAdbTrace.requireAppendCapacity(0, PersistentAdbTrace.maximumBytesForTests - 1, 1)
+        assertThrows(HostCliException::class.java) {
+            PersistentAdbTrace.requireAppendCapacity(
+                0,
+                PersistentAdbTrace.maximumBytesForTests - 1,
+                2,
+            )
+        }
     }
 
     private fun fixture(): Fixture {

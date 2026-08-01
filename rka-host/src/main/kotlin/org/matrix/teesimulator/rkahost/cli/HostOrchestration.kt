@@ -62,11 +62,12 @@ class HostOrchestrator(
         path: Path,
         nonce: String,
         scope: SentinelScope = SentinelScope.PAIR,
+        deploySurface: DeploySurfaceBinding = DeploySurfaceBinding.TEST,
     ): SentinelBaseline {
         recoverPending(path)
         BaselineStore.requireReadyAbsent(path)
         val sentinelId = Hashes.sha256("${binding.pairHash}:$nonce".toByteArray())
-        val journal = PersistentAdbTrace.create(path, binding, sentinelId, nonce)
+        val journal = PersistentAdbTrace.create(path, binding, sentinelId, nonce, deploySurface)
         trace = journal
         val initialTraceBinding = journal.validateClean().binding
         val baseline =
@@ -88,6 +89,7 @@ class HostOrchestrator(
                 commandTraceSessionId = initialTraceBinding.sessionId,
                 commandTraceInitialHeadSha256 = initialTraceBinding.headSha256,
                 commandTraceInitialEventCount = initialTraceBinding.eventCount,
+                deploySurface = deploySurface,
             )
         BaselineStore.createPending(path, baseline)
         try {
@@ -97,7 +99,21 @@ class HostOrchestrator(
             BaselineStore.commitPending(path, baseline)
             return baseline
         } catch (failure: HostCliException) {
-            if (cleanupSentinel(baseline)) BaselineStore.abortPending(path)
+            journal.beginStopping(
+                SentinelSample(
+                    baseline.sentinelId,
+                    baseline.donorBootId,
+                    baseline.candidateBootId,
+                    baseline.donorStartMillis + 1,
+                    baseline.candidateStartMillis + 1,
+                    SentinelPhase.ROOT_AUTHORITATIVE,
+                )
+            )
+            if (cleanupSentinel(baseline)) {
+                journal.seal()
+                BaselineStore.abortPending(path)
+                PersistentAdbTrace.discardAbortedStart(path)
+            }
             throw failure
         }
     }
@@ -138,16 +154,30 @@ class HostOrchestrator(
 
     fun sentinelAssertLive(path: Path): SentinelSample = sentinelFinish(path)
 
-    fun sentinelStop(path: Path) {
+    fun sentinelStop(path: Path): SentinelSample {
         val baseline = BaselineStore.read(path)
         requirePair(baseline)
         attachTrace(path, baseline)
+        val lifecycle = TraceLifecycleStore.read(path)
+        if (lifecycle.state != TraceLifecycleState.ACTIVE) {
+            throw HostCliException("COMMAND_TRACE_TERMINAL_INCOMPLETE")
+        }
+        val terminal = sentinelFinish(path)
+        trace?.beginStopping(terminal) ?: throw HostCliException("COMMAND_TRACE_MISSING")
         sentinelAction(baseline, "stop")
-        BaselineStore.delete(path, baseline)
+        trace?.seal() ?: throw HostCliException("COMMAND_TRACE_MISSING")
+        return terminal
     }
 
     fun persistentTrace(): ValidatedPersistentTrace =
         trace?.snapshotForReceipt() ?: throw HostCliException("COMMAND_TRACE_MISSING")
+
+    fun terminalSample(): SentinelSample =
+        trace?.terminalSample() ?: throw HostCliException("COMMAND_TRACE_MISSING")
+
+    fun markReceipted(receipt: String) {
+        trace?.markReceipted(receipt) ?: throw HostCliException("COMMAND_TRACE_MISSING")
+    }
 
     private fun sample(
         baseline: SentinelBaseline,
@@ -183,7 +213,7 @@ class HostOrchestrator(
         val role = if (serial == pair.donor) "DONOR" else "CANDIDATE"
         val argv = listOf("adb", "-s", serial.value, "shell", "su", "0", "sh")
         val result =
-            tracedRunner()
+            tracedRunner(terminal = action == "stop")
                 .runRoot(
                     serial,
                     sentinelScript,
@@ -325,8 +355,8 @@ class HostOrchestrator(
         }
     }
 
-    private fun tracedRunner(): HostCommandRunner =
-        trace?.let { TracedHostCommandRunner(delegateRunner, it) }
+    private fun tracedRunner(terminal: Boolean = false): HostCommandRunner =
+        trace?.let { TracedHostCommandRunner(delegateRunner, it, terminal) }
             ?: if (delegateRunner is ProcessHostCommandRunner) {
                 throw HostCliException("COMMAND_TRACE_MISSING")
             } else {

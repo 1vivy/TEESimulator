@@ -101,8 +101,11 @@ internal data class SentinelLimits(
     }
 }
 
-class ProcessHostCommandRunner(private val executable: String = "adb") : HostCommandRunner {
-    override fun run(argv: List<String>): HostCommandResult = execute(argv, null)
+class ProcessHostCommandRunner(
+    private val executable: String = "adb",
+    private val inheritedStdin: ByteArray? = null,
+) : HostCommandRunner {
+    override fun run(argv: List<String>): HostCommandResult = execute(argv, inheritedStdin)
 
     override fun runRoot(
         serial: BoundSerial,
@@ -130,10 +133,13 @@ class ProcessHostCommandRunner(private val executable: String = "adb") : HostCom
             arguments.forEach { append(' ').append(it) }
             append('\n').append(script)
         }
-        return execute(listOf("adb", "-s", serial.value, "shell", "su", "0", "sh"), payload)
+        return execute(
+            listOf("adb", "-s", serial.value, "shell", "su", "0", "sh"),
+            payload.toByteArray(Charsets.UTF_8),
+        )
     }
 
-    private fun execute(argv: List<String>, stdin: String?): HostCommandResult {
+    private fun execute(argv: List<String>, stdin: ByteArray?): HostCommandResult {
         val liveArgv = listOf(executable) + argv.drop(1)
         val process =
             try {
@@ -142,9 +148,7 @@ class ProcessHostCommandRunner(private val executable: String = "adb") : HostCom
                 throw HostCliException("ADB_START_FAILED")
             }
         try {
-            process.outputStream.use { output ->
-                if (stdin != null) output.write(stdin.toByteArray(Charsets.UTF_8))
-            }
+            process.outputStream.use { output -> if (stdin != null) output.write(stdin) }
         } catch (_: Exception) {
             process.destroyForcibly()
             throw HostCliException("ADB_STDIN_FAILED")

@@ -44,6 +44,25 @@ pub enum DirectSessionError {
     Ambiguous,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DonorIteration {
+    Served,
+    Retry,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CandidateIteration {
+    accepted_connections: usize,
+}
+
+#[derive(Debug, Error)]
+#[error("candidate iteration failed after {accepted_connections} accepted connections")]
+struct CandidateIterationError {
+    #[source]
+    error: DirectSessionError,
+    accepted_connections: usize,
+}
+
 #[doc(hidden)]
 pub fn run_donor(runtime: &mut DonorRuntime) -> Result<(), DirectSessionError> {
     let (state, profile, _) =
@@ -52,27 +71,12 @@ pub fn run_donor(runtime: &mut DonorRuntime) -> Result<(), DirectSessionError> {
         return Err(DirectSessionError::State);
     }
     loop {
-        let Ok(socket) = connect_bound(
-            profile.listen_interface,
+        match run_donor_once(
+            (runtime, &state, &profile),
             SocketAddrV4::new(profile.endpoint, PORT),
-            BUDGET,
-        ) else {
-            std::thread::sleep(Duration::from_secs(1));
-            continue;
-        };
-        let donor = donor_client(&state, &profile)?;
-        let dispatched = Cell::new(false);
-        let result = donor.serve_once(socket, |request| {
-            dispatched.set(true);
-            runtime
-                .dispatch_frame(request)
-                .map_err(|_| rka_transport::TlsError::Admission)
-        });
-        if result.is_err() && dispatched.get() {
-            return Err(DirectSessionError::Ambiguous);
-        }
-        if result.is_err() {
-            std::thread::sleep(Duration::from_secs(1));
+        )? {
+            DonorIteration::Served => {}
+            DonorIteration::Retry => std::thread::sleep(Duration::from_secs(1)),
         }
     }
 }
@@ -88,15 +92,53 @@ pub fn run_candidate() -> Result<(), DirectSessionError> {
         .map_err(|_| DirectSessionError::Io)?;
     let local = bind_local(&state)?;
     loop {
-        let (mut broker, _) = local.accept().map_err(|_| DirectSessionError::Io)?;
-        let credentials = socket_peercred(&broker).map_err(|_| DirectSessionError::State)?;
-        if credentials.uid != geteuid() {
-            return Err(DirectSessionError::State);
-        }
-        let request = read_frame(&mut broker)?;
-        let response = exchange_candidate_request((&network, &state, &profile), &request)?;
-        write_frame(&mut broker, &response)?;
+        run_candidate_once((&network, &local, &state, &profile))
+            .map_err(|failure| failure.error)?;
     }
+}
+
+fn run_donor_once(
+    context: (&mut DonorRuntime, &Path, &DirectProfile),
+    remote: SocketAddrV4,
+) -> Result<DonorIteration, DirectSessionError> {
+    let (runtime, state, profile) = context;
+    let Ok(socket) = connect_bound(profile.listen_interface, remote, BUDGET) else {
+        return Ok(DonorIteration::Retry);
+    };
+    let donor = donor_client(state, profile)?;
+    let dispatched = Cell::new(false);
+    let result = donor.serve_once(socket, |request| {
+        dispatched.set(true);
+        runtime
+            .dispatch_frame(request)
+            .map_err(|_| rka_transport::TlsError::Admission)
+    });
+    match (result, dispatched.get()) {
+        (Ok(()), _) => Ok(DonorIteration::Served),
+        (Err(_), true) => Err(DirectSessionError::Ambiguous),
+        (Err(_), false) => Ok(DonorIteration::Retry),
+    }
+}
+
+fn run_candidate_once(
+    context: (&TcpListener, &UnixListener, &Path, &DirectProfile),
+) -> Result<CandidateIteration, CandidateIterationError> {
+    let (network, local, state, profile) = context;
+    let (mut broker, _) = local
+        .accept()
+        .map_err(|_| candidate_failure(DirectSessionError::Io, 0))?;
+    let credentials =
+        socket_peercred(&broker).map_err(|_| candidate_failure(DirectSessionError::State, 0))?;
+    if credentials.uid != geteuid() {
+        return Err(candidate_failure(DirectSessionError::State, 0));
+    }
+    let request = read_frame(&mut broker).map_err(|error| candidate_failure(error, 0))?;
+    let exchange = exchange_candidate_request((network, state, profile), &request)?;
+    write_frame(&mut broker, &exchange.response)
+        .map_err(|error| candidate_failure(error, exchange.accepted_connections))?;
+    Ok(CandidateIteration {
+        accepted_connections: exchange.accepted_connections,
+    })
 }
 
 fn connect_bound(
@@ -119,25 +161,60 @@ fn connect_bound(
     }
 }
 
+struct CandidateExchange {
+    response: Vec<u8>,
+    accepted_connections: usize,
+}
+
 fn exchange_candidate_request(
     context: (&TcpListener, &Path, &DirectProfile),
     request: &[u8],
-) -> Result<Vec<u8>, DirectSessionError> {
+) -> Result<CandidateExchange, CandidateIterationError> {
     let (network, state, profile) = context;
-    let candidate = candidate_server(state, profile)?;
+    let candidate =
+        candidate_server(state, profile).map_err(|error| candidate_failure(error, 0))?;
     for attempt in 0..PRE_DISPATCH_ATTEMPTS {
-        let (socket, _) = network.accept().map_err(|_| DirectSessionError::Io)?;
+        let accepted_connections = attempt.saturating_add(1);
+        let (socket, _) = network
+            .accept()
+            .map_err(|_| candidate_failure(DirectSessionError::Io, attempt))?;
         match candidate.exchange(socket, request) {
-            Ok(response) => return Ok(response),
+            Ok(response) => {
+                return Ok(CandidateExchange {
+                    response,
+                    accepted_connections,
+                });
+            }
             Err(CandidateExchangeError::PreDispatch(_))
                 if attempt < PRE_DISPATCH_ATTEMPTS.saturating_sub(1) => {}
             Err(CandidateExchangeError::Ambiguous(_)) => {
-                return Err(DirectSessionError::Ambiguous);
+                return Err(candidate_failure(
+                    DirectSessionError::Ambiguous,
+                    accepted_connections,
+                ));
             }
-            Err(_) => return Err(DirectSessionError::Tls),
+            Err(_) => {
+                return Err(candidate_failure(
+                    DirectSessionError::Tls,
+                    accepted_connections,
+                ));
+            }
         }
     }
-    Err(DirectSessionError::Tls)
+    Err(candidate_failure(
+        DirectSessionError::Tls,
+        PRE_DISPATCH_ATTEMPTS,
+    ))
+}
+
+const fn candidate_failure(
+    error: DirectSessionError,
+    accepted_connections: usize,
+) -> CandidateIterationError {
+    CandidateIterationError {
+        error,
+        accepted_connections,
+    }
 }
 
 fn donor_client(
@@ -262,3 +339,7 @@ fn write_frame(stream: &mut impl Write, response: &[u8]) -> Result<(), DirectSes
 #[cfg(test)]
 #[path = "direct_session_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "direct_session_runner_tests.rs"]
+mod runner_tests;

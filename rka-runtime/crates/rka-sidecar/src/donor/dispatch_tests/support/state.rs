@@ -12,12 +12,13 @@ pub(super) fn persist(
     root: &Path,
     identity_hash: [u8; 32],
     initial_transcript: [u8; 32],
+    peer_spki_hash: [u8; 32],
 ) -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(root)?;
     fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
     let records = FileStore(root.join("records"));
     PairedActivationRecord {
-        peer_spki_hash: [0x55; 32],
+        peer_spki_hash,
         profile_id_hash: [0x66; 32],
         profile_epoch: EPOCH,
         candidate_identity_hash: identity_hash,

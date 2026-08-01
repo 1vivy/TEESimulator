@@ -16,7 +16,7 @@ mod dispatch;
 mod dispatch_codec;
 mod dispatch_preflight;
 #[cfg(test)]
-mod dispatch_tests;
+pub(crate) mod dispatch_tests;
 mod ingress;
 mod ingress_io;
 mod ingress_path;

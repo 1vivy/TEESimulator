@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 
-mod support;
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "the sibling direct-session runner proof reuses this test fixture"
+)]
+pub(crate) mod support;
 
 use rka_protocol::{
     Frame, FrameBody, FrameContext, MessageKind, RequestId, SessionId, encode_frame,

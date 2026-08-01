@@ -11,25 +11,20 @@ use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
 };
-use rka_state::PairedActivationRecord;
-use rka_transport::peer_spki_hash;
 use rustls::pki_types::CertificateDer;
 
-use super::{
-    DirectSessionError, candidate_server, connect_bound, donor_client, exchange_candidate_request,
-};
+use super::{DirectSessionError, connect_bound};
 use crate::{
     LifecycleRole,
     direct_profile::{DialMode, DirectProfile, load_from},
-    provisioning_io::FileStateStore,
 };
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
-struct TempState(PathBuf);
+pub(super) struct TempState(pub(super) PathBuf);
 
 impl TempState {
-    fn new(label: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(super) fn new(label: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
         let path =
             std::env::temp_dir().join(format!("rka-direct-{label}-{}-{id}", std::process::id()));
@@ -44,7 +39,7 @@ impl Drop for TempState {
     }
 }
 
-fn routed_local_ipv4() -> Result<Ipv4Addr, Box<dyn std::error::Error>> {
+pub(super) fn routed_local_ipv4() -> Result<Ipv4Addr, Box<dyn std::error::Error>> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9))?;
     match socket.local_addr()?.ip() {
@@ -98,65 +93,7 @@ fn unavailable_profile_source_fails_before_connect() -> Result<(), Box<dyn std::
     Ok(())
 }
 
-#[test]
-fn production_direct_session_uses_persisted_admission_and_donor_dial_direction()
--> Result<(), Box<dyn std::error::Error>> {
-    // Given: independently persisted donor and candidate session-manager state.
-    let local = routed_local_ipv4()?;
-    let donor_state = TempState::new("donor")?;
-    let candidate_state = TempState::new("candidate")?;
-    let (root_certificate, donor_certificate, donor_key, candidate_certificate, candidate_key) =
-        identities()?;
-    let donor_pin = peer_spki_hash(&donor_certificate)?;
-    let candidate_pin = peer_spki_hash(&candidate_certificate)?;
-    persist_identity(
-        &donor_state.0,
-        (&donor_certificate, &donor_key, &root_certificate),
-    )?;
-    persist_identity(
-        &candidate_state.0,
-        (&candidate_certificate, &candidate_key, &root_certificate),
-    )?;
-    persist_pairing(&donor_state.0, candidate_pin)?;
-    persist_pairing(&candidate_state.0, donor_pin)?;
-    let donor_profile =
-        persist_profile(&donor_state.0, (LifecycleRole::Donor, local, candidate_pin))?;
-    let candidate_profile = persist_profile(
-        &candidate_state.0,
-        (LifecycleRole::Candidate, local, donor_pin),
-    )?;
-    let _candidate = candidate_server(&candidate_state.0, &candidate_profile)?;
-    let _donor = donor_client(&donor_state.0, &donor_profile)?;
-    let listener = TcpListener::bind(SocketAddrV4::new(local, 0))?;
-    let remote = match listener.local_addr()? {
-        std::net::SocketAddr::V4(address) => address,
-        std::net::SocketAddr::V6(_) => return Err("unexpected IPv6 listener".into()),
-    };
-    let candidate_root = candidate_state.0.clone();
-    let worker = std::thread::spawn(move || {
-        exchange_candidate_request(
-            (&listener, &candidate_root, &candidate_profile),
-            b"session-manager-request",
-        )
-    });
-
-    // When: the donor creates the only TCP connection and dispatches the request.
-    let socket = connect_bound(local, remote, Duration::from_secs(2))?;
-    assert_eq!(socket.local_addr()?.ip(), local);
-    donor_client(&donor_state.0, &donor_profile)?.serve_once(socket, |request| {
-        assert_eq!(request, b"session-manager-request");
-        Ok(b"session-manager-response".to_vec())
-    })?;
-
-    // Then: the candidate receives the response through the production exchange path.
-    assert_eq!(
-        worker.join().map_err(|_| "candidate thread failed")??,
-        b"session-manager-response"
-    );
-    Ok(())
-}
-
-fn persist_profile(
+pub(super) fn persist_profile(
     root: &Path,
     profile: (LifecycleRole, Ipv4Addr, [u8; 32]),
 ) -> Result<DirectProfile, Box<dyn std::error::Error>> {
@@ -182,25 +119,7 @@ fn persist_profile(
     Ok(profile)
 }
 
-fn persist_pairing(
-    root: &Path,
-    peer_spki_hash: [u8; 32],
-) -> Result<(), Box<dyn std::error::Error>> {
-    PairedActivationRecord {
-        peer_spki_hash,
-        profile_id_hash: [0x11; 32],
-        profile_epoch: 9,
-        candidate_identity_hash: [0x22; 32],
-        session_id: [0x33; 32],
-        candidate_nonce: [0x44; 32],
-        donor_nonce: [0x55; 32],
-        prior_transcript_hash: [0x66; 32],
-    }
-    .persist(&FileStateStore::new(root))?;
-    Ok(())
-}
-
-fn persist_identity(
+pub(super) fn persist_identity(
     root: &Path,
     material: (&CertificateDer<'_>, &[u8], &CertificateDer<'_>),
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -222,7 +141,7 @@ fn persist_identity(
     Ok(())
 }
 
-type Identities = (
+pub(super) type Identities = (
     CertificateDer<'static>,
     CertificateDer<'static>,
     Vec<u8>,
@@ -230,7 +149,7 @@ type Identities = (
     Vec<u8>,
 );
 
-fn identities() -> Result<Identities, Box<dyn std::error::Error>> {
+pub(super) fn identities() -> Result<Identities, Box<dyn std::error::Error>> {
     let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_params.key_usages = vec![

@@ -20,7 +20,11 @@ const PHASES: [[u8; 32]; 5] = [[0x92; 32], [0x93; 32], [0x94; 32], [0x95; 32], [
 const CHAIN: [u8; 6] = [0x30, 1, 0, 0x30, 1, 1];
 const AAID: &[u8] = b"authoritative-aaid";
 
-pub(super) struct Fixture {
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "the sibling direct-session runner proof owns this fixture"
+)]
+pub(crate) struct Fixture {
     pub root: PathBuf,
     pub broker_socket: PathBuf,
     pub uid: u32,
@@ -32,6 +36,12 @@ pub(super) struct Fixture {
 
 impl Fixture {
     pub(crate) fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_peer([0x55; 32])
+    }
+
+    pub(crate) fn new_with_peer(
+        peer_spki_hash: [u8; 32],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = PathBuf::from("/tmp").join(format!(
             "rka-live-generate-{}-{}",
@@ -40,7 +50,7 @@ impl Fixture {
         ));
         let identity_hash = identity_hash();
         let initial_transcript = [0xc1; 32];
-        state::persist(&root, identity_hash, initial_transcript)?;
+        state::persist(&root, identity_hash, initial_transcript, peer_spki_hash)?;
         let metadata = fs::metadata(&root)?;
         let started_ms = uptime_ms()?;
         Ok(Self {
@@ -64,6 +74,28 @@ impl Fixture {
 
     pub(crate) fn serve_broker(listener: &UnixListener, ordinal: u8) -> Result<Vec<u8>, String> {
         broker::serve(listener, ordinal)
+    }
+
+    pub(crate) fn capture_broker_without_response(
+        listener: &UnixListener,
+    ) -> Result<Vec<u8>, String> {
+        broker::capture_without_response(listener)
+    }
+
+    pub(crate) fn runtime(
+        &self,
+        exchanges: usize,
+    ) -> Result<crate::donor::DonorRuntime, Box<dyn std::error::Error>> {
+        let mut runtime = crate::donor::DonorRuntime::open(&self.root, &self.broker_socket);
+        runtime.broker = crate::donor::BridgeDonorBroker::new_authenticated_test(
+            &self.broker_socket,
+            exchanges,
+        )?;
+        Ok(runtime)
+    }
+
+    pub(crate) fn authenticated_exchanges(runtime: &crate::donor::DonorRuntime) -> usize {
+        runtime.broker.authenticated_test_exchanges()
     }
 
     pub(crate) fn expected_broker_payload(ordinal: u8, prior: [u8; 32]) -> Vec<u8> {

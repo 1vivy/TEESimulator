@@ -9,6 +9,31 @@ use crate::bridge::{
 };
 
 pub(super) fn serve(listener: &UnixListener, ordinal: u8) -> Result<Vec<u8>, String> {
+    let (mut stream, command) = receive(listener)?;
+    let response = encode_frame(
+        &reply(ordinal).map_err(|error| error.to_string())?,
+        ExchangeRole::DonorResponse,
+    )
+    .map_err(|error| error.to_string())?;
+    stream
+        .write_all(response.as_slice())
+        .map_err(|error| error.to_string())?;
+    let payload = generate_payload(command)?;
+    let mut eof = [0; 1];
+    if stream.read(&mut eof).map_err(|error| error.to_string())? != 0 {
+        return Err("sidecar sent trailing broker bytes".to_owned());
+    }
+    Ok(payload)
+}
+
+pub(super) fn capture_without_response(listener: &UnixListener) -> Result<Vec<u8>, String> {
+    let (_stream, command) = receive(listener)?;
+    generate_payload(command)
+}
+
+fn receive(
+    listener: &UnixListener,
+) -> Result<(std::os::unix::net::UnixStream, BridgeMessage), String> {
     let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
     let mut header = [0; 24];
     stream
@@ -26,20 +51,7 @@ pub(super) fn serve(listener: &UnixListener, ordinal: u8) -> Result<Vec<u8>, Str
         .map_err(|error| error.to_string())?;
     let command =
         decode_frame(&request, ExchangeRole::DonorRequest).map_err(|error| error.to_string())?;
-    let response = encode_frame(
-        &reply(ordinal).map_err(|error| error.to_string())?,
-        ExchangeRole::DonorResponse,
-    )
-    .map_err(|error| error.to_string())?;
-    stream
-        .write_all(response.as_slice())
-        .map_err(|error| error.to_string())?;
-    let payload = generate_payload(command)?;
-    let mut eof = [0; 1];
-    if stream.read(&mut eof).map_err(|error| error.to_string())? != 0 {
-        return Err("sidecar sent trailing broker bytes".to_owned());
-    }
-    Ok(payload)
+    Ok((stream, command))
 }
 
 fn reply(ordinal: u8) -> Result<BridgeMessage, Box<dyn std::error::Error>> {

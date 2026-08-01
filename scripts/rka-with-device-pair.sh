@@ -17,6 +17,13 @@ import sys
 class WrapperFailure(Exception):
     pass
 
+PAIR_ENVIRONMENT_NAMES = {
+    "RKA_DEVICE_PAIR_VERSION",
+    "RKA_DONOR_SERIAL_B64",
+    "RKA_CANDIDATE_SERIAL_B64",
+    "RKA_PROFILE_SHA256",
+}
+
 def fail(code):
     raise WrapperFailure(code)
 
@@ -96,12 +103,7 @@ def main():
         candidate = decode_serial(env["RKA_CANDIDATE_SERIAL_B64"])
     except (ValueError, KeyError, UnicodeError, json.JSONDecodeError, TypeError):
         fail("PAIR_SNAPSHOT_INVALID")
-    if set(env) != {
-        "RKA_DEVICE_PAIR_VERSION",
-        "RKA_DONOR_SERIAL_B64",
-        "RKA_CANDIDATE_SERIAL_B64",
-        "RKA_PROFILE_SHA256",
-    }:
+    if set(env) != PAIR_ENVIRONMENT_NAMES:
         fail("PAIR_ENV_INVALID")
     if (
         env["RKA_DEVICE_PAIR_VERSION"] != "1"
@@ -173,7 +175,7 @@ def main():
             os.close(fd)
     environment = os.environ.copy()
     for name in tuple(environment):
-        if name.startswith("RKA_DEVICE_PAIR_"):
+        if name.startswith("RKA_DEVICE_PAIR_") or name in PAIR_ENVIRONMENT_NAMES:
             del environment[name]
     environment["RKA_DEVICE_PAIR_FD"] = "3"
     child = subprocess.Popen(

@@ -100,6 +100,43 @@ print("EXTRA_FDS=" + ",".join(map(str, extra)))
     }
 
     @Test
+    fun childEnvironmentContainsOnlyFd3PairTransport() {
+        withFixture { root ->
+            val probe =
+                """
+import os
+for name in (
+    "RKA_DEVICE_PAIR_VERSION",
+    "RKA_DONOR_SERIAL_B64",
+    "RKA_CANDIDATE_SERIAL_B64",
+    "RKA_PROFILE_SHA256",
+):
+    print(name + "_PRESENT=" + str(name in os.environ).lower())
+print("PAIR_FD_EXACT=" + str(os.environ.get("RKA_DEVICE_PAIR_FD") == "3").lower())
+print("ORDINARY_ENV_PRESERVED=" + str(os.environ.get("RKA_SYNTH_KEEP") == "present").lower())
+"""
+            val inherited =
+                mapOf(
+                    "RKA_DEVICE_PAIR_VERSION" to "synthetic",
+                    "RKA_DONOR_SERIAL_B64" to "synthetic",
+                    "RKA_CANDIDATE_SERIAL_B64" to "synthetic",
+                    "RKA_PROFILE_SHA256" to "synthetic",
+                    "RKA_DEVICE_PAIR_FD" to "99",
+                    "RKA_SYNTH_KEEP" to "present",
+                )
+
+            val result = runWrapper(root, listOf("python3", "-c", probe), inherited)
+
+            assertEquals(result.stderr, 0, result.exitCode)
+            val expected =
+                SENSITIVE_ENVIRONMENT_NAMES.joinToString("\n", postfix = "\n") {
+                    "${it}_PRESENT=false"
+                } + "PAIR_FD_EXACT=true\nORDINARY_ENV_PRESERVED=true\n"
+            assertEquals(result.stdout, expected, result.stdout)
+        }
+    }
+
+    @Test
     fun malformedDuplicateExtraSameAndOversizedSnapshotsAreRejected() {
         withFixture { root ->
             val pair = root.resolve("device-pair.json")
@@ -263,5 +300,12 @@ print("EXTRA_FDS=" + ",".join(map(str, extra)))
     private companion object {
         const val DONOR = "SYNTH_DONOR"
         const val CANDIDATE = "SYNTH_CANDIDATE"
+        val SENSITIVE_ENVIRONMENT_NAMES =
+            listOf(
+                "RKA_DEVICE_PAIR_VERSION",
+                "RKA_DONOR_SERIAL_B64",
+                "RKA_CANDIDATE_SERIAL_B64",
+                "RKA_PROFILE_SHA256",
+            )
     }
 }

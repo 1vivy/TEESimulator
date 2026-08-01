@@ -2,7 +2,7 @@ use std::{
     cell::Cell,
     fs,
     io::{Read, Write},
-    net::{SocketAddrV4, TcpListener, TcpStream},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
     os::unix::{fs::PermissionsExt, net::UnixListener},
     path::Path,
     time::Duration,
@@ -10,11 +10,12 @@ use std::{
 
 use rka_state::PairedActivationRecord;
 use rka_transport::{
-    AdmissionBinding, ClientPeer, PinnedTlsCandidateServer, PinnedTlsDonorClient, ServerPeer,
-    TlsAdmission, TlsCredentials,
+    AdmissionBinding, CandidateExchangeError, ClientPeer, PinnedTlsCandidateServer,
+    PinnedTlsDonorClient, ServerPeer, TlsAdmission, TlsCredentials,
 };
 use rustix::{net::sockopt::socket_peercred, process::geteuid};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use thiserror::Error;
 
 use crate::{
@@ -27,6 +28,7 @@ use crate::{
 const PORT: u16 = 37_373;
 const BUDGET: Duration = Duration::from_secs(8);
 const MAX_FRAME_BYTES: usize = 1_048_576;
+const PRE_DISPATCH_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Error)]
 #[doc(hidden)]
@@ -50,9 +52,11 @@ pub fn run_donor(runtime: &mut DonorRuntime) -> Result<(), DirectSessionError> {
         return Err(DirectSessionError::State);
     }
     loop {
-        let Ok(socket) =
-            TcpStream::connect_timeout(&SocketAddrV4::new(profile.endpoint, PORT).into(), BUDGET)
-        else {
+        let Ok(socket) = connect_bound(
+            profile.listen_interface,
+            SocketAddrV4::new(profile.endpoint, PORT),
+            BUDGET,
+        ) else {
             std::thread::sleep(Duration::from_secs(1));
             continue;
         };
@@ -90,12 +94,50 @@ pub fn run_candidate() -> Result<(), DirectSessionError> {
             return Err(DirectSessionError::State);
         }
         let request = read_frame(&mut broker)?;
-        let (socket, _) = network.accept().map_err(|_| DirectSessionError::Io)?;
-        let response = candidate_server(&state, &profile)?
-            .exchange(socket, &request)
-            .map_err(|_| DirectSessionError::Ambiguous)?;
+        let response = exchange_candidate_request((&network, &state, &profile), &request)?;
         write_frame(&mut broker, &response)?;
     }
+}
+
+fn connect_bound(
+    local: Ipv4Addr,
+    remote: SocketAddrV4,
+    budget: Duration,
+) -> Result<TcpStream, DirectSessionError> {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+        .map_err(|_| DirectSessionError::Io)?;
+    socket
+        .bind(&SockAddr::from(SocketAddrV4::new(local, 0)))
+        .map_err(|_| DirectSessionError::Io)?;
+    socket
+        .connect_timeout(&SockAddr::from(remote), budget)
+        .map_err(|_| DirectSessionError::Io)?;
+    let stream = TcpStream::from(socket);
+    match stream.local_addr().map_err(|_| DirectSessionError::Io)? {
+        SocketAddr::V4(bound) if *bound.ip() == local => Ok(stream),
+        SocketAddr::V4(_) | SocketAddr::V6(_) => Err(DirectSessionError::Io),
+    }
+}
+
+fn exchange_candidate_request(
+    context: (&TcpListener, &Path, &DirectProfile),
+    request: &[u8],
+) -> Result<Vec<u8>, DirectSessionError> {
+    let (network, state, profile) = context;
+    let candidate = candidate_server(state, profile)?;
+    for attempt in 0..PRE_DISPATCH_ATTEMPTS {
+        let (socket, _) = network.accept().map_err(|_| DirectSessionError::Io)?;
+        match candidate.exchange(socket, request) {
+            Ok(response) => return Ok(response),
+            Err(CandidateExchangeError::PreDispatch(_))
+                if attempt < PRE_DISPATCH_ATTEMPTS.saturating_sub(1) => {}
+            Err(CandidateExchangeError::Ambiguous(_)) => {
+                return Err(DirectSessionError::Ambiguous);
+            }
+            Err(_) => return Err(DirectSessionError::Tls),
+        }
+    }
+    Err(DirectSessionError::Tls)
 }
 
 fn donor_client(
@@ -216,3 +258,7 @@ fn write_frame(stream: &mut impl Write, response: &[u8]) -> Result<(), DirectSes
         .and_then(|()| stream.write_all(response))
         .map_err(|_| DirectSessionError::Io)
 }
+
+#[cfg(test)]
+#[path = "direct_session_tests.rs"]
+mod tests;

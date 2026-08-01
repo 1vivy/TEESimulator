@@ -23,11 +23,89 @@ use rustls::{
 };
 
 use super::{
-    AdmissionBinding, ClientPeer, PinnedTlsCandidateServer, PinnedTlsClient, PinnedTlsDonorClient,
-    PinnedTlsServer, ServerPeer, TlsAdmission, TlsCredentials, TlsError,
+    AdmissionBinding, CandidateExchangeError, ClientPeer, PinnedTlsCandidateServer,
+    PinnedTlsClient, PinnedTlsDonorClient, PinnedTlsServer, ServerPeer, TlsAdmission,
+    TlsCredentials, TlsError,
     tls_handshake::{complete_client_handshake, complete_server_handshake},
     tls_io::{Deadline, flush_bytes, read_exact, read_frame, write_bytes, write_frame},
 };
+
+#[test]
+fn candidate_exchange_types_admission_failure_as_pre_dispatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let _serial = serial_tls_tests();
+    let pki = test_pki(Validity::Current)?;
+    let candidate = PinnedTlsCandidateServer::new(
+        pki.server.identity(),
+        &ServerPeer::new(vec![pki.root.clone()], pki.client.pin),
+        TlsAdmission::new(binding(), PEER_BUDGET),
+    )?;
+    let donor = PinnedTlsDonorClient::new(
+        pki.client.identity(),
+        ClientPeer::new(
+            vec![pki.root.clone()],
+            ServerName::try_from("localhost".to_owned())?,
+            pki.server.pin,
+        ),
+        TlsAdmission::new(
+            AdmissionBinding::new([[0x91; 32], [2; 32], [3; 32], [4; 32]]),
+            PEER_BUDGET,
+        ),
+    )?;
+    let (donor_socket, candidate_socket) = connected_pair()?;
+    let worker = std::thread::spawn(move || donor.serve_once(donor_socket, |_| Ok(Vec::new())));
+
+    // When
+    let result = candidate.exchange(candidate_socket, b"never-dispatched");
+
+    // Then
+    assert_eq!(
+        result,
+        Err(CandidateExchangeError::PreDispatch(TlsError::Admission))
+    );
+    assert!(worker.join().map_err(|_| "donor thread failed")?.is_err());
+    Ok(())
+}
+
+#[test]
+fn candidate_exchange_types_response_loss_as_ambiguous() -> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let _serial = serial_tls_tests();
+    let pki = test_pki(Validity::Current)?;
+    let candidate = PinnedTlsCandidateServer::new(
+        pki.server.identity(),
+        &ServerPeer::new(vec![pki.root.clone()], pki.client.pin),
+        TlsAdmission::new(binding(), PEER_BUDGET),
+    )?;
+    let donor = PinnedTlsDonorClient::new(
+        pki.client.identity(),
+        ClientPeer::new(
+            vec![pki.root.clone()],
+            ServerName::try_from("localhost".to_owned())?,
+            pki.server.pin,
+        ),
+        TlsAdmission::new(binding(), PEER_BUDGET),
+    )?;
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&dispatched);
+    let (donor_socket, candidate_socket) = connected_pair()?;
+    let worker = std::thread::spawn(move || {
+        donor.serve_once(donor_socket, |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Err(TlsError::Io)
+        })
+    });
+
+    // When
+    let result = candidate.exchange(candidate_socket, b"dispatched-once");
+
+    // Then
+    assert_eq!(result, Err(CandidateExchangeError::Ambiguous(TlsError::Io)));
+    assert!(worker.join().map_err(|_| "donor thread failed")?.is_err());
+    assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+    Ok(())
+}
 
 #[test]
 fn donor_dials_while_candidate_originates_the_request() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,7 +120,9 @@ fn donor_dials_while_candidate_originates_the_request() -> Result<(), Box<dyn st
         TlsAdmission::new(binding(), PEER_BUDGET),
     )?;
     let worker = std::thread::spawn(move || {
-        let (socket, _) = listener.accept().map_err(|_| TlsError::Io)?;
+        let (socket, _) = listener
+            .accept()
+            .map_err(|_| CandidateExchangeError::PreDispatch(TlsError::Io))?;
         candidate.exchange(socket, b"candidate-request")
     });
     let donor = PinnedTlsDonorClient::new(

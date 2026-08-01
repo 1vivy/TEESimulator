@@ -46,7 +46,8 @@ pub use tls::{
     peer_spki_hash,
 };
 pub use tls_types::{
-    AdmissionBinding, ClientPeer, ServerPeer, TlsAdmission, TlsCredentials, TlsError,
+    AdmissionBinding, CandidateExchangeError, ClientPeer, ServerPeer, TlsAdmission, TlsCredentials,
+    TlsError,
 };
 
 /// Platform-independent transport adapter.

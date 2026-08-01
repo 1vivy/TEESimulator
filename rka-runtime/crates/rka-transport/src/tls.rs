@@ -12,8 +12,14 @@ use rustls::{
 use webpki::anchor_from_trusted_cert;
 
 use crate::tls_handshake::{complete_client_handshake, complete_server_handshake};
-use crate::tls_io::{Deadline, flush_bytes, read_exact, read_frame, write_bytes, write_frame};
-use crate::{AdmissionBinding, ClientPeer, ServerPeer, TlsAdmission, TlsCredentials, TlsError};
+use crate::tls_io::{
+    Deadline, DispatchWriteError, flush_bytes, read_exact, read_frame, write_bytes,
+    write_dispatch_frame, write_frame,
+};
+use crate::{
+    AdmissionBinding, CandidateExchangeError, ClientPeer, ServerPeer, TlsAdmission, TlsCredentials,
+    TlsError,
+};
 
 /// TLS 1.3 candidate with standard `WebPKI` validation plus exact SPKI pinning.
 #[derive(Debug)]
@@ -184,27 +190,37 @@ impl PinnedTlsCandidateServer {
     }
 
     /// Sends one canonical request only after mutual TLS, pin, and admission checks.
-    pub fn exchange(&self, socket: TcpStream, request: &[u8]) -> Result<Vec<u8>, TlsError> {
+    pub fn exchange(
+        &self,
+        socket: TcpStream,
+        request: &[u8],
+    ) -> Result<Vec<u8>, CandidateExchangeError> {
         if request.is_empty() || request.len() > MAX_FRAME_BYTES {
-            return Err(TlsError::Frame);
+            return Err(CandidateExchangeError::PreDispatch(TlsError::Frame));
         }
-        let deadline = Deadline::new(self.budget)?;
-        let connection =
-            ServerConnection::new(Arc::clone(&self.config)).map_err(|_| TlsError::Configuration)?;
+        let deadline = Deadline::new(self.budget).map_err(CandidateExchangeError::PreDispatch)?;
+        let connection = ServerConnection::new(Arc::clone(&self.config))
+            .map_err(|_| CandidateExchangeError::PreDispatch(TlsError::Configuration))?;
         let mut stream = StreamOwned::new(connection, socket);
-        complete_server_handshake(&mut stream, &deadline)?;
+        complete_server_handshake(&mut stream, &deadline)
+            .map_err(CandidateExchangeError::PreDispatch)?;
         verify_common(
             stream.conn.protocol_version(),
             stream.conn.peer_certificates(),
             self.expected_pin,
-        )?;
+        )
+        .map_err(CandidateExchangeError::PreDispatch)?;
         let mut token = [0_u8; 32];
-        read_exact(&mut stream, &mut token, &deadline)?;
+        read_exact(&mut stream, &mut token, &deadline)
+            .map_err(CandidateExchangeError::PreDispatch)?;
         if token != self.binding.token() {
-            return Err(TlsError::Admission);
+            return Err(CandidateExchangeError::PreDispatch(TlsError::Admission));
         }
-        write_frame(&mut stream, request, &deadline)?;
-        read_frame(&mut stream, &deadline)
+        write_dispatch_frame(&mut stream, request, &deadline).map_err(|error| match error {
+            DispatchWriteError::PreDispatch(error) => CandidateExchangeError::PreDispatch(error),
+            DispatchWriteError::Ambiguous(error) => CandidateExchangeError::Ambiguous(error),
+        })?;
+        read_frame(&mut stream, &deadline).map_err(CandidateExchangeError::Ambiguous)
     }
 }
 

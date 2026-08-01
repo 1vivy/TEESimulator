@@ -171,3 +171,15 @@ pub enum TlsError {
     #[error("TLS I/O failed")]
     Io,
 }
+
+/// Candidate exchange failure classified by possible application dispatch.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[non_exhaustive]
+pub enum CandidateExchangeError {
+    /// No request payload byte was written, so reconnecting cannot duplicate dispatch.
+    #[error("candidate exchange failed before request dispatch")]
+    PreDispatch(#[source] TlsError),
+    /// A request payload byte was written or its response failed.
+    #[error("candidate exchange outcome is ambiguous")]
+    Ambiguous(#[source] TlsError),
+}

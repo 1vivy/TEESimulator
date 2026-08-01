@@ -36,6 +36,15 @@ internal enum class FixtureMutation {
     FAIL_DONOR_DEPLOY,
     FAIL_CANDIDATE_DEPLOY,
     FAIL_CANDIDATE_NETWORK,
+    TUN_SUFFIX,
+    TUN_MULTIPLE,
+    TUN_SPECIAL,
+    TUN_UNSPECIFIED,
+    TUN_LINK_LOCAL,
+    TUN_MULTICAST,
+    TUN_BROADCAST,
+    TUN_WHITESPACE,
+    TUN_MALFORMED,
     MISMATCH_CANDIDATE_PIN,
     AFTER_STOP,
     AFTER_UNMOUNT,
@@ -115,6 +124,15 @@ internal fun applyFixtureMutation(
         FixtureMutation.FAIL_CANDIDATE_DEPLOY -> environment["RKA_FAKE_FAIL_DEPLOY"] = "CANDIDATE_B"
         FixtureMutation.FAIL_CANDIDATE_NETWORK ->
             environment["RKA_FAKE_FAIL_NETWORK"] = "CANDIDATE_B"
+        FixtureMutation.TUN_SUFFIX -> environment["RKA_FAKE_IP_MODE"] = "suffix"
+        FixtureMutation.TUN_MULTIPLE -> environment["RKA_FAKE_IP_MODE"] = "multiple"
+        FixtureMutation.TUN_SPECIAL -> environment["RKA_FAKE_IP_MODE"] = "special"
+        FixtureMutation.TUN_UNSPECIFIED -> environment["RKA_FAKE_IP_MODE"] = "unspecified"
+        FixtureMutation.TUN_LINK_LOCAL -> environment["RKA_FAKE_IP_MODE"] = "link-local"
+        FixtureMutation.TUN_MULTICAST -> environment["RKA_FAKE_IP_MODE"] = "multicast"
+        FixtureMutation.TUN_BROADCAST -> environment["RKA_FAKE_IP_MODE"] = "broadcast"
+        FixtureMutation.TUN_WHITESPACE -> environment["RKA_FAKE_IP_MODE"] = "whitespace"
+        FixtureMutation.TUN_MALFORMED -> environment["RKA_FAKE_IP_MODE"] = "malformed"
         FixtureMutation.MISMATCH_CANDIDATE_PIN ->
             environment["RKA_FAKE_MISMATCH_SERIAL"] = "CANDIDATE_B"
         FixtureMutation.AFTER_STOP -> environment["RKA_FAKE_FAULT"] = "after-stop"

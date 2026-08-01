@@ -219,6 +219,11 @@ exit 0
             )
             .trim() == "RUNNING"
 
+    fun directProfile(serial: String): String =
+        Files.readString(
+            devices.resolve("$serial/root/data/adb/teesimulator-rka/profiles/direct.conf")
+        )
+
     fun tlsServersStopped(): Boolean = tlsServers.allStopped()
 
     fun rollbackDonorAgain(): DeployResult {

@@ -91,6 +91,49 @@ class NoRebootDeployFailureTest {
     }
 
     @Test
+    fun donorDialsProfilesUseRemoteCandidateAndLocalInterfaces() {
+        Fixture().use { fixture ->
+            val result = fixture.run()
+
+            assertEquals(result.stderr, 0, result.exitCode)
+            assertTrue(fixture.directProfile("DONOR_A").contains("dial_endpoint=100.88.0.2\n"))
+            assertTrue(fixture.directProfile("DONOR_A").contains("listen_interface=100.88.0.1\n"))
+            assertTrue(fixture.directProfile("CANDIDATE_B").contains("dial_endpoint=100.88.0.2\n"))
+            assertTrue(
+                fixture.directProfile("CANDIDATE_B").contains("listen_interface=100.88.0.2\n")
+            )
+        }
+    }
+
+    @Test
+    fun tunInterfaceSuffixIsNormalizedWithoutAcceptingMalformedCandidates() {
+        Fixture(FixtureMutation.TUN_SUFFIX).use { fixture ->
+            val result = fixture.run()
+            assertEquals(result.stderr, 0, result.exitCode)
+        }
+        listOf(
+                FixtureMutation.TUN_MULTIPLE,
+                FixtureMutation.TUN_SPECIAL,
+                FixtureMutation.TUN_UNSPECIFIED,
+                FixtureMutation.TUN_LINK_LOCAL,
+                FixtureMutation.TUN_MULTICAST,
+                FixtureMutation.TUN_BROADCAST,
+                FixtureMutation.TUN_WHITESPACE,
+                FixtureMutation.TUN_MALFORMED,
+            )
+            .forEach { mutation ->
+                Fixture(mutation).use { fixture ->
+                    val result = fixture.run()
+                    assertEquals(3, result.exitCode)
+                    assertTrue(result.stderr.contains("RESULT=DIRECT_PATH_UNAVAILABLE"))
+                    assertTrue(
+                        fixture.trace().none { " push " in " $it " || " deploy " in " $it " }
+                    )
+                }
+            }
+    }
+
+    @Test
     fun failedSecondInstallRollsBackBothSidesWithoutFallback() {
         Fixture(FixtureMutation.FAIL_CANDIDATE_DEPLOY).use { fixture ->
             val result = fixture.run()

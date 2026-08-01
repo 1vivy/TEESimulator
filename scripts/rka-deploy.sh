@@ -384,7 +384,34 @@ prepare-upload)
     chmod 700 "$state" "$state/upload"
     ;;
 network)
-    endpoints=$(ip -o -4 addr show up scope global 2>/dev/null | awk '$2 ~ /^tun/ {split($4, value, "/"); print value[1]}')
+    endpoints=$(ip -o -4 addr show up scope global 2>/dev/null | awk '
+        function valid_ipv4(value, address, octet, part) {
+            if (value !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+$/) return 0
+            split(value, address, "/")
+            split(address[1], octet, ".")
+            if (octet[1] !~ /^[0-9]+$/ || octet[2] !~ /^[0-9]+$/ || octet[3] !~ /^[0-9]+$/ || octet[4] !~ /^[0-9]+$/) return 0
+            for (part = 1; part <= 4; part++) if (octet[part] > 255) return 0
+            if (octet[1] == 0 || octet[1] == 127 || octet[1] >= 224 || (octet[1] == 169 && octet[2] == 254)) return 0
+            return 1
+        }
+        {
+            interface = ""
+            endpoint = ""
+            global_scope = 0
+            for (field = 1; field <= NF; field++) {
+                token = $field
+                normalized = token
+                sub(/@.*/, "", normalized)
+                if (token ~ /^tun[[:alnum:]_.-]*(@[[:alnum:]_.:-]+)?$/ && normalized ~ /^tun[[:alnum:]_.-]*$/) interface = normalized
+                if (token == "inet" && field < NF && valid_ipv4($(field + 1))) endpoint = $(field + 1)
+                if (token == "scope" && field < NF && $(field + 1) == "global") global_scope = 1
+            }
+            if (interface != "" && endpoint != "" && global_scope) {
+                split(endpoint, address, "/")
+                print address[1]
+            }
+        }
+    ')
     [ "$(printf '%s\n' "$endpoints" | sed '/^$/d' | wc -l)" -eq 1 ] || exit 1
     endpoint=$endpoints
     case "$endpoint" in ""|*[!0-9.]*) exit 1 ;; esac

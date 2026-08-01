@@ -225,8 +225,20 @@ case "${1-}" in
 esac'
 write_shim ip '
 case "$RKA_FAKE_SERIAL" in
-  DONOR_A) printf "1: tun0 inet 100.88.0.1/32 scope global tun0\n" ;;
-  *) printf "1: tun0 inet 100.88.0.2/32 scope global tun0\n" ;;
+  DONOR_A) endpoint=100.88.0.1 ;;
+  *) endpoint=100.88.0.2 ;;
+esac
+case "${RKA_FAKE_IP_MODE:-}" in
+  suffix) printf "7: tun0@if8    inet %s/32 scope global tun0\\n" "$endpoint" ;;
+  multiple) printf "7: tun0    inet %s/32 scope global tun0\\n8: tun1    inet 100.88.0.3/32 scope global tun1\\n" "$endpoint" ;;
+  special) printf "7: tun0    inet 127.0.0.1/32 scope global tun0\\n" ;;
+  unspecified) printf "7: tun0    inet 0.0.0.0/32 scope global tun0\\n" ;;
+  link-local) printf "7: tun0    inet 169.254.1.2/16 scope global tun0\\n" ;;
+  multicast) printf "7: tun0    inet 224.0.0.1/32 scope global tun0\\n" ;;
+  broadcast) printf "7: tun0    inet 255.255.255.255/32 scope global tun0\\n" ;;
+  whitespace) printf "7: tun0    inet %s /32 scope global tun0\\n" "$endpoint" ;;
+  malformed) printf "7: tun0    inet %s/32;touch /tmp/rka-network-pwn scope global tun0\\n" "$endpoint" ;;
+  *) printf "7: tun0    inet %s/32 scope global tun0\\n" "$endpoint" ;;
 esac'
 write_shim ping 'exit 0'
 write_shim logcat 'exit 0'

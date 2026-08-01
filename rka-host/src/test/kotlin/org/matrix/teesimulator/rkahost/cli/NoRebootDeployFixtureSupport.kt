@@ -52,6 +52,12 @@ internal enum class FixtureMutation {
     NEXT_BOOT_DRIFT,
     NEXT_PROBE_HASH_MISMATCH,
     NEXT_PROBE_CLEANUP_FAILURE,
+    NEXT_ANDROID_SHELL_PARSER,
+    NEXT_MATCH_WHITESPACE,
+    NEXT_MATCH_NEWLINE,
+    NEXT_MATCH_METACHAR,
+    NEXT_MATCH_MALFORMED,
+    NEXT_MATCH_EXTRA,
     NEXT_LAYOUT_ONE_PARENT,
     NEXT_LAYOUT_FILE,
     NEXT_LAYOUT_SYMLINK,
@@ -122,6 +128,17 @@ internal fun applyFixtureMutation(
             environment["RKA_FAKE_NEXT_MUTATION"] = "probe-hash-mismatch"
         FixtureMutation.NEXT_PROBE_CLEANUP_FAILURE ->
             environment["RKA_FAKE_NEXT_MUTATION"] = "probe-cleanup-failure"
+        FixtureMutation.NEXT_ANDROID_SHELL_PARSER ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "android-shell-parser"
+        FixtureMutation.NEXT_MATCH_WHITESPACE ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "match-whitespace"
+        FixtureMutation.NEXT_MATCH_NEWLINE ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "match-newline"
+        FixtureMutation.NEXT_MATCH_METACHAR ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "match-metachar"
+        FixtureMutation.NEXT_MATCH_MALFORMED ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "match-malformed"
+        FixtureMutation.NEXT_MATCH_EXTRA -> environment["RKA_FAKE_NEXT_MUTATION"] = "match-extra"
         FixtureMutation.NEXT_LAYOUT_ONE_PARENT ->
             environment["RKA_FAKE_NEXT_MUTATION"] = "layout-one-parent"
         FixtureMutation.NEXT_LAYOUT_FILE -> environment["RKA_FAKE_NEXT_MUTATION"] = "layout-file"

@@ -324,7 +324,10 @@ manager-probe)
     awk 'NF < 2 || $1 !~ /^[A-Za-z0-9._]+$/ || $2 !~ /^[0-9]+$/ {exit 1}' "$packages" || { printf "RESULT=INCOMPATIBLE reason=PACKAGES_LIST\n"; exit; }
     matches=$(awk -v appid="$appid" 'NF >= 2 && $1 ~ /^[A-Za-z0-9._]+$/ && $2 ~ /^[0-9]+$/ && ($2 % 100000) == appid {print $1 "|" $2}' "$packages") || :
     [ "$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l)" -eq 1 ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_PACKAGE_AMBIGUOUS\n"; exit; }
-    package=${matches%%|*}; package_uid=${matches#*|}
+    printf '%s\n' "$matches" | grep -Eq '^[A-Za-z0-9._]+[|][0-9]+$' || { printf "RESULT=INCOMPATIBLE reason=MANAGER_PACKAGE_INVALID\n"; exit; }
+    IFS='|' read -r package package_uid <<EOF
+$matches
+EOF
     [ $((package_uid % 100000)) -eq "$appid" ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_UID_MISMATCH\n"; exit; }
     package_dump=$(dumpsys package "$package" 2>/dev/null) || :
     package_dump_uid=$(printf '%s\n' "$package_dump" | sed -n 's/^ *userId=//p')

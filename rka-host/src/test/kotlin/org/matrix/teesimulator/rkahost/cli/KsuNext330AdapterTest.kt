@@ -7,6 +7,48 @@ import org.junit.Test
 
 class KsuNext330AdapterTest {
     @Test
+    fun androidShellParserKeepsDottedManagerPackageAndNumericUidAsData() {
+        Fixture(
+                mutation = FixtureMutation.NEXT_ANDROID_SHELL_PARSER,
+                kernelProfile = KernelProfile.KSU_NEXT_DUAL,
+            )
+            .use { fixture ->
+                val result = fixture.run()
+
+                assertEquals(result.stderr, 0, result.exitCode)
+                assertTrue(result.stdout.contains("\"result\":\"DEPLOYED_NO_REBOOT\""))
+                assertTrue(fixture.hasKsuNextManagerSurfaceReceipts())
+            }
+    }
+
+    @Test
+    fun malformedManagerMatchRecordsFailClosedWithoutExecutingTheirValues() {
+        val mutations =
+            listOf(
+                FixtureMutation.NEXT_MATCH_WHITESPACE,
+                FixtureMutation.NEXT_MATCH_NEWLINE,
+                FixtureMutation.NEXT_MATCH_METACHAR,
+                FixtureMutation.NEXT_MATCH_MALFORMED,
+                FixtureMutation.NEXT_MATCH_EXTRA,
+            )
+
+        mutations.forEach { mutation ->
+            Fixture(mutation = mutation, kernelProfile = KernelProfile.KSU_NEXT_DUAL).use { fixture
+                ->
+                val result = fixture.run()
+
+                assertEquals(mutation.name, 3, result.exitCode)
+                assertTrue(
+                    result.stderr,
+                    result.stderr.contains("KSU_MANAGER_AUTHORIZATION_FAILED"),
+                )
+                assertTrue(mutation.name, fixture.managerMatchPayloadDidNotExecute())
+                assertTrue(mutation.name, fixture.probeArtifactsAbsent())
+            }
+        }
+    }
+
+    @Test
     fun donorOfficialManagerAndCandidateHeadlessManagerDeployWithoutPersistentKsud() {
         Fixture(kernelProfile = KernelProfile.KSU_NEXT_DUAL).use { fixture ->
             val result = fixture.run()

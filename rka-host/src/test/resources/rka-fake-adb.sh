@@ -201,6 +201,15 @@ write_shim lsattr 'printf "%s %s\n" ---------------------- "${@: -1}"'
 write_shim awk '
 last=
 for value in "$@"; do last=$value; done
+if [ "$last" = /data/system/packages.list ]; then
+  case " $* " in
+    *"(\$2 % 100000) == appid"*)
+      if [ -n "${RKA_FAKE_MANAGER_MATCH:-}" ]; then
+        printf "%s\n" "$RKA_FAKE_MANAGER_MATCH"
+        exit 0
+      fi ;;
+  esac
+fi
 if [ "$last" = /proc/1/mountinfo ]; then
   if [ -f /data/adb/teesimulator-rka/.bound ]; then
     case " $* " in *print*) printf "77|/\n" ;; esac
@@ -332,6 +341,24 @@ if [ "${RKA_FAKE_KSU_PROFILE:-legacy}" = ksu-next-dual ]; then
     esac
 fi
 
+manager_match=
+case "${RKA_FAKE_NEXT_MUTATION:-}" in
+    match-whitespace) manager_match='com.rifsxd bad|10123' ;;
+    match-newline) manager_match='com.rifsxd.ksunext|10123
+org.example.second|10123' ;;
+    match-metachar) manager_match='com.rifsxd.$(touch /tmp/rka-manager-executed)|10123' ;;
+    match-malformed) manager_match='com.rifsxd.ksunext|' ;;
+    match-extra) manager_match='com.rifsxd.ksunext|10123|extra' ;;
+esac
+
+if [ "${RKA_FAKE_NEXT_MUTATION:-}" = android-shell-parser ]; then
+    case "$wire_payload" in
+        *'package=${matches%%|*}; package_uid=${matches#*|}'*)
+            printf "manager-probe: unexpected '.'\n" >&2
+            exit 2 ;;
+    esac
+fi
+
 printf '%s\n' "$wire_payload" | bwrap \
     --bind "$root" / \
     --ro-bind /usr /usr \
@@ -351,6 +378,7 @@ printf '%s\n' "$wire_payload" | bwrap \
     --setenv RKA_FAKE_FIRST_INSTALL "${RKA_FAKE_FIRST_INSTALL:-false}" \
     --setenv RKA_FAKE_SYSTEM_OPENSSL "${RKA_FAKE_SYSTEM_OPENSSL:-true}" \
     --setenv RKA_FAKE_NEXT_MUTATION "${RKA_FAKE_NEXT_MUTATION:-}" \
+    --setenv RKA_FAKE_MANAGER_MATCH "$manager_match" \
     --setenv RKA_FAKE_MISMATCH_PIN "$([ "${RKA_FAKE_MISMATCH_SERIAL:-}" = "$serial" ] && printf true || printf false)" \
     --setenv RKA_FAKE_TLS_PROTOCOL "${RKA_FAKE_TLS_PROTOCOL:-TLS1.3}" \
     --setenv RKA_FAKE_PROBE_STATUS "${RKA_FAKE_PROBE_STATUS:-}" \

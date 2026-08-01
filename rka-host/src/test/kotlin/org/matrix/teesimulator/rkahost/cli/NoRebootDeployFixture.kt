@@ -301,6 +301,11 @@ os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zi
             !Files.exists(probes) || Files.list(probes).use { it.findAny().isEmpty }
         }
 
+    fun managerMatchPayloadDidNotExecute(): Boolean =
+        listOf("DONOR_A", "CANDIDATE_B").all { serial ->
+            Files.notExists(devices.resolve(serial).resolve("root/tmp/rka-manager-executed"))
+        }
+
     fun hasFirstInstallReceipts(): Boolean =
         listOf("DONOR_A", "CANDIDATE_B").all { serial ->
             val transaction = latestTransaction(serial)

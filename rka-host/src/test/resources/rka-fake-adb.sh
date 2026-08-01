@@ -59,9 +59,17 @@ if [ "${RKA_FAKE_FIRST_INSTALL:-false}" = true ] && [ ! -e "$root/data/adb/modul
     rm -rf "$root/data/adb/modules" "$root/data/adb/modules_update"
     case "${RKA_FAKE_NEXT_MUTATION:-}" in
         layout-one-parent) mkdir -p "$root/data/adb/modules" ;;
+        layout-target-file) mkdir -p "$root/data/adb/modules" "$root/data/adb/modules_update"; printf malformed > "$root/data/adb/modules/tricky_store" ;;
         layout-file) : > "$root/data/adb/modules" ;;
         layout-symlink) ln -s /data/adb/elsewhere "$root/data/adb/modules" ;;
         layout-hidden-mount) : > "$root/data/adb/teesimulator-rka/.bound" ;;
+    esac
+    case "${RKA_FAKE_FIRST_INSTALL_PARENTS:-absent}" in
+        empty) mkdir -p "$root/data/adb/modules" "$root/data/adb/modules_update" ;;
+        mixed)
+            mkdir -p "$root/data/adb/modules" "$root/data/adb/modules_update"
+            if [ "$serial" = CANDIDATE_B ]; then : > "$root/data/adb/modules/unrelated"; fi
+            ;;
     esac
 fi
 if [ "${RKA_FAKE_KSU_PROFILE:-legacy}" = ksu-next-dual ] && [ "${RKA_FAKE_FIRST_INSTALL:-false}" != true ] && [ ! -e "$root/data/adb/modules/tricky_store/module.prop" ]; then

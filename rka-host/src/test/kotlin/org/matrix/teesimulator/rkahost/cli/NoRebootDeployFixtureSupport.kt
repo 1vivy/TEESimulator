@@ -8,9 +8,16 @@ internal enum class CandidateManagerMode(val cliValue: String) {
     AUTHORIZED_HEADLESS("authorized_headless")
 }
 
+internal enum class FirstInstallParentLayout(val fixtureValue: String) {
+    ABSENT("absent"),
+    EMPTY("empty"),
+    MIXED("mixed"),
+}
+
 internal enum class KernelProfile(
     val fixtureName: String,
     val firstInstall: Boolean = false,
+    val firstInstallParentLayout: FirstInstallParentLayout = FirstInstallParentLayout.ABSENT,
     val systemOpenSsl: Boolean = true,
     val candidateManagerMode: CandidateManagerMode? = null,
 ) {
@@ -27,6 +34,18 @@ internal enum class KernelProfile(
         "ksu-next-dual",
         firstInstall = true,
         systemOpenSsl = false,
+        candidateManagerMode = CandidateManagerMode.AUTHORIZED_HEADLESS,
+    ),
+    KSU_NEXT_FIRST_INSTALL_EMPTY(
+        "ksu-next-dual",
+        firstInstall = true,
+        firstInstallParentLayout = FirstInstallParentLayout.EMPTY,
+        candidateManagerMode = CandidateManagerMode.AUTHORIZED_HEADLESS,
+    ),
+    KSU_NEXT_FIRST_INSTALL_EXISTING_PARENTS(
+        "ksu-next-dual",
+        firstInstall = true,
+        firstInstallParentLayout = FirstInstallParentLayout.MIXED,
         candidateManagerMode = CandidateManagerMode.AUTHORIZED_HEADLESS,
     ),
 }
@@ -100,6 +119,7 @@ internal enum class FixtureMutation {
     NEXT_UID_SOURCE_METACHAR,
     NEXT_UID_SOURCE_MISMATCH,
     NEXT_LAYOUT_ONE_PARENT,
+    NEXT_LAYOUT_TARGET_FILE,
     NEXT_LAYOUT_FILE,
     NEXT_LAYOUT_SYMLINK,
     NEXT_LAYOUT_HIDDEN_MOUNT,
@@ -253,6 +273,8 @@ internal fun applyFixtureMutation(
             environment["RKA_FAKE_NEXT_MUTATION"] = "uid-source-mismatch"
         FixtureMutation.NEXT_LAYOUT_ONE_PARENT ->
             environment["RKA_FAKE_NEXT_MUTATION"] = "layout-one-parent"
+        FixtureMutation.NEXT_LAYOUT_TARGET_FILE ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "layout-target-file"
         FixtureMutation.NEXT_LAYOUT_FILE -> environment["RKA_FAKE_NEXT_MUTATION"] = "layout-file"
         FixtureMutation.NEXT_LAYOUT_SYMLINK ->
             environment["RKA_FAKE_NEXT_MUTATION"] = "layout-symlink"

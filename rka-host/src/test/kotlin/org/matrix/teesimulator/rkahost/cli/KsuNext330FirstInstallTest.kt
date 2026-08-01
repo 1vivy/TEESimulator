@@ -19,6 +19,38 @@ class KsuNext330FirstInstallTest {
     }
 
     @Test
+    fun pairedEmptyParentsInstallAsTypedFirstInstall() {
+        Fixture(kernelProfile = KernelProfile.KSU_NEXT_FIRST_INSTALL_EMPTY).use { fixture ->
+            val result = fixture.run()
+
+            assertEquals(result.stderr, 0, result.exitCode)
+            assertTrue(
+                fixture.firstInstallFacts(),
+                fixture.hasFirstInstallReceipts("FIRST_INSTALL_EMPTY_LAYOUT"),
+            )
+        }
+    }
+
+    @Test
+    fun unrelatedExistingParentsInstallAsTypedFirstInstall() {
+        Fixture(kernelProfile = KernelProfile.KSU_NEXT_FIRST_INSTALL_EXISTING_PARENTS).use { fixture
+            ->
+            val result = fixture.run()
+
+            assertEquals(result.stderr, 0, result.exitCode)
+            assertTrue(
+                fixture.firstInstallFacts(),
+                fixture.hasFirstInstallReceipts(
+                    mapOf(
+                        "DONOR_A" to "FIRST_INSTALL_EMPTY_LAYOUT",
+                        "CANDIDATE_B" to "FIRST_INSTALL_EXISTING_PARENTS",
+                    )
+                ),
+            )
+        }
+    }
+
+    @Test
     fun failedPairRestoresPairedAbsentParents() {
         Fixture(
                 mutation = FixtureMutation.TLS12_ONLY,
@@ -43,6 +75,18 @@ class KsuNext330FirstInstallTest {
     }
 
     @Test
+    fun interruptionAfterInstallPreservesExistingFirstInstallParents() {
+        Fixture(
+                mutation = FixtureMutation.AFTER_INSTALL,
+                kernelProfile = KernelProfile.KSU_NEXT_FIRST_INSTALL_EXISTING_PARENTS,
+            )
+            .use { fixture ->
+                assertEquals(4, fixture.run().exitCode)
+                assertTrue(fixture.firstInstallParentContentsRestored())
+            }
+    }
+
+    @Test
     fun failedInstallWithOnlyOneCreatedParentRestoresPairedAbsence() {
         listOf(
                 FixtureMutation.INSTALL_ONLY_MODULES_PARENT,
@@ -61,6 +105,7 @@ class KsuNext330FirstInstallTest {
         val mutations =
             listOf(
                 FixtureMutation.NEXT_LAYOUT_ONE_PARENT,
+                FixtureMutation.NEXT_LAYOUT_TARGET_FILE,
                 FixtureMutation.NEXT_LAYOUT_FILE,
                 FixtureMutation.NEXT_LAYOUT_SYMLINK,
                 FixtureMutation.NEXT_LAYOUT_HIDDEN_MOUNT,

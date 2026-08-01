@@ -254,6 +254,8 @@ exit 0
                         environment()["RKA_FAKE_KSU_PROFILE"] = kernelProfile.fixtureName
                         environment()["RKA_FAKE_FIRST_INSTALL"] =
                             kernelProfile.firstInstall.toString()
+                        environment()["RKA_FAKE_FIRST_INSTALL_PARENTS"] =
+                            kernelProfile.firstInstallParentLayout.fixtureValue
                         environment()["RKA_FAKE_SYSTEM_OPENSSL"] =
                             kernelProfile.systemOpenSsl.toString()
                         environment()["PATH"] = "$tools:${environment()["PATH"]}"
@@ -408,11 +410,14 @@ os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zi
                 Files.notExists(root.resolve("rka-manager-uid-executed"))
         }
 
-    fun hasFirstInstallReceipts(): Boolean =
+    fun hasFirstInstallReceipts(expectedLayout: String = "FIRST_INSTALL_ABSENT_LAYOUT"): Boolean =
+        hasFirstInstallReceipts(listOf("DONOR_A", "CANDIDATE_B").associateWith { expectedLayout })
+
+    fun hasFirstInstallReceipts(expectedLayouts: Map<String, String>): Boolean =
         listOf("DONOR_A", "CANDIDATE_B").all { serial ->
             val transaction = latestTransaction(serial)
             Files.readString(transaction.resolve("layout.before")).trim() ==
-                "FIRST_INSTALL_ABSENT_LAYOUT" &&
+                expectedLayouts[serial] &&
                 Files.isRegularFile(
                     devices
                         .resolve(serial)
@@ -440,6 +445,26 @@ os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zi
             !Files.exists(adbRoot.resolve("modules")) &&
                 !Files.exists(adbRoot.resolve("modules_update"))
         }
+
+    fun firstInstallParentContentsRestored(): Boolean {
+        fun empty(path: Path): Boolean =
+            Files.isDirectory(path) &&
+                !Files.isSymbolicLink(path) &&
+                Files.list(path).use { paths -> paths.findAny().isEmpty }
+
+        val donorAdb = devices.resolve("DONOR_A/root/data/adb")
+        val candidateAdb = devices.resolve("CANDIDATE_B/root/data/adb")
+        val candidateModules = candidateAdb.resolve("modules")
+        return empty(donorAdb.resolve("modules")) &&
+            empty(donorAdb.resolve("modules_update")) &&
+            empty(candidateAdb.resolve("modules_update")) &&
+            Files.isDirectory(candidateModules) &&
+            !Files.isSymbolicLink(candidateModules) &&
+            Files.list(candidateModules).use { paths ->
+                paths.map { it.fileName.toString() }.toList() == listOf("unrelated")
+            } &&
+            Files.isRegularFile(candidateModules.resolve("unrelated"))
+    }
 
     fun pendingMetadataIsReinjected(): Boolean =
         listOf("DONOR_A", "CANDIDATE_B").all { serial ->

@@ -318,12 +318,72 @@ prepare_active_view_without_update() {
         rm -f "$active_view_destination/update" || return 1
     fi
 }
+classify_ksu_module_layout() {
+    if [ ! -e /data/adb/modules ] && [ ! -L /data/adb/modules ] && [ ! -e /data/adb/modules_update ] && [ ! -L /data/adb/modules_update ]; then
+        [ ! -e "$active" ] && [ ! -L "$active" ] && [ ! -e "$pending" ] && [ ! -L "$pending" ] || return 1
+        ! awk -v p="$active" "\$5 == p {found=1} END {exit !found}" /proc/1/mountinfo || return 1
+        [ ! -d "$state/run/pids" ] || return 1
+        printf 'FIRST_INSTALL_ABSENT_LAYOUT'
+        return
+    fi
+    for parent in /data/adb/modules /data/adb/modules_update; do
+        [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+    done
+    if [ ! -e "$active" ] && [ ! -L "$active" ] && [ ! -e "$pending" ] && [ ! -L "$pending" ]; then
+        ! awk -v p="$active" "\$5 == p {found=1} END {exit !found}" /proc/1/mountinfo || return 1
+        [ ! -d "$state/run/pids" ] || return 1
+        if [ -z "$(find /data/adb/modules -mindepth 1 -maxdepth 1 -print)" ] && [ -z "$(find /data/adb/modules_update -mindepth 1 -maxdepth 1 -print)" ]; then
+            printf 'FIRST_INSTALL_EMPTY_LAYOUT'
+        else
+            printf 'FIRST_INSTALL_EXISTING_PARENTS'
+        fi
+        return
+    fi
+    [ -d "$active" ] && [ ! -L "$active" ] || return 1
+    if [ -e "$pending" ] || [ -L "$pending" ]; then [ -d "$pending" ] && [ ! -L "$pending" ] || return 1; fi
+    printf 'PRESENT_LAYOUT'
+}
+prepare_parent_view_without_target() {
+    parent_view_source=$1
+    parent_view_target=$2
+    parent_view_destination=$3
+    [ -d "$parent_view_source" ] && [ ! -L "$parent_view_source" ] || return 1
+    cp -a "$parent_view_source" "$parent_view_destination" || return 1
+    if [ -e "$parent_view_destination/$parent_view_target" ] || [ -L "$parent_view_destination/$parent_view_target" ]; then
+        [ -d "$parent_view_destination/$parent_view_target" ] && [ ! -L "$parent_view_destination/$parent_view_target" ] || return 1
+        rm -rf "$parent_view_destination/$parent_view_target" || return 1
+    fi
+}
+snapshot_first_install_parents() {
+    prepare_parent_view_without_target /data/adb/modules tricky_store "$txn/modules.before.without-target.tree" || return 1
+    toybox touch -r /data/adb/modules "$txn/modules.before.without-target.tree" || return 1
+    tree_hash "$txn/modules.before.without-target.tree" > "$txn/modules.before.without-target"
+    metadata_hash "$txn/modules.before.without-target.tree" > "$txn/modules.metadata.before.without-target"
+    prepare_parent_view_without_target /data/adb/modules_update tricky_store "$txn/modules-update.before.without-target.tree" || return 1
+    toybox touch -r /data/adb/modules_update "$txn/modules-update.before.without-target.tree" || return 1
+    tree_hash "$txn/modules-update.before.without-target.tree" > "$txn/modules-update.before.without-target"
+    metadata_hash "$txn/modules-update.before.without-target.tree" > "$txn/modules-update.metadata.before.without-target"
+}
+validate_first_install_parents() {
+    prepare_parent_view_without_target /data/adb/modules tricky_store "$txn/modules.after.without-target.tree" || return 1
+    toybox touch -r "$txn/modules.before.without-target.tree" "$txn/modules.after.without-target.tree" || return 1
+    [ "$(tree_hash "$txn/modules.after.without-target.tree")" = "$(cat "$txn/modules.before.without-target")" ] || return 1
+    [ "$(metadata_hash "$txn/modules.after.without-target.tree")" = "$(cat "$txn/modules.metadata.before.without-target")" ] || return 1
+    prepare_parent_view_without_target /data/adb/modules_update tricky_store "$txn/modules-update.after.without-target.tree" || return 1
+    toybox touch -r "$txn/modules-update.before.without-target.tree" "$txn/modules-update.after.without-target.tree" || return 1
+    [ "$(tree_hash "$txn/modules-update.after.without-target.tree")" = "$(cat "$txn/modules-update.before.without-target")" ] || return 1
+    [ "$(metadata_hash "$txn/modules-update.after.without-target.tree")" = "$(cat "$txn/modules-update.metadata.before.without-target")" ] || return 1
+}
+validate_first_install_parent_rollback() {
+    [ ! -e "$active" ] && [ ! -L "$active" ] && [ ! -e "$pending" ] && [ ! -L "$pending" ] || return 1
+    validate_first_install_parents
+}
 validate_ksu_active_layout() {
     active_layout=$(cat "$txn/layout.before") || return 1
     [ -d "$active" ] && [ ! -L "$active" ] || return 1
     [ -f "$active/update" ] && [ ! -L "$active/update" ] || return 1
     case "$active_layout" in
-        FIRST_INSTALL_ABSENT_LAYOUT)
+        FIRST_INSTALL_ABSENT_LAYOUT|FIRST_INSTALL_EMPTY_LAYOUT|FIRST_INSTALL_EXISTING_PARENTS)
             active_entries=$(find "$active" -mindepth 1 -maxdepth 1 -print | LC_ALL=C sort) || return 1
             expected_active_entries=$(printf '%s\n%s' "$active/module.prop" "$active/update")
             [ "$active_entries" = "$expected_active_entries" ] || return 1
@@ -364,17 +424,7 @@ preflight)
         [ "$module_tree" = "install restore uninstall enable disable action metamodule list config help" ] || { printf "RESULT=INCOMPATIBLE reason=MODULE_CLI\n"; exit; }
         sepolicy_tree=$(ksud sepolicy help 2>/dev/null | sed -n 's/^  \([a-z][a-z-]*\).*$/\1/p' | tr '\n' ' ' | sed 's/ $//') || :
         [ "$sepolicy_tree" = "patch apply check help" ] || { printf "RESULT=INCOMPATIBLE reason=SEPOLICY_CLI\n"; exit; }
-        module_layout=PRESENT_LAYOUT
-        if [ ! -e /data/adb/modules ] && [ ! -L /data/adb/modules ] && [ ! -e /data/adb/modules_update ] && [ ! -L /data/adb/modules_update ]; then
-            [ ! -e "$active" ] && [ ! -L "$active" ] && [ ! -e "$pending" ] && [ ! -L "$pending" ] || { printf "RESULT=INCOMPATIBLE reason=MODULE_LAYOUT\n"; exit; }
-            ! awk -v p="$active" "\$5 == p {found=1} END {exit !found}" /proc/1/mountinfo || { printf "RESULT=INCOMPATIBLE reason=MODULE_LAYOUT\n"; exit; }
-            [ ! -d "$state/run/pids" ] || { printf "RESULT=INCOMPATIBLE reason=MODULE_LAYOUT\n"; exit; }
-            module_layout=FIRST_INSTALL_ABSENT_LAYOUT
-        else
-            for path in /data/adb/modules /data/adb/modules_update; do
-                [ -d "$path" ] && [ ! -L "$path" ] || { printf "RESULT=INCOMPATIBLE reason=MODULE_LAYOUT\n"; exit; }
-            done
-        fi
+        module_layout=$(classify_ksu_module_layout) || { printf "RESULT=INCOMPATIBLE reason=MODULE_LAYOUT\n"; exit; }
         if [ -e /data/adb/metamodule ] || [ -L /data/adb/metamodule ]; then
             [ -L /data/adb/metamodule ] || { printf "RESULT=INCOMPATIBLE reason=METAMODULE_LAYOUT\n"; exit; }
             case "$(readlink -f /data/adb/metamodule)" in /data/adb/modules/*) ;; *) printf "RESULT=INCOMPATIBLE reason=METAMODULE_LAYOUT\n"; exit ;; esac
@@ -595,11 +645,8 @@ deploy)
     fi
     printf "source_sha=%s\narchive_sha256=%s\n" "$expected_source_sha" "$expected_archive_sha" > "$txn/source.receipt"
     chmod 600 "$txn/source.receipt"
-    if [ ! -e /data/adb/modules ] && [ ! -L /data/adb/modules ] && [ ! -e /data/adb/modules_update ] && [ ! -L /data/adb/modules_update ]; then
-        printf 'FIRST_INSTALL_ABSENT_LAYOUT\n' > "$txn/layout.before"
-    else
-        printf 'PRESENT_LAYOUT\n' > "$txn/layout.before"
-    fi
+    module_layout=$(classify_ksu_module_layout) || exit 1
+    printf '%s\n' "$module_layout" > "$txn/layout.before"
     chmod 600 "$txn/layout.before"
     tree_hash "$pending" > "$txn/pending.before"
     metadata_hash "$pending" > "$txn/pending.metadata.before"
@@ -631,7 +678,7 @@ deploy)
     metadata_hash "$active" > "$txn/active.metadata.before"
     cp -a "$active" "$txn/active.tree" 2>/dev/null || [ ! -e "$active" ]
     if [ -d "$txn/active.tree" ]; then [ "$(tree_hash "$txn/active.tree")" = "$(cat "$txn/active.before")" ] || exit 1; fi
-    if [ -f "$state/manager-authorizations/$tx" ]; then
+    if [ -f "$state/manager-authorizations/$tx" ] && [ "$module_layout" = PRESENT_LAYOUT ]; then
         if [ -e "$txn/active.tree/update" ] || [ -L "$txn/active.tree/update" ]; then
             [ -f "$txn/active.tree/update" ] && [ ! -L "$txn/active.tree/update" ] || exit 1
             printf 'PRESENT\n' > "$txn/active.update.before"
@@ -646,6 +693,9 @@ deploy)
         tree_hash "$txn/active.before.without-update.tree" > "$txn/active.before.without-update"
         metadata_hash "$txn/active.before.without-update.tree" > "$txn/active.metadata.before.without-update"
     fi
+    case "$module_layout" in
+        FIRST_INSTALL_EMPTY_LAYOUT|FIRST_INSTALL_EXISTING_PARENTS) snapshot_first_install_parents || exit 1 ;;
+    esac
     touch "$txn/snapshot.ready"
     set_phase SNAPSHOTS_READY
     if [ "$metadata_bridge" = true ]; then prepare_ksu_metadata || exit 1; fi
@@ -657,6 +707,9 @@ deploy)
             [ -d "$path" ] && [ ! -L "$path" ] || exit 1
         done
         validate_ksu_active_layout || exit 1
+        case "$module_layout" in
+            FIRST_INSTALL_EMPTY_LAYOUT|FIRST_INSTALL_EXISTING_PARENTS) validate_first_install_parents || exit 1 ;;
+        esac
     fi
     if [ "$metadata_bridge" = true ]; then
         reinject_ksu_metadata || exit 1
@@ -978,17 +1031,20 @@ rollback)
     [ "$(tree_hash "$pending")" = "$(cat "$txn/pending.before")" ] || exit 1
     [ "$(metadata_hash "$active")" = "$(cat "$txn/active.metadata.before")" ] || exit 1
     [ "$(metadata_hash "$pending")" = "$(cat "$txn/pending.metadata.before")" ] || exit 1
-    if [ "$(cat "$txn/layout.before" 2>/dev/null)" = FIRST_INSTALL_ABSENT_LAYOUT ]; then
-        for parent in /data/adb/modules /data/adb/modules_update; do
-            [ ! -L "$parent" ] || exit 1
-            if [ -e "$parent" ]; then
-                [ -d "$parent" ] || exit 1
-                [ -z "$(find "$parent" -mindepth 1 -maxdepth 1 -print)" ] || exit 1
-                rmdir "$parent" || exit 1
-            fi
-            [ ! -e "$parent" ] && [ ! -L "$parent" ] || exit 1
-        done
-    fi
+    case "$(cat "$txn/layout.before" 2>/dev/null)" in
+        FIRST_INSTALL_ABSENT_LAYOUT)
+            for parent in /data/adb/modules /data/adb/modules_update; do
+                [ ! -L "$parent" ] || exit 1
+                if [ -e "$parent" ]; then
+                    [ -d "$parent" ] || exit 1
+                    [ -z "$(find "$parent" -mindepth 1 -maxdepth 1 -print)" ] || exit 1
+                    rmdir "$parent" || exit 1
+                fi
+                [ ! -e "$parent" ] && [ ! -L "$parent" ] || exit 1
+            done
+            ;;
+        FIRST_INSTALL_EMPTY_LAYOUT|FIRST_INSTALL_EXISTING_PARENTS) validate_first_install_parent_rollback || exit 1 ;;
+    esac
     if [ "$(cat "$txn/prior.bind" 2>/dev/null)" = true ]; then
         nsenter -t 1 -m -- mount --bind "$pending" "$active"
         [ "$(nsenter -t 1 -m -- stat -c %d:%i "$active/module.prop")" = "$(stat -c %d:%i "$pending/module.prop")" ] || exit 1

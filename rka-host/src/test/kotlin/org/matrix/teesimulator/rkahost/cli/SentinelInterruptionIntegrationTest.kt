@@ -14,7 +14,7 @@ class SentinelInterruptionIntegrationTest {
         val result = runScenario("transition-interruption")
 
         assertEquals(result.stderr, 2, result.exitCode)
-        assertTrue(result.stderr.contains("RESULT=COMMAND_TRACE_INCOMPLETE"))
+        assertTrue(result.stderr, result.stderr.contains("RESULT=COMMAND_TRACE_INCOMPLETE"))
         assertTrue(result.stdout.isEmpty())
     }
 

@@ -63,7 +63,11 @@ case "$*" in
     *) exit 2 ;;
 esac
 payload=$(mktemp "$RKA_INTERRUPT_ROOT/control/payload.XXXXXX")
-trap 'find "$payload" -depth -delete 2>/dev/null || :' EXIT
+mapped_payload=$(mktemp "$RKA_INTERRUPT_ROOT/control/mapped-payload.XXXXXX")
+loader_root=$device/loader
+mkdir -p "$loader_root"
+chmod 700 "$loader_root"
+trap 'find "$payload" "$mapped_payload" -depth -delete 2>/dev/null || :' EXIT
 cat > "$payload"
 action=$(sed -n 's/^set -- \([^ ]*\).*/\1/p' "$payload" | head -n 1)
 sentinel_id=$(sed -n 's/^set -- [^ ]* \([^ ]*\).*/\1/p' "$payload" | head -n 1)
@@ -76,11 +80,12 @@ if [ "$serial" = SYNTH_DONOR ] && [ "$action" = assert-live ] && [ -f "$RKA_INTE
 fi
 control=$device/module/rka-control.sh
 state=$device/state
+sed "s#/data/local/tmp/rka-host-root\.#$loader_root/rka-host-root.#g" "$payload" > "$mapped_payload"
 RKA_SENTINEL_ROOT=$device/sentinel \
 RKA_SENTINEL_CONTROL=$control \
 RKA_SENTINEL_STATE_ROOT=$state \
 PATH=$RKA_INTERRUPT_ROOT/device-tools:$PATH \
-    exec sh "$payload"
+    exec sh "$mapped_payload"
 EOF
 chmod 700 "$fixture/tools/adb"
 

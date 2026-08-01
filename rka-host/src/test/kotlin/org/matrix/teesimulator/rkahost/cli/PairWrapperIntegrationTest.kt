@@ -100,12 +100,10 @@ serial=${'$'}2
 shift 2
 printf '%s\n' "${'$'}serial ${'$'}*" >> "${'$'}RKA_SYNTH_TRACE"
 if [[ " ${'$'}* " == *' shell su 0 sh '* ]]; then
-    IFS= read -r private_header
-    [[ "${'$'}private_header" == "exec 3<<'RKA_PRIVATE_INPUT_V1'" ]]
-    while IFS= read -r private_line; do
-        [[ "${'$'}private_line" != RKA_PRIVATE_INPUT_V1 ]] || break
-    done
-    IFS= read -r fixed
+    wire=${'$'}(cat)
+    [[ "${'$'}wire" == *"<<'RKA_ROOT_SCRIPT_89C4B517'"* ]]
+    [[ "${'$'}wire" == *'sh "${'$'}rka_script" </dev/null'* ]]
+    fixed=${'$'}(printf '%s\n' "${'$'}wire" | sed -n '/^set -- /p' | head -1)
     [[ "${'$'}fixed" == 'set -- '* ]]
     fixed=${'$'}{fixed#'set -- '}
     read -r action id _ <<< "${'$'}fixed"

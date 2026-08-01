@@ -45,8 +45,12 @@ fi
 
 [[ "$#" -eq 4 && "$1" = shell && "$2" = su && "$3" = 0 && "$4" = sh ]] || exit 92
 wire_payload=$(cat)
-if [[ "$wire_payload" == exec\ 3\<\<* ]]; then
-    fixed=$(printf '%s\n' "$wire_payload" | sed -n '/^set -- /p' | head -1)
+if [[ "$wire_payload" == *"<<'RKA_ROOT_SCRIPT_89C4B517'"* ]]; then
+    script_payload=${wire_payload#*"<<'RKA_ROOT_SCRIPT_89C4B517'"$'\n'}
+    [[ "$script_payload" != "$wire_payload" ]] || exit 93
+    script_payload=${script_payload%%$'\n'RKA_ROOT_SCRIPT_89C4B517$'\n'*}
+    [[ "$wire_payload" == *'sh "$rka_script" </dev/null'* ]] || exit 93
+    fixed=$(printf '%s\n' "$script_payload" | sed -n '/^set -- /p' | head -1)
     read -r _ _ action sentinel_id _ <<< "$fixed"
     phase=ROOT_AUTHORITATIVE
     samples=2
@@ -56,6 +60,7 @@ if [[ "$wire_payload" == exec\ 3\<\<* ]]; then
     printf '%s shell su 0 sh %s\n' "$serial" "${fixed#set -- }" >> "$RKA_FAKE_LOG"
     exit 0
 fi
+[[ "$wire_payload" != exec\ 3\<\<* ]] || exit 93
 payload=${wire_payload#*"<<'RKA_ADB_ROOT_PAYLOAD_7D4C2A91'"$'\n'}
 [[ "$payload" != "$wire_payload" ]] || exit 93
 payload=${payload%%$'\n'RKA_ADB_ROOT_PAYLOAD_7D4C2A91$'\n'*}

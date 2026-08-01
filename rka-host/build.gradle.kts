@@ -22,10 +22,7 @@ dependencies {
 application {
     mainClass.set("org.matrix.teesimulator.rkahost.cli.HostCli")
     applicationName = "rka-host"
-    applicationDefaultJvmArgs =
-        listOf("--add-opens=java.base/java.io=ALL-UNNAMED", "--enable-native-access=ALL-UNNAMED")
+    applicationDefaultJvmArgs = listOf("--enable-native-access=ALL-UNNAMED")
 }
 
-tasks.test {
-    jvmArgs("--add-opens=java.base/java.io=ALL-UNNAMED", "--enable-native-access=ALL-UNNAMED")
-}
+tasks.test { jvmArgs("--enable-native-access=ALL-UNNAMED") }

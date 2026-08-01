@@ -3,9 +3,12 @@ set -euo pipefail
 
 exec python3 - "$@" <<'PY'
 import base64
+import binascii
 import fcntl
+import hashlib
 import json
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -16,6 +19,27 @@ class WrapperFailure(Exception):
 
 def fail(code):
     raise WrapperFailure(code)
+
+def unique_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            fail("PAIR_SNAPSHOT_INVALID")
+        value[key] = item
+    return value
+
+def decode_serial(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        fail("PAIR_SNAPSHOT_INVALID")
+    try:
+        decoded = base64.b64decode(
+            value + "=" * (-len(value) % 4), altchars=b"-_", validate=True
+        ).decode("ascii")
+    except (binascii.Error, UnicodeError, ValueError):
+        fail("PAIR_SNAPSHOT_INVALID")
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", decoded):
+        fail("PAIR_SNAPSHOT_INVALID")
+    return decoded
 
 def main():
     args = sys.argv[1:]
@@ -63,16 +87,14 @@ def main():
     if len(raw_json) > 65536 or len(raw_env) > 8192:
         fail("PAIR_SNAPSHOT_OVERSIZED")
     try:
-        pair = json.loads(raw_json)
+        pair = json.loads(raw_json, object_pairs_hook=unique_object)
+        if not isinstance(pair, dict):
+            fail("PAIR_SNAPSHOT_INVALID")
         lines = raw_env.decode("ascii").splitlines()
-        env = dict(line.split("=", 1) for line in lines)
-        donor = base64.urlsafe_b64decode(
-            env["RKA_DONOR_SERIAL_B64"] + "==="
-        ).decode()
-        candidate = base64.urlsafe_b64decode(
-            env["RKA_CANDIDATE_SERIAL_B64"] + "==="
-        ).decode()
-    except (ValueError, KeyError, UnicodeError, json.JSONDecodeError):
+        env = unique_object(line.split("=", 1) for line in lines)
+        donor = decode_serial(env["RKA_DONOR_SERIAL_B64"])
+        candidate = decode_serial(env["RKA_CANDIDATE_SERIAL_B64"])
+    except (ValueError, KeyError, UnicodeError, json.JSONDecodeError, TypeError):
         fail("PAIR_SNAPSHOT_INVALID")
     if set(env) != {
         "RKA_DEVICE_PAIR_VERSION",
@@ -83,15 +105,59 @@ def main():
         fail("PAIR_ENV_INVALID")
     if (
         env["RKA_DEVICE_PAIR_VERSION"] != "1"
+        or type(pair.get("schema_version")) is not int
         or pair.get("schema_version") != 1
         or donor != pair.get("donor_serial")
         or candidate != pair.get("candidate_serial")
         or env["RKA_PROFILE_SHA256"] != pair.get("profile_sha256")
     ):
         fail("PAIR_SNAPSHOT_MISMATCH")
+    legacy_keys = {
+        "candidate_serial",
+        "donor_serial",
+        "profile_sha256",
+        "schema_version",
+    }
+    canonical_keys = legacy_keys | {
+        "candidate_serial_sha256",
+        "donor_serial_sha256",
+    }
+    if set(pair) not in (legacy_keys, canonical_keys):
+        fail("PAIR_SNAPSHOT_INVALID")
+    if donor == candidate:
+        fail("PAIR_SNAPSHOT_INVALID")
+    if not isinstance(pair["profile_sha256"], str) or not re.fullmatch(
+        r"[0-9a-f]{64}", pair["profile_sha256"]
+    ):
+        fail("PAIR_SNAPSHOT_INVALID")
+    donor_hash = hashlib.sha256(donor.encode("ascii")).hexdigest()
+    candidate_hash = hashlib.sha256(candidate.encode("ascii")).hexdigest()
+    if set(pair) == canonical_keys and (
+        pair["donor_serial_sha256"] != donor_hash
+        or pair["candidate_serial_sha256"] != candidate_hash
+    ):
+        fail("PAIR_SNAPSHOT_MISMATCH")
+    canonical = json.dumps(
+        {
+            "candidate_serial": candidate,
+            "candidate_serial_sha256": candidate_hash,
+            "donor_serial": donor,
+            "donor_serial_sha256": donor_hash,
+            "profile_sha256": pair["profile_sha256"],
+            "schema_version": 1,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii") + b"\n"
+    host_cli_child = (
+        os.path.basename(command[0]) == "rka-host"
+        or "org.matrix.teesimulator.rkahost.cli.HostCli" in command
+    )
+    child_snapshot = canonical if host_cli_child else raw_json
 
     memfd = os.memfd_create("rka-device-pair", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
-    os.write(memfd, raw_json)
+    os.write(memfd, child_snapshot)
     os.lseek(memfd, 0, os.SEEK_SET)
     seals = (
         fcntl.F_SEAL_SEAL

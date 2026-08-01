@@ -2,8 +2,6 @@ package org.matrix.teesimulator.rkahost.cli
 
 import com.sun.jna.Library
 import com.sun.jna.Native
-import java.io.FileDescriptor
-import java.io.FileInputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
@@ -64,10 +62,7 @@ object NativePairDescriptor {
         DescriptorPolicy.validate(facts)
         val raw =
             try {
-                val constructor =
-                    FileDescriptor::class.java.getDeclaredConstructor(Int::class.javaPrimitiveType)
-                if (!constructor.trySetAccessible()) throw HostCliException("PAIR_FD_INVALID")
-                FileInputStream(constructor.newInstance(FD)).use { stream ->
+                Files.newInputStream(fdPath).use { stream ->
                     val bytes = stream.readNBytes(65_537)
                     if (bytes.size.toLong() != facts.size) {
                         throw HostCliException("PAIR_FD_SIZE_MISMATCH")

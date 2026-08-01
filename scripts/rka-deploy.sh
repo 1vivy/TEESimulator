@@ -431,6 +431,13 @@ snapshot_first_install_parents() {
     metadata_hash "$txn/modules-update.before.without-target.tree" > "$txn/modules-update.metadata.before.without-target"
 }
 validate_first_install_parents() {
+    for derived_view in "$txn/modules.after.without-target.tree" "$txn/modules-update.after.without-target.tree"; do
+        [ ! -L "$derived_view" ] || return 1
+        if [ -e "$derived_view" ]; then
+            [ -d "$derived_view" ] || return 1
+            rm -rf "$derived_view" || return 1
+        fi
+    done
     prepare_parent_view_without_target /data/adb/modules tricky_store "$txn/modules.after.without-target.tree" || return 1
     toybox touch -r "$txn/modules.before.without-target.tree" "$txn/modules.after.without-target.tree" || return 1
     [ "$(tree_hash "$txn/modules.after.without-target.tree")" = "$(cat "$txn/modules.before.without-target")" ] || return 1
@@ -497,7 +504,7 @@ preflight)
         fi
         init_ns=$(readlink /proc/1/ns/mnt) || { printf "RESULT=INCOMPATIBLE reason=INIT_NAMESPACE\n"; exit; }
         [ -n "$init_ns" ] || { printf "RESULT=INCOMPATIBLE reason=MOUNT_SEMANTICS\n"; exit; }
-        for command in base64 find head lsattr logcat mktemp nsenter sha256sum stat timeout toybox unzip xxd; do
+        for command in base64 find head lsattr mktemp nsenter sha256sum stat timeout toybox unzip xxd; do
             command -v "$command" >/dev/null 2>&1 || { printf "RESULT=INCOMPATIBLE reason=DEPLOY_TOOLING\n"; exit; }
         done
         boot_hash=$(sha256sum /proc/sys/kernel/random/boot_id | awk "{print \$1}")
@@ -530,7 +537,7 @@ sepolicy_cli=true" ] || { printf "RESULT=INCOMPATIBLE reason=KSUD_PROVENANCE\n";
     case "$ksud_pid" in *" "*) printf "RESULT=INCOMPATIBLE reason=KSUD_PROCESS\n"; exit ;; esac
     ksud_ns=$(readlink "/proc/$ksud_pid/ns/mnt") || { printf "RESULT=INCOMPATIBLE reason=KSUD_NAMESPACE\n"; exit; }
     [ -n "$init_ns" ] && [ -n "$ksud_ns" ] || { printf "RESULT=INCOMPATIBLE reason=MOUNT_SEMANTICS\n"; exit; }
-    for command in base64 find head lsattr logcat mktemp nsenter sha256sum stat timeout toybox xxd; do
+    for command in base64 find head lsattr mktemp nsenter sha256sum stat timeout toybox xxd; do
         command -v "$command" >/dev/null 2>&1 || { printf "RESULT=INCOMPATIBLE reason=DEPLOY_TOOLING\n"; exit; }
     done
     if [ -x "$active/rka-control.sh" ]; then
@@ -806,12 +813,7 @@ deploy)
             [ "$command" = "exec /data/adb/modules/tricky_store/rka-sepolicy-probe.sh $rule_hash" ] || exit 1
             printf "%s|%s\n" "$rule_hash" "$probe" >> "$txn/sepolicy.probes.validated"
         done < "$policy"
-        wall_marker=$(date +%s.%N)
-        monotonic_marker=$(awk "{print \$1}" /proc/uptime)
-        printf "wall=%s\nmonotonic=%s\n" "$wall_marker" "$monotonic_marker" > "$txn/sepolicy.marker"
         ksud sepolicy apply "$policy" >"$txn/sepolicy.stdout" 2>"$txn/sepolicy.stderr"
-        logcat -b all -T "$wall_marker" -d 2>/dev/null | grep -Ei "(ksud|kernelsu).*(warn|error|fail|partial)" > "$txn/sepolicy-logcat.reject" || :
-        [ ! -s "$txn/sepolicy-logcat.reject" ]
         ! grep -Ei "warn|error|fail|partial" "$txn/sepolicy.stdout" "$txn/sepolicy.stderr"
         expected_probes=$(grep -Ev "^[[:space:]]*(#|$)" "$policy" | wc -l)
         [ "$(wc -l < "$txn/sepolicy.probes.validated")" -eq "$expected_probes" ]
@@ -869,15 +871,12 @@ pair)
     RKA_REQUIRE_DIRECT_READY=true RKA_DIRECT_PROFILE_PATH="$state/profiles/direct.conf" nsenter -t 1 -m -- "$active/rka-supervisor.sh" start
     : > "$txn/sepolicy-probes.stdout"
     : > "$txn/sepolicy-probes.stderr"
-    probe_marker=$(date +%s.%N)
     while IFS="|" read -r rule_hash probe; do
         [ -n "$rule_hash" ] && [ -n "$probe" ] || exit 1
         command=$(printf %s "$probe" | base64 -d) || exit 1
         [ -n "$command" ] && [ "$(printf %s "$command" | wc -c)" -le 256 ] || exit 1
         timeout 5 nsenter -t 1 -m -- sh -eu -c "$command" >> "$txn/sepolicy-probes.stdout" 2>> "$txn/sepolicy-probes.stderr"
     done < "$txn/sepolicy.probes.validated"
-    logcat -b all -T "$probe_marker" -d 2>/dev/null | grep -Ei "avc:.*denied.*(teesimulator|rka|ksu)" > "$txn/sepolicy-probes.reject" || :
-    [ ! -s "$txn/sepolicy-probes.reject" ]
     nsenter -t 1 -m -- "$active/rka-supervisor.sh" status > "$txn/new.graph"
     grep -q "broker=RUNNING" "$txn/new.graph"
     grep -q "sidecar=RUNNING" "$txn/new.graph"
@@ -1090,7 +1089,24 @@ rollback)
     esac
     if [ -x "$active/rka-supervisor.sh" ]; then nsenter -t 1 -m -- "$active/rka-supervisor.sh" stop || :; fi
     if awk -v p="$active" "\$5 == p {found=1} END {exit !found}" /proc/1/mountinfo; then
-        nsenter -t 1 -m -- umount "$active" || exit 1
+        if ! nsenter -t 1 -m -- umount "$active"; then
+            exact_mounts=$(awk -v p="$active" "\$5 == p {count++} END {print count+0}" /proc/1/mountinfo) || exit 1
+            nested_mounts=$(awk -v p="$active/" "index(\$5,p) == 1 {count++} END {print count+0}" /proc/1/mountinfo) || exit 1
+            if [ "$exact_mounts" != 1 ] || [ "$nested_mounts" != 0 ]; then
+                printf "RESULT=ROLLBACK_BUSY_BIND_UNSAFE role=%s reason=mount-topology\n" "$role" >&2
+                exit 1
+            fi
+            if [ ! -x "$active/rka-supervisor.sh" ] ||
+                ! nsenter -t 1 -m -- "$active/rka-supervisor.sh" status > "$txn/rollback-detach.graph" ||
+                grep -Eq "^(legacy|broker|sidecar)=RUNNING$" "$txn/rollback-detach.graph"; then
+                printf "RESULT=ROLLBACK_BUSY_BIND_UNSAFE role=%s reason=runtime-state\n" "$role" >&2
+                exit 1
+            fi
+            nsenter -t 1 -m -- umount -l -- "$active" || {
+                printf "RESULT=ROLLBACK_LAZY_DETACH_FAILED role=%s\n" "$role" >&2
+                exit 1
+            }
+        fi
         ! awk -v p="$active" "\$5 == p {found=1} END {exit !found}" /proc/1/mountinfo || exit 1
     fi
     if [ -d "$pending" ]; then mv "$pending" "$state/module-quarantine/$tx.failed"; fi

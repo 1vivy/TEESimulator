@@ -79,6 +79,7 @@ internal enum class FixtureMutation {
     INCOMPATIBLE_CANDIDATE,
     FAIL_DONOR_DEPLOY,
     FAIL_CANDIDATE_DEPLOY,
+    HOSTILE_LOGCAT,
     FAIL_CANDIDATE_NETWORK,
     DONOR_WLAN_CANDIDATE_TUN,
     NETWORK_SIDE_SWAP,
@@ -92,6 +93,10 @@ internal enum class FixtureMutation {
     TUN_WHITESPACE,
     TUN_MALFORMED,
     MISMATCH_CANDIDATE_PIN,
+    ROLLBACK_BUSY_BIND_SAFE,
+    ROLLBACK_BUSY_BIND_NESTED,
+    ROLLBACK_BUSY_BIND_LIVE,
+    ROLLBACK_BUSY_BIND_AMBIGUOUS,
     AFTER_STOP,
     AFTER_UNMOUNT,
     ACTIVE_HASH,
@@ -205,6 +210,7 @@ internal fun applyFixtureMutation(
             environment["RKA_FAKE_INCOMPATIBLE"] = "CANDIDATE_B"
         FixtureMutation.FAIL_DONOR_DEPLOY -> environment["RKA_FAKE_FAIL_DEPLOY"] = "DONOR_A"
         FixtureMutation.FAIL_CANDIDATE_DEPLOY -> environment["RKA_FAKE_FAIL_DEPLOY"] = "CANDIDATE_B"
+        FixtureMutation.HOSTILE_LOGCAT -> environment["RKA_FAKE_HOSTILE_LOGCAT"] = "true"
         FixtureMutation.FAIL_CANDIDATE_NETWORK ->
             environment["RKA_FAKE_FAIL_NETWORK"] = "CANDIDATE_B"
         FixtureMutation.DONOR_WLAN_CANDIDATE_TUN ->
@@ -221,6 +227,13 @@ internal fun applyFixtureMutation(
         FixtureMutation.TUN_MALFORMED -> environment["RKA_FAKE_IP_MODE"] = "malformed"
         FixtureMutation.MISMATCH_CANDIDATE_PIN ->
             environment["RKA_FAKE_MISMATCH_SERIAL"] = "CANDIDATE_B"
+        FixtureMutation.ROLLBACK_BUSY_BIND_SAFE,
+        FixtureMutation.ROLLBACK_BUSY_BIND_NESTED,
+        FixtureMutation.ROLLBACK_BUSY_BIND_LIVE,
+        FixtureMutation.ROLLBACK_BUSY_BIND_AMBIGUOUS -> {
+            environment["RKA_FAKE_MISMATCH_SERIAL"] = "CANDIDATE_B"
+            environment["RKA_FAKE_BUSY_UMOUNT"] = value.name.substringAfterLast('_').lowercase()
+        }
         FixtureMutation.AFTER_STOP -> environment["RKA_FAKE_FAULT"] = "after-stop"
         FixtureMutation.AFTER_UNMOUNT -> environment["RKA_FAKE_FAULT"] = "after-unmount"
         FixtureMutation.ACTIVE_HASH -> environment["RKA_FAKE_FAULT"] = "active-hash"
@@ -467,11 +480,13 @@ case "${'$'}{1-}" in
     printf 'version=1\nprofile_sha256=%s\nprofile_epoch=%s\npeer_pin_sha256=%s\ndial_mode=DONOR_DIALS\ntransport=DIRECT\n' "${'$'}profile_sha" "${'$'}epoch" "${'$'}pin_sha" > "${'$'}state/run/direct-profile.receipt"
     ;;
   stop)
+    [ "${'$'}{RKA_FAKE_BUSY_UMOUNT:-}" != live ] || exit 1
     rm -rf "${'$'}state/run/pids"
     printf 'STOPPED\n' > "${'$'}state/run/supervisor.state"
     [ "${'$'}{RKA_FAKE_FAULT:-}" != after-stop ] || exit 1
     ;;
   status)
+    [ "${'$'}{RKA_FAKE_BUSY_UMOUNT:-}" != ambiguous ] || exit 1
     current=${'$'}(cat "${'$'}state/run/supervisor.state" 2>/dev/null || printf STOPPED)
     printf 'state=%s\nlegacy=STOPPED\n' "${'$'}current"
     if [ -d "${'$'}state/run/pids" ]; then printf 'broker=RUNNING\nsidecar=RUNNING\n'; else printf 'broker=STOPPED\nsidecar=STOPPED\n'; fi

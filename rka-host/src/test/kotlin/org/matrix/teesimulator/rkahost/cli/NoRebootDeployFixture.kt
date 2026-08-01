@@ -597,6 +597,64 @@ exit 0
     fun runWithMutation(value: FixtureMutation): DeployResult =
         execute("direct-auto", sealedDescriptor = true, activeMutation = value)
 
+    fun runWithMutationBounded(value: FixtureMutation, timeoutSeconds: Int): DeployResult {
+        val projectRoot = Path.of(System.getProperty("user.dir")).parent
+        val script = projectRoot.resolve("scripts/rka-deploy.sh")
+        val code =
+            """import fcntl,os,sys
+fd=os.memfd_create("rka-device-pair", os.MFD_ALLOW_SEALING)
+os.write(fd, open(sys.argv[1], "rb").read())
+fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SEAL|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_GROW|fcntl.F_SEAL_WRITE)
+os.lseek(fd, 0, os.SEEK_SET)
+readonly_fd=os.open(f"/proc/self/fd/{fd}", os.O_RDONLY|os.O_CLOEXEC)
+os.dup2(readonly_fd, 3, inheritable=True)
+os.environ["RKA_DEVICE_PAIR_FD"]="3"
+os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zip", sys.argv[3], "--network", "direct-auto", "--no-reboot", "--evidence", sys.argv[4]])
+"""
+        return tlsServers.withServers(value) {
+            val process =
+                ProcessBuilder(
+                        "/usr/bin/timeout",
+                        "--signal=TERM",
+                        timeoutSeconds.toString(),
+                        "python3",
+                        "-c",
+                        code,
+                        pair.toString(),
+                        script.toString(),
+                        zip.toString(),
+                        evidence.toString(),
+                    )
+                    .directory(projectRoot.toFile())
+                    .apply {
+                        environment()["RKA_DEPLOY_ADB"] = adb.toString()
+                        environment()["RKA_FAKE_LOG"] = log.toString()
+                        environment()["RKA_FAKE_DEVICE_ROOT"] = devices.toString()
+                        environment()["RKA_FAKE_TLS_ROOT"] = root.resolve("tls").toString()
+                        environment()["RKA_FAKE_KSU_PROFILE"] = kernelProfile.fixtureName
+                        environment()["RKA_FAKE_FIRST_INSTALL"] =
+                            kernelProfile.firstInstall.toString()
+                        environment()["RKA_FAKE_FIRST_INSTALL_PARENTS"] =
+                            kernelProfile.firstInstallParentLayout.fixtureValue
+                        environment()["RKA_FAKE_SYSTEM_OPENSSL"] =
+                            kernelProfile.systemOpenSsl.toString()
+                        environment()["PATH"] = "$tools:${environment()["PATH"]}"
+                        applyFixtureMutation(environment(), value)
+                    }
+                    .start()
+            val stdout = process.inputStream.bufferedReader().readText()
+            val stderr = process.errorStream.bufferedReader().readText()
+            DeployResult(process.waitFor(), stdout, stderr)
+        }
+    }
+
+    fun logcatInvoked(): Boolean =
+        listOf("DONOR_A", "CANDIDATE_B").any { serial ->
+            Files.isRegularFile(
+                devices.resolve("$serial/root/data/adb/teesimulator-rka/.logcat-invoked")
+            )
+        }
+
     fun replaceArchive(packageZip: Path, omitCustomize: Boolean = false) {
         Files.copy(packageZip, zip, StandardCopyOption.REPLACE_EXISTING)
         packagedArchive = true
@@ -622,6 +680,12 @@ exit 0
 
     fun donorBindPresent(): Boolean =
         Files.isRegularFile(devices.resolve("DONOR_A/root/data/adb/teesimulator-rka/.bound"))
+
+    fun donorNormalUnmountAttempted(): Boolean =
+        Files.isRegularFile(devices.resolve("DONOR_A/root/data/adb/teesimulator-rka/.umount-normal"))
+
+    fun donorLazyUnmountAttempted(): Boolean =
+        Files.isRegularFile(devices.resolve("DONOR_A/root/data/adb/teesimulator-rka/.umount-lazy"))
 
     fun donorRuntimeRunning(): Boolean =
         Files.readString(

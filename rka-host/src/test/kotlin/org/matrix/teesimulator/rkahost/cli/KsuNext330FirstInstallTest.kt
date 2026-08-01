@@ -87,6 +87,17 @@ class KsuNext330FirstInstallTest {
     }
 
     @Test
+    fun rollbackAfterSuccessfulFirstInstallRebuildsPreexistingDerivedViews() {
+        Fixture(kernelProfile = KernelProfile.KSU_NEXT_FIRST_INSTALL_EXISTING_PARENTS).use { fixture ->
+            assertEquals(0, fixture.run().exitCode)
+
+            val rollback = fixture.rollbackDonorAgain()
+
+            assertEquals(rollback.stderr, 0, rollback.exitCode)
+        }
+    }
+
+    @Test
     fun failedInstallWithOnlyOneCreatedParentRestoresPairedAbsence() {
         listOf(
                 FixtureMutation.INSTALL_ONLY_MODULES_PARENT,

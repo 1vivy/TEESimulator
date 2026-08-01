@@ -37,7 +37,10 @@ class NoRebootDeployCommandContractTest {
         val bind = deploy.indexOf("nsenter -t 1 -m -- mount --bind \"\$pending\" \"\$active\"")
 
         assertTrue(check >= 0 && apply > check && bind > apply)
-        assertTrue(deploy.contains("sepolicy-logcat.reject"))
+        assertFalse(script.contains("logcat"))
+        assertTrue(deploy.contains("sepolicy.stdout"))
+        assertTrue(deploy.contains("sepolicy.stderr"))
+        assertTrue(script.contains("sepolicy.probes.validated"))
         assertTrue(script.contains("cmp -s \"\$active/module.prop\" \"\$pending/module.prop\""))
     }
 

@@ -369,7 +369,12 @@ case "${RKA_FAKE_IP_MODE:-}" in
   *) printf "7: %s    inet %s/32 scope global %s\\n" "$interface" "$endpoint" "$interface" ;;
 esac'
 write_shim ping 'exit 0'
-write_shim logcat 'exit 0'
+write_shim logcat '
+if [ "${RKA_FAKE_HOSTILE_LOGCAT:-}" = true ]; then
+  : > /data/adb/teesimulator-rka/.logcat-invoked
+  while sleep 1; do :; done
+fi
+exit 0'
 write_shim strings 'exit 1'
 write_shim toybox '
 if [ "${1-}" = touch ]; then shift; exec /usr/bin/touch "$@"; fi
@@ -397,7 +402,11 @@ if [ "$last" = /data/system/packages.list ]; then
 fi
 if [ "$last" = /proc/1/mountinfo ]; then
   if [ -f /data/adb/teesimulator-rka/.bound ]; then
-    case " $* " in *print*) printf "77|/\n" ;; esac
+    case " $* " in
+      *index*) [ "${RKA_FAKE_BUSY_UMOUNT:-}" = nested ] && printf "1\n" || printf "0\n" ;;
+      *count*) printf "1\n" ;;
+      *print*) printf "77|/\n" ;;
+    esac
     exit 0
   fi
   exit 1
@@ -497,6 +506,14 @@ done
 if [ "${RKA_FAKE_UPLOAD_FAULT:-}" = remote-nonzero ] && [ -n "$source_path" ]; then exit 1; fi
 exec /usr/bin/mv "$@"'
 write_shim umount '
+if [ -n "${RKA_FAKE_BUSY_UMOUNT:-}" ] && [ "${1-}" != -l ]; then
+  : > /data/adb/teesimulator-rka/.umount-normal
+  exit 1
+fi
+if [ "${1-}" = -l ]; then
+  : > /data/adb/teesimulator-rka/.umount-lazy
+  shift
+fi
 rm -rf /data/adb/modules/tricky_store
 mv /data/adb/teesimulator-rka/active-underlay /data/adb/modules/tricky_store
 rm -f /data/adb/teesimulator-rka/.bound

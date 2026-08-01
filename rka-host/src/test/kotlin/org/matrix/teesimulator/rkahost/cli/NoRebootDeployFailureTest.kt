@@ -8,6 +8,50 @@ import org.junit.Test
 
 class NoRebootDeployFailureTest {
     @Test
+    fun exactBusyBindUsesLazyDetachOnlyAfterStoppedUnambiguousMount() {
+        Fixture(FixtureMutation.ROLLBACK_BUSY_BIND_SAFE).use { fixture ->
+            assertEquals(4, fixture.run().exitCode)
+            assertTrue(fixture.donorNormalUnmountAttempted())
+            assertTrue(fixture.donorLazyUnmountAttempted())
+            assertFalse(fixture.donorBindPresent())
+            assertEquals(0, fixture.rollbackDonorAgain().exitCode)
+        }
+    }
+
+    @Test
+    fun unsafeBusyBindNeverUsesLazyDetach() {
+        listOf(
+                FixtureMutation.ROLLBACK_BUSY_BIND_NESTED,
+                FixtureMutation.ROLLBACK_BUSY_BIND_LIVE,
+                FixtureMutation.ROLLBACK_BUSY_BIND_AMBIGUOUS,
+            )
+            .forEach { mutation ->
+                Fixture(mutation).use { fixture ->
+                    val result = fixture.run()
+                    assertEquals(mutation.name, 4, result.exitCode)
+                    assertTrue(mutation.name, result.stderr.contains("ROLLBACK_BUSY_BIND_UNSAFE"))
+                    assertTrue(mutation.name, fixture.donorNormalUnmountAttempted())
+                    assertFalse(mutation.name, fixture.donorLazyUnmountAttempted())
+                    assertTrue(mutation.name, fixture.donorBindPresent())
+                }
+            }
+    }
+
+    @Test
+    fun hostileAndroidLogcatCannotBlockStandardPairAfterDonorDeploy() {
+        Fixture(FixtureMutation.HOSTILE_LOGCAT).use { fixture ->
+            val result = fixture.runWithMutationBounded(FixtureMutation.HOSTILE_LOGCAT, 30)
+
+            assertTrue(
+                "result=$result trace=${fixture.trace()}",
+                fixture.trace().any { it.startsWith("DONOR_A ") && " deploy " in " $it " },
+            )
+            assertEquals(result.stderr, 0, result.exitCode)
+            assertFalse(fixture.logcatInvoked())
+        }
+    }
+
+    @Test
     fun ordinaryPairFileDescriptorIsRejectedBeforeAdb() {
         Fixture().use { fixture ->
             val result = fixture.runWithOrdinaryPairDescriptor()

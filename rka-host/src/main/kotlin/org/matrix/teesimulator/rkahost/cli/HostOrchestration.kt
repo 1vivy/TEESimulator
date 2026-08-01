@@ -1,15 +1,14 @@
 package org.matrix.teesimulator.rkahost.cli
 
 import java.nio.file.Path
-import org.matrix.teesimulator.rkahost.evidence.AdbCommandTracePolicy
-import org.matrix.teesimulator.rkahost.evidence.CommandRejected
 import org.matrix.teesimulator.rkahost.evidence.donorPropertyPrivateInput
 
 class HostOrchestrator(
     private val pair: DevicePairSnapshot,
-    private val runner: HostCommandRunner,
+    private val delegateRunner: HostCommandRunner,
+    initialTrace: PersistentAdbTrace? = null,
 ) {
-    private val calls = mutableListOf<List<String>>()
+    private var trace = initialTrace
     private val binding = PairBinding.from(pair)
     private val sentinelScript =
         checkNotNull(javaClass.getResourceAsStream("/rka-preinstall-sentinel.sh")) {
@@ -66,9 +65,13 @@ class HostOrchestrator(
     ): SentinelBaseline {
         recoverPending(path)
         BaselineStore.requireReadyAbsent(path)
+        val sentinelId = Hashes.sha256("${binding.pairHash}:$nonce".toByteArray())
+        val journal = PersistentAdbTrace.create(path, binding, sentinelId, nonce)
+        trace = journal
+        val initialTraceBinding = journal.validateClean().binding
         val baseline =
             SentinelBaseline(
-                sentinelId = Hashes.sha256("${binding.pairHash}:$nonce".toByteArray()),
+                sentinelId = sentinelId,
                 nonce = nonce,
                 binding = binding,
                 donorBootId = bootIdentityHash(pair.donor),
@@ -81,6 +84,10 @@ class HostOrchestrator(
                 authority = SentinelPhase.ROOT_AUTHORITATIVE,
                 samplerSha256 = sentinelScriptHash,
                 scope = scope,
+                commandTraceGenesisSha256 = initialTraceBinding.genesisSha256,
+                commandTraceSessionId = initialTraceBinding.sessionId,
+                commandTraceInitialHeadSha256 = initialTraceBinding.headSha256,
+                commandTraceInitialEventCount = initialTraceBinding.eventCount,
             )
         BaselineStore.createPending(path, baseline)
         try {
@@ -98,18 +105,21 @@ class HostOrchestrator(
     fun sentinelSample(path: Path): SentinelSample {
         val baseline = BaselineStore.read(path)
         requirePair(baseline)
+        attachTrace(path, baseline)
         return sample(baseline, sentinelAction(baseline, "sample"))
     }
 
     fun sentinelFinish(path: Path): SentinelSample {
         val baseline = BaselineStore.read(path)
         requirePair(baseline)
+        attachTrace(path, baseline)
         return sample(baseline, sentinelAction(baseline, "assert-live"))
     }
 
     fun sentinelVerify(path: Path) {
         val baseline = BaselineStore.read(path)
         requirePair(baseline)
+        attachTrace(path, baseline)
         val current = sample(baseline, sentinelAction(baseline, "assert-live"))
         if (
             current.donorBootId != baseline.donorBootId ||
@@ -131,11 +141,13 @@ class HostOrchestrator(
     fun sentinelStop(path: Path) {
         val baseline = BaselineStore.read(path)
         requirePair(baseline)
+        attachTrace(path, baseline)
         sentinelAction(baseline, "stop")
         BaselineStore.delete(path, baseline)
     }
 
-    fun trace(): List<List<String>> = calls.map { it.toList() }
+    fun persistentTrace(): ValidatedPersistentTrace =
+        trace?.snapshotForReceipt() ?: throw HostCliException("COMMAND_TRACE_MISSING")
 
     private fun sample(
         baseline: SentinelBaseline,
@@ -170,20 +182,20 @@ class HostOrchestrator(
     ): SentinelPhase {
         val role = if (serial == pair.donor) "DONOR" else "CANDIDATE"
         val argv = listOf("adb", "-s", serial.value, "shell", "su", "0", "sh")
-        record(argv)
         val result =
-            runner.runRoot(
-                serial,
-                sentinelScript,
-                listOf(
-                    action,
-                    baseline.sentinelId,
-                    Hashes.sha256(baseline.nonce.toByteArray()),
-                    role,
-                    sentinelScriptHash,
-                ) + SentinelLimits.PRE_INSTALL.arguments(),
-                if (role == "DONOR") donorPropertyPrivateInput() else RootPrivateInput.EMPTY,
-            )
+            tracedRunner()
+                .runRoot(
+                    serial,
+                    sentinelScript,
+                    listOf(
+                        action,
+                        baseline.sentinelId,
+                        Hashes.sha256(baseline.nonce.toByteArray()),
+                        role,
+                        sentinelScriptHash,
+                    ) + SentinelLimits.PRE_INSTALL.arguments(),
+                    if (role == "DONOR") donorPropertyPrivateInput() else RootPrivateInput.EMPTY,
+                )
         if (result.exitCode != 0) {
             val terminal = Regex(".* result=(SENTINEL_[A-Z_]+)").matchEntire(result.stdout.trim())
             throw HostCliException(terminal?.groupValues?.get(1) ?: "ADB_COMMAND_FAILED")
@@ -234,6 +246,7 @@ class HostOrchestrator(
         if (BaselineStore.finalizeCommittedPending(path)) return
         val baseline = BaselineStore.readPending(path)
         requirePair(baseline)
+        attachTrace(path, baseline)
         if (!cleanupSentinel(baseline)) throw HostCliException("SENTINEL_RECOVERY_FAILED")
         BaselineStore.abortPending(path)
     }
@@ -286,8 +299,7 @@ class HostOrchestrator(
         if (argv.take(2) != listOf("adb", "-s") || argv.getOrNull(2) !in serialValues()) {
             throw HostCliException("UNBOUND_DEVICE_COMMAND")
         }
-        record(argv)
-        val result = runner.run(argv)
+        val result = tracedRunner().run(argv)
         if (result.exitCode != 0) throw HostCliException("ADB_COMMAND_FAILED")
         return result
     }
@@ -299,12 +311,25 @@ class HostOrchestrator(
 
     private fun serialValues(): Set<String> = serials().mapTo(mutableSetOf()) { it.value }
 
-    private fun record(argv: List<String>) {
-        try {
-            AdbCommandTracePolicy.requireAllowed(argv)
-        } catch (failure: CommandRejected) {
-            throw HostCliException(failure.message ?: "FORBIDDEN_DEVICE_COMMAND")
+    private fun attachTrace(path: Path, baseline: SentinelBaseline) {
+        trace = PersistentAdbTrace.open(path, baseline)
+        val current =
+            trace?.validateClean()?.binding ?: throw HostCliException("COMMAND_TRACE_MISSING")
+        if (
+            current.genesisSha256 != baseline.commandTraceGenesisSha256 ||
+                current.sessionId != baseline.commandTraceSessionId ||
+                baseline.commandTraceInitialHeadSha256 != baseline.commandTraceGenesisSha256 ||
+                baseline.commandTraceInitialEventCount != 0
+        ) {
+            throw HostCliException("COMMAND_TRACE_BINDING_MISMATCH")
         }
-        calls += argv.toList()
     }
+
+    private fun tracedRunner(): HostCommandRunner =
+        trace?.let { TracedHostCommandRunner(delegateRunner, it) }
+            ?: if (delegateRunner is ProcessHostCommandRunner) {
+                throw HostCliException("COMMAND_TRACE_MISSING")
+            } else {
+                delegateRunner
+            }
 }

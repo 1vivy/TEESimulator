@@ -101,7 +101,7 @@ internal data class SentinelLimits(
     }
 }
 
-class ProcessHostCommandRunner : HostCommandRunner {
+class ProcessHostCommandRunner(private val executable: String = "adb") : HostCommandRunner {
     override fun run(argv: List<String>): HostCommandResult = execute(argv, null)
 
     override fun runRoot(
@@ -134,9 +134,10 @@ class ProcessHostCommandRunner : HostCommandRunner {
     }
 
     private fun execute(argv: List<String>, stdin: String?): HostCommandResult {
+        val liveArgv = listOf(executable) + argv.drop(1)
         val process =
             try {
-                ProcessBuilder(argv).start()
+                ProcessBuilder(liveArgv).start()
             } catch (_: Exception) {
                 throw HostCliException("ADB_START_FAILED")
             }

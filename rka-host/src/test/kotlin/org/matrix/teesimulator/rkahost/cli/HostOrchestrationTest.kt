@@ -97,7 +97,7 @@ class HostOrchestrationTest {
     }
 
     @Test
-    fun pendingStartIsCleanedBeforeDeterministicRetry() {
+    fun pendingStartWithoutPersistentTraceFailsClosedWithoutRetry() {
         val path = Files.createTempDirectory("sentinel-pending-").resolve("baseline.json")
         val pending =
             SentinelBaseline(
@@ -113,13 +113,14 @@ class HostOrchestrationTest {
         val runner = RecordingRunner()
 
         assertThrows(HostCliException::class.java) { BaselineStore.read(path) }
-        HostOrchestrator(pair, runner).sentinelStart(path, "nonce-A")
+        val error =
+            assertThrows(HostCliException::class.java) {
+                HostOrchestrator(pair, runner).sentinelStart(path, "nonce-A")
+            }
 
-        assertFalse(BaselineStore.hasPending(path))
-        val cleanupIndex = runner.calls.indexOfFirst { "stop" in it }
-        val startIndex = runner.calls.indexOfFirst { "start" in it }
-        assertTrue(cleanupIndex >= 0)
-        assertTrue(startIndex > cleanupIndex)
+        assertEquals("COMMAND_TRACE_PATH_UNSAFE", error.message)
+        assertTrue(BaselineStore.hasPending(path))
+        assertTrue(runner.calls.isEmpty())
     }
 
     @Test

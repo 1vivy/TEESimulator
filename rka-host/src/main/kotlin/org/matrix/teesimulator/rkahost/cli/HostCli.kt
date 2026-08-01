@@ -36,7 +36,8 @@ object HostCli {
                 }
                 arguments.take(2) == listOf("device-pair", "bind") -> bind(arguments, runtime)
                 arguments.firstOrNull() == "verify-physical" -> verify(arguments)
-                arguments.firstOrNull() in physicalRoots -> physical(arguments, runner)
+                arguments.firstOrNull() == "trace-adb" -> traceAdb(arguments.drop(1), runtime)
+                arguments.firstOrNull() in physicalRoots -> physical(arguments, runner, runtime)
                 else -> throw HostCliException("COMMAND_INVALID")
             }
         } catch (failure: HostCliException) {
@@ -75,6 +76,7 @@ object HostCli {
         if (baseline.binding != currentBinding) throw HostCliException("PAIR_BINDING_MISMATCH")
         PhysicalReceipt.verify(
             EvidenceStore.read(Path.of(values.getValue("--manifest"))),
+            Path.of(values.getValue("--baseline")),
             baseline,
             currentBinding,
             values.getValue("--source-sha"),
@@ -85,7 +87,7 @@ object HostCli {
         return 0
     }
 
-    private fun physical(arguments: Array<String>, runner: HostCommandRunner): Int {
+    private fun physical(arguments: Array<String>, runner: HostCommandRunner, runtime: Path): Int {
         if (
             arguments.any {
                 it in setOf("--pair", "--donor", "--candidate", "--serial") ||
@@ -98,10 +100,18 @@ object HostCli {
             throw HostCliException("PAIR_PATH_FORBIDDEN")
         }
         val snapshot = NativePairDescriptor.readOnce()
-        val host = HostOrchestrator(snapshot, runner)
+        val binding = PairBinding.from(snapshot)
+        val starting = arguments.take(2) == listOf("sentinel", "start")
+        val context = if (starting) null else TraceContextStore.read(runtime, binding)
+        val host =
+            HostOrchestrator(
+                snapshot,
+                runner,
+                context?.let { PersistentAdbTrace.open(it.first, it.second) },
+            )
         val result =
             when (arguments.first()) {
-                "sentinel" -> sentinel(arguments, host)
+                "sentinel" -> sentinel(arguments, host, runtime)
                 "profile" -> {
                     if (!arguments.contentEquals(arrayOf("profile", "pair"))) invalid()
                     host.profilePair()
@@ -143,7 +153,7 @@ object HostCli {
         return 0
     }
 
-    private fun sentinel(arguments: Array<String>, host: HostOrchestrator): String {
+    private fun sentinel(arguments: Array<String>, host: HostOrchestrator, runtime: Path): String {
         if (arguments.size < 2) invalid()
         val values = options(arguments.drop(2))
         return when (arguments[1]) {
@@ -155,15 +165,18 @@ object HostCli {
                     invalid()
                 }
                 if (values.values.any(String::isBlank)) invalid()
-                host.sentinelStart(
-                    Path.of(values.getValue("--baseline")),
-                    values.getValue("--nonce"),
-                    when (values["--scope"] ?: "pair") {
-                        "pair" -> SentinelScope.PAIR
-                        "donor" -> SentinelScope.DONOR
-                        else -> invalid()
-                    },
-                )
+                val baselinePath = Path.of(values.getValue("--baseline"))
+                val baseline =
+                    host.sentinelStart(
+                        baselinePath,
+                        values.getValue("--nonce"),
+                        when (values["--scope"] ?: "pair") {
+                            "pair" -> SentinelScope.PAIR
+                            "donor" -> SentinelScope.DONOR
+                            else -> invalid()
+                        },
+                    )
+                TraceContextStore.write(runtime, baselinePath, baseline)
                 "SENTINEL_STARTED"
             }
             "sample" -> {
@@ -188,7 +201,12 @@ object HostCli {
             }
             "stop" -> {
                 requireKeys(values, setOf("--baseline"))
-                host.sentinelStop(Path.of(values.getValue("--baseline")))
+                val baselinePath = Path.of(values.getValue("--baseline"))
+                host.sentinelStop(baselinePath)
+                val tracePath = PersistentAdbTrace.pathFor(baselinePath)
+                Files.deleteIfExists(tracePath)
+                Files.deleteIfExists(PersistentAdbTrace.lockPathFor(tracePath))
+                TraceContextStore.delete(runtime)
                 "SENTINEL_STOPPED"
             }
             else -> invalid()
@@ -214,7 +232,7 @@ object HostCli {
                 sample.candidateMillis,
                 values.getValue("--source-sha"),
                 digest(values.getValue("--artifact")),
-                host.trace(),
+                host.persistentTrace(),
             )
         EvidenceStore.write(Path.of(values.getValue("--output")), receipt)
         return "EVIDENCE_WRITTEN"
@@ -226,6 +244,24 @@ object HostCli {
         } catch (_: Exception) {
             throw HostCliException("ARTIFACT_INVALID")
         }
+
+    private fun traceAdb(arguments: List<String>, runtime: Path): Int {
+        if (arguments.isEmpty()) invalid()
+        val snapshot = NativePairDescriptor.readOnce()
+        val context =
+            TraceContextStore.read(runtime, PairBinding.from(snapshot))
+                ?: throw HostCliException("COMMAND_TRACE_MISSING")
+        val executable = System.getenv("RKA_TRACE_REAL_ADB")?.takeIf(String::isNotBlank) ?: "adb"
+        val result =
+            TracedHostCommandRunner(
+                    ProcessHostCommandRunner(executable),
+                    PersistentAdbTrace.open(context.first, context.second),
+                )
+                .run(listOf("adb") + arguments)
+        print(result.stdout)
+        System.err.print(result.stderr)
+        return result.exitCode
+    }
 
     private fun options(arguments: List<String>): Map<String, String> {
         if (arguments.size % 2 != 0) invalid()
@@ -260,6 +296,7 @@ object HostCli {
               cleanup
               evidence manifest --baseline FILE --artifact FILE --source-sha SHA --nonce NONCE --output FILE
               verify-physical --manifest FILE --baseline FILE --artifact FILE --source-sha SHA --nonce NONCE
+              trace-adb <adb arguments supplied by the deploy adapter>
             """
                 .trimIndent()
         )

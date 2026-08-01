@@ -1,6 +1,7 @@
 package org.matrix.teesimulator.rkahost.cli
 
 import java.nio.file.Files
+import java.nio.file.Path
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -12,27 +13,34 @@ import org.junit.Test
 
 class PhysicalContinuityTest {
     private val binding =
-        PairBinding("a".repeat(64), "b".repeat(64), "c".repeat(64), "d".repeat(64))
+        PairBinding(
+            "a".repeat(64),
+            Hashes.sha256("DONOR_A".toByteArray()),
+            Hashes.sha256("CANDIDATE_A".toByteArray()),
+            "d".repeat(64),
+        )
 
     @Test
     fun rejectsChangedBootIdAndFabricatedTraceHash() {
         val baseline =
             SentinelBaseline("sentinel", "nonce", binding, "donor-boot", "candidate-boot", 100, 100)
+        val fixture = materialize(baseline)
         val manifest =
             PhysicalReceipt.create(
-                baseline,
+                fixture.baseline,
                 "other-boot",
                 "candidate-boot",
                 200,
                 200,
                 "a".repeat(40),
                 "b".repeat(64),
-                listOf(listOf("adb", "-s", "DONOR_A", "shell", "getprop")),
+                fixture.trace,
             )
         assertThrows(HostCliException::class.java) {
             PhysicalReceipt.verify(
                 manifest,
-                baseline,
+                fixture.path,
+                fixture.baseline,
                 binding,
                 "a".repeat(40),
                 "b".repeat(64),
@@ -41,13 +49,14 @@ class PhysicalContinuityTest {
         }
         val changedHash =
             manifest.replace(
-                Regex(""""command_trace_sha256":"[0-9a-f]{64}""""),
-                """"command_trace_sha256":"${"f".repeat(64)}"""",
+                Regex(""""command_trace_head_sha256":"[0-9a-f]{64}""""),
+                """"command_trace_head_sha256":"${"f".repeat(64)}"""",
             )
         assertThrows(HostCliException::class.java) {
             PhysicalReceipt.verify(
                 changedHash,
-                baseline,
+                fixture.path,
+                fixture.baseline,
                 binding,
                 "a".repeat(40),
                 "b".repeat(64),
@@ -59,7 +68,8 @@ class PhysicalContinuityTest {
             assertThrows(HostCliException::class.java) {
                 PhysicalReceipt.verify(
                     manifest.replace("other-boot", "donor-boot"),
-                    baseline,
+                    fixture.path,
+                    fixture.baseline,
                     otherBinding,
                     "a".repeat(40),
                     "b".repeat(64),
@@ -73,9 +83,10 @@ class PhysicalContinuityTest {
     fun baselineAndFinalReceiptBindSharedCleanCommandTracePolicy() {
         val baseline =
             SentinelBaseline("sentinel", "nonce", binding, "donor-boot", "candidate-boot", 100, 100)
-        val manifest = validManifest(baseline)
+        val fixture = materialize(baseline)
+        val manifest = validManifest(fixture)
 
-        assertTrue(baseline.canonical().contains("\"command_trace_policy_sha256\":"))
+        assertTrue(fixture.baseline.canonical().contains("\"command_trace_policy_sha256\":"))
         assertTrue(manifest.contains("\"command_trace_policy_sha256\":"))
         assertTrue(manifest.contains("\"command_trace_verdict\":\"CLEAN\""))
         assertFalse(manifest.contains("contains_reboot"))
@@ -85,7 +96,8 @@ class PhysicalContinuityTest {
     fun finalReceiptRejectsMissingMalformedTruncatedReplayAndCrossPairTraceState() {
         val baseline =
             SentinelBaseline("sentinel", "nonce", binding, "donor-boot", "candidate-boot", 100, 100)
-        val manifest = validManifest(baseline)
+        val fixture = materialize(baseline)
+        val manifest = validManifest(fixture)
         val corruptions =
             listOf(
                 manifest.replace(Regex("\"command_trace_b64\":\"[^\"]+\","), ""),
@@ -102,7 +114,8 @@ class PhysicalContinuityTest {
             assertThrows(HostCliException::class.java) {
                 PhysicalReceipt.verify(
                     corrupted,
-                    baseline,
+                    fixture.path,
+                    fixture.baseline,
                     binding,
                     "a".repeat(40),
                     "b".repeat(64),
@@ -128,17 +141,9 @@ class PhysicalContinuityTest {
             )
 
         variants.forEach { forbidden ->
+            val fixture = materialize(baseline, execute = false)
             assertThrows(HostCliException::class.java) {
-                PhysicalReceipt.create(
-                    baseline,
-                    "donor-boot",
-                    "candidate-boot",
-                    200,
-                    200,
-                    "a".repeat(40),
-                    "b".repeat(64),
-                    listOf(forbidden),
-                )
+                fixture.journal.execute(forbidden) { HostCommandResult(0, "", "") }
             }
         }
     }
@@ -184,15 +189,41 @@ class PhysicalContinuityTest {
         assertEquals(1, values.count { it == "BASELINE_ALREADY_EXISTS" })
     }
 
-    private fun validManifest(baseline: SentinelBaseline): String =
+    private fun validManifest(fixture: Fixture): String =
         PhysicalReceipt.create(
-            baseline,
+            fixture.baseline,
             "donor-boot",
             "candidate-boot",
             200,
             200,
             "a".repeat(40),
             "b".repeat(64),
-            listOf(listOf("adb", "-s", "DONOR_A", "shell", "cat", "/proc/uptime")),
+            fixture.trace,
         )
+
+    private fun materialize(baseline: SentinelBaseline, execute: Boolean = true): Fixture {
+        val path = Files.createTempDirectory("persistent-trace-").resolve("baseline.json")
+        val journal =
+            PersistentAdbTrace.create(path, baseline.binding, baseline.sentinelId, baseline.nonce)
+        val initial = journal.validateClean().binding
+        val tracedBaseline =
+            baseline.copy(
+                commandTraceGenesisSha256 = initial.genesisSha256,
+                commandTraceSessionId = initial.sessionId,
+                commandTraceInitialHeadSha256 = initial.headSha256,
+            )
+        if (execute) {
+            journal.execute(listOf("adb", "-s", "DONOR_A", "shell", "cat", "/proc/uptime")) {
+                HostCommandResult(0, "", "")
+            }
+        }
+        return Fixture(path, tracedBaseline, journal.snapshotForReceipt(), journal)
+    }
+
+    private data class Fixture(
+        val path: Path,
+        val baseline: SentinelBaseline,
+        val trace: ValidatedPersistentTrace,
+        val journal: PersistentAdbTrace,
+    )
 }

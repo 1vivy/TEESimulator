@@ -4,32 +4,26 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SentinelInterruptionIntegrationTest {
     @Test
-    fun standardWrapperResumesInstalledTransitionAfterDeterministicInterruption() {
+    fun standardWrapperFailsClosedAfterAmbiguousCommandInterruption() {
         val result = runScenario("transition-interruption")
 
-        assertEquals(result.stderr, 0, result.exitCode)
-        assertTrue(result.stdout.contains("interruption_statuses=143,NOT_RUN"))
-        assertTrue(result.stdout.contains("partial_transition_not_installed=true"))
-        assertTrue(result.stdout.contains("installed_resume=true"))
-        assertTrue(result.stdout.contains("cleanup_idempotent=true"))
+        assertEquals(result.stderr, 2, result.exitCode)
+        assertTrue(result.stderr.contains("RESULT=COMMAND_TRACE_INCOMPLETE"))
+        assertTrue(result.stdout.isEmpty())
     }
 
     @Test
-    fun standardWrapperSurvivesTwoInterruptionsOnOneActiveSentinelLifecycle() {
+    fun repeatedInterruptionCannotResumeOrForgeSuccessfulLifecycle() {
         val result = runScenario("repeated-interruption")
 
-        assertEquals(result.stderr, 0, result.exitCode)
-        assertTrue(result.stdout.contains("interruption_statuses=143,143"))
-        assertTrue(result.stdout.contains("same_lifecycle=true"))
-        assertTrue(result.stdout.contains("lock_reacquired_each=true"))
-        assertTrue(result.stdout.contains("sequence_advanced_each=true"))
-        assertTrue(result.stdout.contains("stale_success_rejected=true"))
-        assertTrue(result.stdout.contains("result=PASS"))
+        assertTrue("unexpected success: ${result.stdout}", result.exitCode != 0)
+        assertFalse(result.stdout.contains("result=PASS"))
     }
 
     private fun runScenario(scenario: String): Result {

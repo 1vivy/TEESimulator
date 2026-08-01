@@ -112,6 +112,10 @@ for required_entry in \
 done
 
 adb_command="${RKA_DEPLOY_ADB:-adb}"
+if [[ -n "${RKA_RUNTIME_DIR:-}" && -e "$RKA_RUNTIME_DIR/active-adb-trace-v1" ]]; then
+    [[ "${RKA_TRACE_REQUIRED:-}" == 1 && "$adb_command" == */rka-traced-adb.sh ]] ||
+        fail ADB_TRACE_REQUIRED
+fi
 command -v "$adb_command" >/dev/null 2>&1 || [[ -x "$adb_command" ]] || fail ADB_UNAVAILABLE
 archive_sha="$(sha256sum -- "$zip_path" | awk '{print $1}')"
 source_sha="$(git -C "$project_root" rev-parse HEAD 2>/dev/null || true)"

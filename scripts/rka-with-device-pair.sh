@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+RKA_PAIR_WRAPPER_DIR=$(cd -- "$(dirname -- "$0")" && pwd -P)
+export RKA_PAIR_WRAPPER_DIR
 exec python3 - "$@" <<'PY'
 import base64
 import binascii
@@ -9,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -174,10 +177,29 @@ def main():
         if fd not in (3, lock_fd):
             os.close(fd)
     environment = os.environ.copy()
+    configured_adb = environment.get("RKA_DEPLOY_ADB", "adb")
     for name in tuple(environment):
-        if name.startswith("RKA_DEVICE_PAIR_") or name in PAIR_ENVIRONMENT_NAMES:
+        if (
+            name.startswith("RKA_DEVICE_PAIR_")
+            or name.startswith("RKA_TRACE_")
+            or name in PAIR_ENVIRONMENT_NAMES
+        ):
             del environment[name]
     environment["RKA_DEVICE_PAIR_FD"] = "3"
+    environment["RKA_RUNTIME_DIR"] = runtime
+    if (
+        os.path.exists(os.path.join(runtime, "active-adb-trace-v1"))
+        and os.path.basename(command[0]) == "rka-deploy.sh"
+    ):
+        host_cli = shutil.which("rka-host", path=environment.get("PATH"))
+        if host_cli is None:
+            fail("TRACE_HOST_UNAVAILABLE")
+        environment["RKA_TRACE_HOST_CLI"] = host_cli
+        environment["RKA_TRACE_REAL_ADB"] = configured_adb
+        environment["RKA_TRACE_REQUIRED"] = "1"
+        environment["RKA_DEPLOY_ADB"] = os.path.join(
+            environment["RKA_PAIR_WRAPPER_DIR"], "rka-traced-adb.sh"
+        )
     child = subprocess.Popen(
         command,
         env=environment,

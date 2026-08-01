@@ -7,6 +7,64 @@ import org.junit.Test
 
 class KsuNext330AdapterTest {
     @Test
+    fun donorOfficialManagerUidComesFromCmdPackageWhenDumpsysOnlyHasAppId() {
+        Fixture(kernelProfile = KernelProfile.KSU_NEXT_DUAL).use { fixture ->
+            val result = fixture.run()
+
+            assertEquals(result.stderr, 0, result.exitCode)
+            assertTrue(result.stdout.contains("\"result\":\"DEPLOYED_NO_REBOOT\""))
+        }
+    }
+
+    @Test
+    fun candidateHeadlessBindingFailsWithoutExplicitTypedMode() {
+        Fixture(
+                mutation = FixtureMutation.NEXT_LEGACY_USER_ID,
+                kernelProfile = KernelProfile.KSU_NEXT_DUAL_UNTYPED,
+            )
+            .use { fixture ->
+                val result = fixture.run()
+
+                assertEquals(result.stderr, 3, result.exitCode)
+                assertTrue(result.stderr.contains("KSU_MANAGER_AUTHORIZATION_FAILED"))
+                assertFalse(fixture.trace().any { " role-neutral-release.zip " in " $it " })
+            }
+    }
+
+    @Test
+    fun authoritativeUidRecordsFailClosedWhenNotExactlyOneBoundRecord() {
+        val mutations =
+            listOf(
+                FixtureMutation.NEXT_UID_SOURCE_ZERO,
+                FixtureMutation.NEXT_UID_SOURCE_MULTIPLE,
+                FixtureMutation.NEXT_UID_SOURCE_WRONG_MODULO,
+                FixtureMutation.NEXT_UID_SOURCE_MALFORMED,
+                FixtureMutation.NEXT_UID_SOURCE_EXTRA,
+                FixtureMutation.NEXT_UID_SOURCE_WHITESPACE,
+                FixtureMutation.NEXT_UID_SOURCE_METACHAR,
+                FixtureMutation.NEXT_UID_SOURCE_MISMATCH,
+            )
+
+        mutations.forEach { mutation ->
+            Fixture(mutation = mutation, kernelProfile = KernelProfile.KSU_NEXT_DUAL).use { fixture
+                ->
+                val result = fixture.run()
+
+                assertEquals(mutation.name, 3, result.exitCode)
+                assertTrue(result.stderr.contains("KSU_MANAGER_AUTHORIZATION_FAILED"))
+                assertTrue(mutation.name, fixture.managerPayloadsDidNotExecute())
+                assertTrue(mutation.name, fixture.probeArtifactsAbsent())
+                assertFalse(
+                    mutation.name,
+                    fixture.trace().any {
+                        "role-neutral-release.zip " in "$it " || " deploy " in " $it "
+                    },
+                )
+            }
+        }
+    }
+
+    @Test
     fun androidShellParserKeepsDottedManagerPackageAndNumericUidAsData() {
         Fixture(
                 mutation = FixtureMutation.NEXT_ANDROID_SHELL_PARSER,
@@ -42,7 +100,7 @@ class KsuNext330AdapterTest {
                     result.stderr,
                     result.stderr.contains("KSU_MANAGER_AUTHORIZATION_FAILED"),
                 )
-                assertTrue(mutation.name, fixture.managerMatchPayloadDidNotExecute())
+                assertTrue(mutation.name, fixture.managerPayloadsDidNotExecute())
                 assertTrue(mutation.name, fixture.probeArtifactsAbsent())
             }
         }
@@ -78,8 +136,10 @@ class KsuNext330AdapterTest {
             listOf(
                 FixtureMutation.NEXT_APPID_ZERO,
                 FixtureMutation.NEXT_APPID_AMBIGUOUS,
+                FixtureMutation.NEXT_APPID_MISSING,
                 FixtureMutation.NEXT_PACKAGES_MALICIOUS,
                 FixtureMutation.NEXT_COMPONENT_WRONG,
+                FixtureMutation.NEXT_ACTIVITY_WRONG,
                 FixtureMutation.NEXT_SIGNING_WRONG,
                 FixtureMutation.NEXT_HELP_DRIFT,
                 FixtureMutation.NEXT_BINARY_DRIFT,
@@ -90,7 +150,7 @@ class KsuNext330AdapterTest {
                 FixtureMutation.NEXT_PROBE_HASH_MISMATCH,
                 FixtureMutation.NEXT_PROBE_CLEANUP_FAILURE,
             )
-        assertEquals(13, mutations.size)
+        assertEquals(15, mutations.size)
         mutations.forEach { mutation ->
             Fixture(mutation = mutation, kernelProfile = KernelProfile.KSU_NEXT_DUAL).use { fixture
                 ->

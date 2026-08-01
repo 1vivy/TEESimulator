@@ -18,12 +18,14 @@ zip_path=
 network=
 evidence=
 no_reboot=false
+candidate_manager_mode=compatible_manager
 while (( $# > 0 )); do
     case "$1" in
         --pair-fd-env) pair_fd_env="${2-}"; shift 2 ;;
         --zip) zip_path="${2-}"; shift 2 ;;
         --network) network="${2-}"; shift 2 ;;
         --evidence) evidence="${2-}"; shift 2 ;;
+        --candidate-manager-mode) candidate_manager_mode="${2-}"; shift 2 ;;
         --no-reboot) no_reboot=true; shift ;;
         *) fail ARGUMENT_INVALID ;;
     esac
@@ -33,6 +35,7 @@ done
 [[ -n "$zip_path" && -f "$zip_path" && ! -L "$zip_path" && -n "$evidence" ]] ||
     fail ARGUMENT_INVALID
 [[ "$evidence" = /* && ! -L "$evidence" ]] || fail ARGUMENT_INVALID
+case "$candidate_manager_mode" in compatible_manager|authorized_headless) ;; *) fail ARGUMENT_INVALID ;; esac
 
 project_root="$(cd -- "${BASH_SOURCE[0]%/*}/.." && pwd -P)"
 # shellcheck source=scripts/rka-adb-root.sh
@@ -305,9 +308,9 @@ READ_ONLY_PROBE_TRANSFER)
     printf 'RESULT=READ_ONLY_PROBE_TRANSFER sha256=%s\n' "$expected_probe_sha"
     ;;
 manager-probe)
-    tx=$1 probe=$2 expected_probe_sha=$3 expected_boot=$4 role=$5
+    tx=$1 probe=$2 expected_probe_sha=$3 expected_boot=$4 role=$5 authorization_mode=$6
     case "$tx$expected_probe_sha" in *[!A-Za-z0-9._-]*) exit 2 ;; esac
-    case "$role" in DONOR|CANDIDATE) ;; *) exit 2 ;; esac
+    case "$role:$authorization_mode" in DONOR:compatible_manager|CANDIDATE:compatible_manager|CANDIDATE:authorized_headless) ;; *) exit 2 ;; esac
     [ "$(printf %s "$expected_probe_sha" | wc -c)" -eq 64 ] || exit 2
     expected_probe="$state/probes/$tx.$role.manager-appid"
     [ "$probe" = "$expected_probe" ] && [ -f "$probe" ] && [ ! -L "$probe" ] || exit 1
@@ -329,9 +332,17 @@ manager-probe)
 $matches
 EOF
     [ $((package_uid % 100000)) -eq "$appid" ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_UID_MISMATCH\n"; exit; }
+    package_user=$((package_uid / 100000))
+    uid_record=$(cmd package list packages -U --user "$package_user" "$package" 2>/dev/null) || { printf "RESULT=INCOMPATIBLE reason=MANAGER_UID_SOURCE\n"; exit; }
+    [ "$(printf %s "$uid_record" | wc -c)" -le 4096 ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_UID_SOURCE\n"; exit; }
+    uid_payload=${uid_record#package:}
+    bound_package=${uid_payload%% *}
+    bound_uid=${uid_payload#* uid:}
+    case "$bound_package" in ""|*[!A-Za-z0-9._]*) printf "RESULT=INCOMPATIBLE reason=MANAGER_UID_SOURCE\n"; exit ;; esac
+    case "$bound_uid" in ""|*[!0-9]*) printf "RESULT=INCOMPATIBLE reason=MANAGER_UID_SOURCE\n"; exit ;; esac
+    [ "$uid_record" = "package:$bound_package uid:$bound_uid" ] && [ "$bound_package" = "$package" ] && [ "$bound_uid" = "$package_uid" ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_UID_SOURCE\n"; exit; }
+    [ $((bound_uid % 100000)) -eq "$appid" ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_UID_MISMATCH\n"; exit; }
     package_dump=$(dumpsys package "$package" 2>/dev/null) || :
-    package_dump_uid=$(printf '%s\n' "$package_dump" | sed -n 's/^ *userId=//p')
-    [ "$package_dump_uid" = "$package_uid" ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_UID_MISMATCH\n"; exit; }
     signing=$(printf '%s\n' "$package_dump" | sed -n -e 's/^ *signatures=//p' -e 's/^ *signingDetails=//p')
     [ -n "$signing" ] && [ "$(printf '%s\n' "$signing" | wc -l)" -eq 1 ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_SIGNING_METADATA\n"; exit; }
     signing_sha=$(printf %s "$signing" | sha256sum | awk '{print $1}')
@@ -344,12 +355,14 @@ EOF
         printf '%s\n' "$package_dump" | grep -Fqx '  activity com.rifsxd.ksunext/.ui.MainActivity exported=true' || { printf "RESULT=INCOMPATIBLE reason=MANAGER_COMPONENT\n"; exit; }
         printf '%s\n' "$package_dump" | grep -Fqx '  activity com.rifsxd.ksunext/.ui.webui.WebUIActivity exported=false' || { printf "RESULT=INCOMPATIBLE reason=WEBUI_COMPONENT\n"; exit; }
         surface=KSU_NEXT_MANAGER
+    else
+        [ "$role:$authorization_mode" = CANDIDATE:authorized_headless ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_AUTHORIZATION_MODE\n"; exit; }
     fi
     [ "$(sha256sum /proc/sys/kernel/random/boot_id | awk '{print $1}')" = "$expected_boot" ] || { printf "RESULT=INCOMPATIBLE reason=BOOT_ID_DRIFT\n"; exit; }
     receipt="$state/manager-authorizations/$tx"
     mkdir -p "$state/manager-authorizations"
     chmod 700 "$state/manager-authorizations"
-    printf 'version=1\nprofile=KSU_NEXT_330\nsurface=%s\npackage=%s\nuid=%s\nappid=%s\nsigning_metadata_sha256=%s\nprobe_transfer=READ_ONLY_PROBE_TRANSFER\nprobe_cleanup=REMOVED\nbinary_evidence=exact-observed-binary\nbinary_sha256=%s\nreference_evidence=reference-source\nreference_commit=%s\n' "$surface" "$package" "$package_uid" "$appid" "$signing_sha" "$next_sha" "$next_reference" > "$receipt"
+    printf 'version=1\nprofile=KSU_NEXT_330\nsurface=%s\npackage=%s\nuid=%s\nappid=%s\nsigning_metadata_sha256=%s\nprobe_transfer=READ_ONLY_PROBE_TRANSFER\nprobe_cleanup=REMOVED\nbinary_evidence=exact-observed-binary\nbinary_sha256=%s\nreference_evidence=reference-source\nreference_commit=%s\nauthorization_mode=%s\n' "$surface" "$package" "$package_uid" "$appid" "$signing_sha" "$next_sha" "$next_reference" "$authorization_mode" > "$receipt"
     chmod 600 "$receipt"
     cleanup_probe
     trap - EXIT HUP INT TERM
@@ -546,6 +559,7 @@ transport=DIRECT" ] || exit 1
         include_ksud=false
         if [ "$surface" = HEADLESS_AUTHORIZED_MANAGER ]; then
             [ -n "$manager_process" ] || exit 1
+            [ "$(sed -n '14s/^authorization_mode=//p' "$authorization")" = authorized_headless ] || exit 1
             nsenter -t 1 -m -- cmp -s "$active/webroot/index.html" "$pending/webroot/index.html" || exit 1
             printf 'surface=HEADLESS_AUTHORIZED_MANAGER\nauthorized_package=%s\nomitted_views=manager,webui\nreason=NO_MANAGER_COMPONENT\n' "$manager_process" > "$txn/webui-owner.receipt"
             chmod 600 "$txn/webui-owner.receipt"
@@ -803,7 +817,7 @@ candidate_ksu_profile="$(sed -n 's/.* profile=\([A-Z0-9_]*\).*/\1/p' <<<"$candid
 [[ -n "$donor_boot" && -n "$candidate_boot" ]] || fail KSU_PREFLIGHT_INVALID 3
 
 authorize_next_manager() {
-    local serial="$1" role="$2" boot="$3" profile="$4"
+    local serial="$1" role="$2" boot="$3" profile="$4" authorization_mode="$5"
     [[ "$profile" == "$KSU_NEXT_PROFILE" ]] || return 0
     local remote_probe="$STATE_ROOT/probes/$transaction_id.$role.manager-appid"
     cleanup_remote_probe() {
@@ -816,7 +830,7 @@ authorize_next_manager() {
         fail KSU_MANAGER_AUTHORIZATION_FAILED 3
     }
     local result
-    result="$(remote "$serial" manager-probe "$transaction_id" "$remote_probe" "$probe_sha" "$boot" "$role")" || {
+    result="$(remote "$serial" manager-probe "$transaction_id" "$remote_probe" "$probe_sha" "$boot" "$role" "$authorization_mode")" || {
         cleanup_remote_probe >/dev/null 2>&1 || fail KSU_PROBE_CLEANUP_FAILED 3
         fail KSU_MANAGER_AUTHORIZATION_FAILED 3
     }
@@ -834,8 +848,8 @@ if [[ "$donor_ksu_profile" == "$KSU_NEXT_PROFILE" || "$candidate_ksu_profile" ==
     unzip -p -- "$zip_path" rka-sidecar > "$local_probe"
     chmod 700 "$local_probe"
     [[ "$(sha256sum -- "$local_probe" | awk '{print $1}')" == "$probe_sha" ]] || fail ARCHIVE_INVALID
-    authorize_next_manager "$donor_serial" DONOR "$donor_boot" "$donor_ksu_profile"
-    authorize_next_manager "$candidate_serial" CANDIDATE "$candidate_boot" "$candidate_ksu_profile"
+    authorize_next_manager "$donor_serial" DONOR "$donor_boot" "$donor_ksu_profile" compatible_manager
+    authorize_next_manager "$candidate_serial" CANDIDATE "$candidate_boot" "$candidate_ksu_profile" "$candidate_manager_mode"
     rm -f -- "$local_probe"
     trap - EXIT
 fi

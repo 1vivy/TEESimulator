@@ -149,7 +149,10 @@ exit 0
         val projectRoot = Path.of(System.getProperty("user.dir")).parent
         val script = projectRoot.resolve("scripts/rka-deploy.sh")
         val deploy =
-            "\"$script\" --pair-fd-env RKA_DEVICE_PAIR_FD --zip \"$zip\" --network \"$network\" --no-reboot --evidence \"$evidence\""
+            "\"$script\" --pair-fd-env RKA_DEVICE_PAIR_FD --zip \"$zip\" --network \"$network\" --no-reboot --evidence \"$evidence\"" +
+                (kernelProfile.candidateManagerMode?.let {
+                    " --candidate-manager-mode ${it.cliValue}"
+                } ?: "")
         val command =
             if (sealedDescriptor) {
                 "exec \"${projectRoot.resolve("scripts/rka-with-device-pair.sh")}\" --pair \"$pair\" -- $deploy"
@@ -301,9 +304,11 @@ os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zi
             !Files.exists(probes) || Files.list(probes).use { it.findAny().isEmpty }
         }
 
-    fun managerMatchPayloadDidNotExecute(): Boolean =
+    fun managerPayloadsDidNotExecute(): Boolean =
         listOf("DONOR_A", "CANDIDATE_B").all { serial ->
-            Files.notExists(devices.resolve(serial).resolve("root/tmp/rka-manager-executed"))
+            val root = devices.resolve(serial).resolve("root/tmp")
+            Files.notExists(root.resolve("rka-manager-executed")) &&
+                Files.notExists(root.resolve("rka-manager-uid-executed"))
         }
 
     fun hasFirstInstallReceipts(): Boolean =
@@ -357,7 +362,16 @@ os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zi
             "manager_process=com.rifsxd.ksunext" in donorOwner &&
             "binary_evidence=exact-observed-binary" in donorAuthorization &&
             "reference_evidence=reference-source" in donorAuthorization &&
+            "authorization_mode=compatible_manager" in donorAuthorization &&
             "surface=HEADLESS_AUTHORIZED_MANAGER" in candidateOwner &&
+            "authorization_mode=authorized_headless" in
+                Files.readString(
+                    devices
+                        .resolve(
+                            "CANDIDATE_B/root/data/adb/teesimulator-rka/manager-authorizations"
+                        )
+                        .resolve(transaction)
+                ) &&
             "omitted_views=manager,webui" in candidateOwner &&
             donorViews.map { it.substringBefore('=') } ==
                 listOf("init", "manager", "webui", "broker", "sidecar") &&

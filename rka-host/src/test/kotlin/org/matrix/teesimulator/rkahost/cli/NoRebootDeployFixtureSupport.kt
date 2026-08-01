@@ -4,16 +4,31 @@ import java.nio.file.Files
 
 internal data class DeployResult(val exitCode: Int, val stdout: String, val stderr: String)
 
+internal enum class CandidateManagerMode(val cliValue: String) {
+    AUTHORIZED_HEADLESS("authorized_headless")
+}
+
 internal enum class KernelProfile(
     val fixtureName: String,
     val firstInstall: Boolean = false,
     val systemOpenSsl: Boolean = true,
+    val candidateManagerMode: CandidateManagerMode? = null,
 ) {
     LEGACY("legacy"),
     LEGACY_FIRST_INSTALL("legacy", firstInstall = true),
-    KSU_NEXT_DUAL("ksu-next-dual"),
-    KSU_NEXT_FIRST_INSTALL("ksu-next-dual", firstInstall = true),
-    KSU_NEXT_FIRST_INSTALL_NO_OPENSSL("ksu-next-dual", firstInstall = true, systemOpenSsl = false),
+    KSU_NEXT_DUAL("ksu-next-dual", candidateManagerMode = CandidateManagerMode.AUTHORIZED_HEADLESS),
+    KSU_NEXT_DUAL_UNTYPED("ksu-next-dual"),
+    KSU_NEXT_FIRST_INSTALL(
+        "ksu-next-dual",
+        firstInstall = true,
+        candidateManagerMode = CandidateManagerMode.AUTHORIZED_HEADLESS,
+    ),
+    KSU_NEXT_FIRST_INSTALL_NO_OPENSSL(
+        "ksu-next-dual",
+        firstInstall = true,
+        systemOpenSsl = false,
+        candidateManagerMode = CandidateManagerMode.AUTHORIZED_HEADLESS,
+    ),
 }
 
 internal enum class FixtureMutation {
@@ -41,8 +56,10 @@ internal enum class FixtureMutation {
     ZYGOTE_MISSING,
     NEXT_APPID_ZERO,
     NEXT_APPID_AMBIGUOUS,
+    NEXT_APPID_MISSING,
     NEXT_PACKAGES_MALICIOUS,
     NEXT_COMPONENT_WRONG,
+    NEXT_ACTIVITY_WRONG,
     NEXT_SIGNING_WRONG,
     NEXT_HELP_DRIFT,
     NEXT_BINARY_DRIFT,
@@ -58,6 +75,15 @@ internal enum class FixtureMutation {
     NEXT_MATCH_METACHAR,
     NEXT_MATCH_MALFORMED,
     NEXT_MATCH_EXTRA,
+    NEXT_LEGACY_USER_ID,
+    NEXT_UID_SOURCE_ZERO,
+    NEXT_UID_SOURCE_MULTIPLE,
+    NEXT_UID_SOURCE_WRONG_MODULO,
+    NEXT_UID_SOURCE_MALFORMED,
+    NEXT_UID_SOURCE_EXTRA,
+    NEXT_UID_SOURCE_WHITESPACE,
+    NEXT_UID_SOURCE_METACHAR,
+    NEXT_UID_SOURCE_MISMATCH,
     NEXT_LAYOUT_ONE_PARENT,
     NEXT_LAYOUT_FILE,
     NEXT_LAYOUT_SYMLINK,
@@ -111,10 +137,14 @@ internal fun applyFixtureMutation(
         FixtureMutation.NEXT_APPID_ZERO -> environment["RKA_FAKE_NEXT_MUTATION"] = "appid-zero"
         FixtureMutation.NEXT_APPID_AMBIGUOUS ->
             environment["RKA_FAKE_NEXT_MUTATION"] = "appid-ambiguous"
+        FixtureMutation.NEXT_APPID_MISSING ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "appid-missing"
         FixtureMutation.NEXT_PACKAGES_MALICIOUS ->
             environment["RKA_FAKE_NEXT_MUTATION"] = "packages-malicious"
         FixtureMutation.NEXT_COMPONENT_WRONG ->
             environment["RKA_FAKE_NEXT_MUTATION"] = "component-wrong"
+        FixtureMutation.NEXT_ACTIVITY_WRONG ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "activity-wrong"
         FixtureMutation.NEXT_SIGNING_WRONG ->
             environment["RKA_FAKE_NEXT_MUTATION"] = "signing-wrong"
         FixtureMutation.NEXT_HELP_DRIFT -> environment["RKA_FAKE_NEXT_MUTATION"] = "help-drift"
@@ -139,6 +169,24 @@ internal fun applyFixtureMutation(
         FixtureMutation.NEXT_MATCH_MALFORMED ->
             environment["RKA_FAKE_NEXT_MUTATION"] = "match-malformed"
         FixtureMutation.NEXT_MATCH_EXTRA -> environment["RKA_FAKE_NEXT_MUTATION"] = "match-extra"
+        FixtureMutation.NEXT_LEGACY_USER_ID ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "legacy-userid"
+        FixtureMutation.NEXT_UID_SOURCE_ZERO ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "uid-source-zero"
+        FixtureMutation.NEXT_UID_SOURCE_MULTIPLE ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "uid-source-multiple"
+        FixtureMutation.NEXT_UID_SOURCE_WRONG_MODULO ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "uid-source-wrong-modulo"
+        FixtureMutation.NEXT_UID_SOURCE_MALFORMED ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "uid-source-malformed"
+        FixtureMutation.NEXT_UID_SOURCE_EXTRA ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "uid-source-extra"
+        FixtureMutation.NEXT_UID_SOURCE_WHITESPACE ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "uid-source-whitespace"
+        FixtureMutation.NEXT_UID_SOURCE_METACHAR ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "uid-source-metachar"
+        FixtureMutation.NEXT_UID_SOURCE_MISMATCH ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "uid-source-mismatch"
         FixtureMutation.NEXT_LAYOUT_ONE_PARENT ->
             environment["RKA_FAKE_NEXT_MUTATION"] = "layout-one-parent"
         FixtureMutation.NEXT_LAYOUT_FILE -> environment["RKA_FAKE_NEXT_MUTATION"] = "layout-file"

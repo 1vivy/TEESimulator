@@ -121,22 +121,49 @@ else
   exec /usr/bin/sha256sum "$@"
 fi'
 write_shim cmd '
-if [ "${RKA_FAKE_KSU_PROFILE:-legacy}" = ksu-next-dual ]; then
-  printf "%s\n" com.rifsxd.ksunext/.ui.MainActivity
-else
-  printf "%s\n" me.weishu.kernelsu/.ui.MainActivity
-fi'
+if [ "${1-} ${2-}" = "package resolve-activity" ]; then
+  if [ "${RKA_FAKE_KSU_PROFILE:-legacy}" = ksu-next-dual ]; then
+    if [ "${RKA_FAKE_NEXT_MUTATION:-}" = activity-wrong ]; then printf "%s\n" com.rifsxd.ksunext/.ui.OtherActivity; else printf "%s\n" com.rifsxd.ksunext/.ui.MainActivity; fi
+  else
+    printf "%s\n" me.weishu.kernelsu/.ui.MainActivity
+  fi
+  exit 0
+fi
+if [ "${1-} ${2-} ${3-} ${4-} ${5-} ${6-}" = "package list packages -U --user 0" ]; then
+  [ "$#" -eq 7 ] || exit 2
+  case "${RKA_FAKE_SERIAL:-}:${7-}" in
+    DONOR_A:com.rifsxd.ksunext) printf "package:com.rifsxd.ksunext uid:10123\n" ;;
+    CANDIDATE_B:org.example.headless)
+      case "${RKA_FAKE_NEXT_MUTATION:-}" in
+        uid-source-zero) exit 0 ;;
+        uid-source-multiple) printf "package:org.example.headless uid:10124\npackage:org.example.second uid:10124\n" ;;
+        uid-source-wrong-modulo|uid-mismatch) printf "package:org.example.headless uid:10125\n" ;;
+        uid-source-malformed) printf "package:org.example.headless uid:not-a-uid\n" ;;
+        uid-source-extra) printf "package:org.example.headless uid:10124 extra\n" ;;
+        uid-source-whitespace) printf " package:org.example.headless uid:10124\n" ;;
+        uid-source-metachar) printf "%s\n" "package:org.example.\$(touch /tmp/rka-manager-uid-executed) uid:10124" ;;
+        uid-source-mismatch) printf "package:org.example.other uid:10124\n" ;;
+        *) printf "package:org.example.headless uid:10124\n" ;;
+      esac ;;
+    *) exit 2 ;;
+  esac
+  exit 0
+fi
+exit 2'
 write_shim dumpsys '
 if [ "${1-} ${2-}" = "package com.rifsxd.ksunext" ]; then
-  if [ "${RKA_FAKE_NEXT_MUTATION:-}" = uid-mismatch ]; then package_uid=10125; else package_uid=10123; fi
-  printf "%s\n" "versionName=v3.3.0" "versionCode=33214" "  userId=$package_uid"
+  package_uid=10123
+  printf "%s\n" "versionName=v3.3.0" "versionCode=33214"
+  if [ "${RKA_FAKE_NEXT_MUTATION:-}" = legacy-userid ]; then printf "  userId=%s\n" "$package_uid"; else printf "  appId=%s\n" "$package_uid"; fi
   [ "${RKA_FAKE_NEXT_MUTATION:-}" = signing-wrong ] || printf "%s\n" "  signingDetails=SigningDetails{fixture-donor}"
   if [ "${RKA_FAKE_NEXT_MUTATION:-}" = component-wrong ]; then exported=false; else exported=true; fi
   printf "%s\n" "  activity com.rifsxd.ksunext/.ui.MainActivity exported=$exported" "  activity com.rifsxd.ksunext/.ui.webui.WebUIActivity exported=false"
   exit 0
 fi
 if [ "${1-} ${2-}" = "package org.example.headless" ]; then
-  printf "%s\n" "versionName=fixture" "versionCode=1" "  userId=10124" "  signingDetails=SigningDetails{fixture-candidate}"
+  printf "%s\n" "versionName=fixture" "versionCode=1"
+  if [ "${RKA_FAKE_NEXT_MUTATION:-}" = legacy-userid ]; then printf "  userId=10124\n"; else printf "  appId=10124\n"; fi
+  printf "%s\n" "  signingDetails=SigningDetails{fixture-candidate}"
   exit 0
 fi
 if [ "${1-} ${2-}" = "package me.weishu.kernelsu" ]; then
@@ -333,7 +360,8 @@ if [ "${RKA_FAKE_KSU_PROFILE:-legacy}" = ksu-next-dual ]; then
     if [ "$serial" = DONOR_A ]; then
         printf 'com.rifsxd.ksunext 10123 0 /data/user/0/com.rifsxd.ksunext default:targetSdkVersion=36 none 0 0 1\n' > "$root/data/system/packages.list"
     else
-        printf 'org.example.headless 10124 0 /data/user/0/org.example.headless default:targetSdkVersion=36 none 0 0 1\n' > "$root/data/system/packages.list"
+        if [ "${RKA_FAKE_NEXT_MUTATION:-}" = appid-missing ]; then package_uid=10125; else package_uid=10124; fi
+        printf 'org.example.headless %s 0 /data/user/0/org.example.headless default:targetSdkVersion=36 none 0 0 1\n' "$package_uid" > "$root/data/system/packages.list"
     fi
     case "${RKA_FAKE_NEXT_MUTATION:-}" in
         appid-ambiguous) printf 'org.example.second 110123 0 /data/user/0/org.example.second default none 0 0 1\n' >> "$root/data/system/packages.list" ;;

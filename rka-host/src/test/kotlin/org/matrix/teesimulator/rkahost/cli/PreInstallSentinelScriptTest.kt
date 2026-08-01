@@ -1,5 +1,6 @@
 package org.matrix.teesimulator.rkahost.cli
 
+import java.io.ByteArrayOutputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
@@ -10,6 +11,20 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PreInstallSentinelScriptTest {
+    @Test
+    fun samplerClosesInheritedAndroidControlDescriptorsAfterFork() = withFixture { fixture ->
+        val started = fixture.actionThroughAndroidControlDescriptors()
+
+        assertTrue(fixture.sampleCount() >= 1)
+        assertTrue(Files.exists(fixture.sentinel.resolve("samples/1")))
+        assertTrue(Files.exists(fixture.sentinel.resolve("pid")))
+        assertEquals(started.stderr, 0, started.exitCode)
+        assertTrue(started.stdout.contains("action=start"))
+        assertEquals(listOf("0", "1", "2"), fixture.samplerDescriptors())
+        assertFalse(started.stdout.contains("synthetic.alpha"))
+        assertFalse(started.stderr.contains("synthetic.alpha"))
+    }
+
     @Test
     fun hostileBlockingLogcatIsNeverInvokedByAuthoritativeIdentitySampler() =
         withFixture { fixture ->
@@ -301,12 +316,91 @@ class PreInstallSentinelScriptTest {
             return Result(process.exitValue(), stdout, stderr)
         }
 
+        fun actionThroughAndroidControlDescriptors(): Result {
+            val androidSu = root.resolve("android-su")
+            Files.writeString(
+                androidSu,
+                """
+                #!/bin/sh
+                set -eu
+                exec 3<"${'$'}1"
+                shift
+                exec 47>&1
+                exec 63>&2
+                exec "${'$'}@"
+                """
+                    .trimIndent()
+                    .plus("\n"),
+            )
+            Files.setPosixFilePermissions(androidSu, PosixFilePermissions.fromString("rwx------"))
+            val process =
+                ProcessBuilder(
+                        androidSu.toString(),
+                        privateProperties.toString(),
+                        "sh",
+                        script.toString(),
+                        "start",
+                        ID,
+                        NONCE_HASH,
+                        "DONOR",
+                        SCRIPT_HASH,
+                        maxSamples.toString(),
+                        maxDurationSeconds.toString(),
+                        "1024",
+                        (maxSamples * 1024 + 8192).toString(),
+                        (maxSamples + 6).toString(),
+                        "256",
+                    )
+                    .apply {
+                        environment()["PATH"] = "$tools:${environment()["PATH"]}"
+                        environment()["RKA_SENTINEL_ROOT"] = runtime.toString()
+                        environment()["RKA_SENTINEL_CONTROL"] =
+                            module.resolve("rka-control.sh").toString()
+                        environment()["RKA_SENTINEL_STATE_ROOT"] = state.toString()
+                    }
+                    .start()
+            val stdout = ByteArrayOutputStream()
+            val stderr = ByteArrayOutputStream()
+            val stdoutReader = Thread { process.inputStream.use { it.copyTo(stdout) } }
+            val stderrReader = Thread { process.errorStream.use { it.copyTo(stderr) } }
+            stdoutReader.start()
+            stderrReader.start()
+            val processExited = process.waitFor(2, TimeUnit.SECONDS)
+            stdoutReader.join(2_000)
+            stderrReader.join(2_000)
+            if (stdoutReader.isAlive || stderrReader.isAlive) {
+                val descriptors = samplerDescriptors()
+                val stdoutWasAlive = stdoutReader.isAlive
+                val stderrWasAlive = stderrReader.isAlive
+                killSampler()
+                stdoutReader.join(2_000)
+                stderrReader.join(2_000)
+                return Result(
+                    124,
+                    stdout.toString(Charsets.UTF_8),
+                    "SAMPLER_TIMEOUT processExited=$processExited stdoutAlive=$stdoutWasAlive stderrAlive=$stderrWasAlive descriptors=$descriptors sourceHasSweep=${Files.readString(script).contains("for inherited_fd_path")}",
+                )
+            }
+            return Result(
+                process.exitValue(),
+                stdout.toString(Charsets.UTF_8),
+                stderr.toString(Charsets.UTF_8),
+            )
+        }
+
         fun logcatInvocations(): Int {
             val path = root.resolve("logcat-invocations")
             return if (Files.exists(path)) Files.readAllLines(path).size else 0
         }
 
         fun sampleCount(): Int = Files.readString(sentinel.resolve("count")).trim().toInt()
+
+        fun samplerDescriptors(): List<String> {
+            val pid = Files.readString(sentinel.resolve("pid")).trim()
+            return Files.list(Path.of("/proc/$pid/fd")).use { paths ->
+                paths.map { it.fileName.toString() }.sorted().toList()
+            }
+        }
 
         fun requestedProperties(): List<String> =
             if (Files.exists(propertyTrace)) Files.readAllLines(propertyTrace).distinct()

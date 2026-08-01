@@ -405,6 +405,14 @@ case $action in
         chmod 600 "$sentinel/metadata" "$sentinel/count"
         take_sample || exit 1
         (
+            set +f
+            set -- /proc/self/fd/*
+            set -f
+            for inherited_fd_path do
+                inherited_fd=${inherited_fd_path##*/}
+                case $inherited_fd in ''|*[!0-9]*|0|1|2) continue ;; esac
+                eval "exec $inherited_fd<&-" || exit 1
+            done
             trap 'exit 0' HUP INT TERM
             while sleep 1; do take_sample || exit $?; done
         ) </dev/null >/dev/null 2>&1 &

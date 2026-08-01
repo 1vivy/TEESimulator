@@ -160,7 +160,7 @@ class ProcessHostCommandRunner(
             append("rm -f \"\$rka_script\"\nrka_script=\n")
             append("trap - 0 HUP INT TERM\n")
             append("status=0\n")
-            append("sh /proc/self/fd/9 </dev/null 3<<'")
+            append(". /proc/self/fd/9 </dev/null 3<<'")
                 .append(ROOT_PRIVATE_INPUT_DELIMITER)
                 .append("' || status=\$?\n")
             append(privateInput.canonical)

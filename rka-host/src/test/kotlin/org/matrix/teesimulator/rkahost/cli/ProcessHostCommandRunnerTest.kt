@@ -77,6 +77,53 @@ class ProcessHostCommandRunnerTest {
         }
 
     @Test
+    fun sourcesUnlinkedFd9InAndroidShellWithExactExitAndReturnStatus() =
+        withRemoteShell(androidFd9RemoteShell()) { executable, remote ->
+            val runner =
+                ProcessHostCommandRunner(
+                    executable.toString(),
+                    commandTimeout = Duration.ofSeconds(2),
+                )
+            val explicitExit =
+                runner.runRoot(
+                    BoundSerial.parse("SERIAL_A"),
+                    "printf START > /data/local/tmp/start-marker\nprintf explicit-exit\nexit 17\n",
+                    listOf("start", "safe/value"),
+                )
+
+            assertEquals(17, explicitExit.exitCode)
+            assertEquals("explicit-exit", explicitExit.stdout)
+            assertEquals("START", Files.readString(remote.resolve("start-marker")))
+            assertFalse(Files.exists(remote.resolve("child-exec")))
+            assertNoRootScript(remote)
+
+            Files.delete(remote.resolve("start-marker"))
+            val normalReturn =
+                runner.runRoot(
+                    BoundSerial.parse("SERIAL_A"),
+                    "IFS= read -r private_value <&3\n" +
+                        "[ \"${'$'}private_value\" = sealed-value ]\n" +
+                        "printf normal-return\n",
+                    listOf("start", "safe/value"),
+                    RootPrivateInput.parse(listOf("sealed-value")),
+                )
+            assertEquals(0, normalReturn.exitCode)
+            assertEquals("normal-return", normalReturn.stdout)
+            assertEquals("", normalReturn.stderr)
+            assertNoRootScript(remote)
+
+            val nonzeroReturn =
+                runner.runRoot(
+                    BoundSerial.parse("SERIAL_A"),
+                    "printf nonzero-return\nreturn 23\n",
+                    listOf("start", "safe/value"),
+                )
+            assertEquals(23, nonzeroReturn.exitCode)
+            assertEquals("nonzero-return", nonzeroReturn.stdout)
+            assertNoRootScript(remote)
+        }
+
+    @Test
     fun timeoutTerminatesAndReapsOnlyItsLocalProcessTree() =
         withExecutable(
             """
@@ -188,6 +235,28 @@ class ProcessHostCommandRunnerTest {
             .trimIndent()
             .plus("\n")
 
+    private fun androidFd9RemoteShell(): String =
+        """
+        #!/bin/sh
+        remote=${'$'}0.remote
+        tools=${'$'}remote/tools
+        mkdir -p "${'$'}remote" "${'$'}tools"
+        cat > "${'$'}tools/sh" <<'RKA_ANDROID_SH'
+        #!/bin/sh
+        if [ "${'$'}#" -eq 1 ] && [ "${'$'}1" = /proc/self/fd/9 ]; then
+            printf child-exec > "${'$'}RKA_ANDROID_REMOTE/child-exec"
+            exit 1
+        fi
+        exec /bin/sh "${'$'}@"
+        RKA_ANDROID_SH
+        chmod 700 "${'$'}tools/sh"
+        shift 2
+        export RKA_ANDROID_REMOTE=${'$'}remote
+        sed "s#/data/local/tmp#${'$'}remote#g" | PATH="${'$'}tools:${'$'}PATH" /bin/sh
+        """
+            .trimIndent()
+            .plus("\n")
+
     private fun withExecutable(source: String, block: (Path) -> Unit) {
         val executable = Files.createTempFile("rka-process-runner-", ".sh")
         try {
@@ -226,6 +295,12 @@ class ProcessHostCommandRunnerTest {
     }
 
     private fun readPid(path: Path): Long = Files.readString(path).trim().toLong()
+
+    private fun assertNoRootScript(remote: Path) {
+        Files.list(remote).use { paths ->
+            assertFalse(paths.anyMatch { it.fileName.toString().startsWith("rka-host-root.") })
+        }
+    }
 
     private fun assertEventuallyDead(pid: Long) {
         repeat(100) {

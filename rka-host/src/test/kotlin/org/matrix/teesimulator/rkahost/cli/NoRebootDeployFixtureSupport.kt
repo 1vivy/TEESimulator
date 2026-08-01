@@ -103,6 +103,12 @@ internal enum class FixtureMutation {
     NEXT_LAYOUT_FILE,
     NEXT_LAYOUT_SYMLINK,
     NEXT_LAYOUT_HIDDEN_MOUNT,
+    NEXT_ACTIVE_MISSING_MODULE_PROP,
+    NEXT_ACTIVE_CORRUPT_MODULE_PROP,
+    NEXT_ACTIVE_EXTRA_ENTRY,
+    NEXT_ACTIVE_MODULE_PROP_SYMLINK,
+    NEXT_ACTIVE_MISSING_UPDATE,
+    NEXT_ACTIVE_UPDATE_SYMLINK,
     ARCHIVE_METADATA_MISSING,
     ARCHIVE_METADATA_DUPLICATE_PATH,
     ARCHIVE_METADATA_TRAVERSAL,
@@ -248,6 +254,18 @@ internal fun applyFixtureMutation(
             environment["RKA_FAKE_NEXT_MUTATION"] = "layout-symlink"
         FixtureMutation.NEXT_LAYOUT_HIDDEN_MOUNT ->
             environment["RKA_FAKE_NEXT_MUTATION"] = "layout-hidden-mount"
+        FixtureMutation.NEXT_ACTIVE_MISSING_MODULE_PROP ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "active-missing-module-prop"
+        FixtureMutation.NEXT_ACTIVE_CORRUPT_MODULE_PROP ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "active-corrupt-module-prop"
+        FixtureMutation.NEXT_ACTIVE_EXTRA_ENTRY ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "active-extra"
+        FixtureMutation.NEXT_ACTIVE_MODULE_PROP_SYMLINK ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "active-module-prop-symlink"
+        FixtureMutation.NEXT_ACTIVE_MISSING_UPDATE ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "active-missing-update"
+        FixtureMutation.NEXT_ACTIVE_UPDATE_SYMLINK ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "active-update-symlink"
         FixtureMutation.ARCHIVE_METADATA_MISSING,
         FixtureMutation.ARCHIVE_METADATA_DUPLICATE_PATH,
         FixtureMutation.ARCHIVE_METADATA_TRAVERSAL,

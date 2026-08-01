@@ -28,6 +28,38 @@ class KsuNext330MetadataBridgeTest {
     }
 
     @Test
+    fun activePlaceholderFaultsFailBeforeKernelSuMetadataReinjection() {
+        listOf(
+                FixtureMutation.NEXT_ACTIVE_MISSING_MODULE_PROP,
+                FixtureMutation.NEXT_ACTIVE_CORRUPT_MODULE_PROP,
+                FixtureMutation.NEXT_ACTIVE_EXTRA_ENTRY,
+                FixtureMutation.NEXT_ACTIVE_MODULE_PROP_SYMLINK,
+                FixtureMutation.NEXT_ACTIVE_MISSING_UPDATE,
+                FixtureMutation.NEXT_ACTIVE_UPDATE_SYMLINK,
+            )
+            .forEach { mutation ->
+                Fixture(mutation, KernelProfile.KSU_NEXT_FIRST_INSTALL).use { fixture ->
+                    val result = fixture.run()
+
+                    assertEquals(mutation.name, 4, result.exitCode)
+                    assertTrue(mutation.name, fixture.moduleParentsAbsent())
+                    assertTrue(mutation.name, fixture.metadataTransactionTempAbsent())
+                }
+            }
+    }
+
+    @Test
+    fun presentLayoutRejectsActivePlaceholderEntriesBeyondTheUpdateMarker() {
+        Fixture(FixtureMutation.NEXT_ACTIVE_EXTRA_ENTRY, KernelProfile.KSU_NEXT_DUAL).use { fixture
+            ->
+            val result = fixture.run()
+
+            assertEquals(result.stderr, 4, result.exitCode)
+            assertTrue(fixture.metadataTransactionTempAbsent())
+        }
+    }
+
+    @Test
     fun busyboxUnzipRejectingZipinfoOptionStillReinjectsValidatedMetadata() {
         Fixture(
                 FixtureMutation.BUSYBOX_UNZIP_REJECTS_Z_OPTION,

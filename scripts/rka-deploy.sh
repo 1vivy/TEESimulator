@@ -307,6 +307,46 @@ discard_ksu_metadata() {
     rm -rf "$metadata_staging"
     [ ! -e "$metadata_staging" ] && [ ! -L "$metadata_staging" ]
 }
+prepare_active_view_without_update() {
+    active_view_source=$1
+    active_view_destination=$2
+    [ ! -e "$active_view_source" ] && [ ! -L "$active_view_source" ] && return 0
+    [ -d "$active_view_source" ] && [ ! -L "$active_view_source" ] || return 1
+    cp -a "$active_view_source" "$active_view_destination" || return 1
+    if [ -e "$active_view_destination/update" ] || [ -L "$active_view_destination/update" ]; then
+        [ -f "$active_view_destination/update" ] && [ ! -L "$active_view_destination/update" ] || return 1
+        rm -f "$active_view_destination/update" || return 1
+    fi
+}
+validate_ksu_active_layout() {
+    active_layout=$(cat "$txn/layout.before") || return 1
+    [ -d "$active" ] && [ ! -L "$active" ] || return 1
+    [ -f "$active/update" ] && [ ! -L "$active/update" ] || return 1
+    case "$active_layout" in
+        FIRST_INSTALL_ABSENT_LAYOUT)
+            active_entries=$(find "$active" -mindepth 1 -maxdepth 1 -print | LC_ALL=C sort) || return 1
+            expected_active_entries=$(printf '%s\n%s' "$active/module.prop" "$active/update")
+            [ "$active_entries" = "$expected_active_entries" ] || return 1
+            [ -f "$active/module.prop" ] && [ ! -L "$active/module.prop" ] || return 1
+            [ "$(stat -c %u:%g:%a "$active/module.prop")" = 0:0:644 ] || return 1
+            cmp -s "$active/module.prop" "$pending/module.prop"
+            ;;
+        PRESENT_LAYOUT)
+            prepare_active_view_without_update "$active" "$txn/active.after.without-update.tree" || return 1
+            if [ -d "$txn/active.after.without-update.tree" ]; then
+                toybox touch -r "$txn/active.before.without-update.tree" "$txn/active.after.without-update.tree" || return 1
+            fi
+            [ "$(tree_hash "$txn/active.after.without-update.tree")" = "$(cat "$txn/active.before.without-update")" ] || return 1
+            [ "$(metadata_hash "$txn/active.after.without-update.tree")" = "$(cat "$txn/active.metadata.before.without-update")" ] || return 1
+            case "$(cat "$txn/active.update.before")" in
+                PRESENT) cmp -s "$active/update" "$txn/active.tree/update" ;;
+                ABSENT) ;;
+                *) return 1 ;;
+            esac
+            ;;
+        *) return 1 ;;
+    esac
+}
 case "$mode" in
 preflight)
     [ "$(id -u)" = 0 ] || { printf "RESULT=INCOMPATIBLE reason=ROOT\n"; exit; }
@@ -589,6 +629,21 @@ deploy)
     metadata_hash "$active" > "$txn/active.metadata.before"
     cp -a "$active" "$txn/active.tree" 2>/dev/null || [ ! -e "$active" ]
     if [ -d "$txn/active.tree" ]; then [ "$(tree_hash "$txn/active.tree")" = "$(cat "$txn/active.before")" ] || exit 1; fi
+    if [ -f "$state/manager-authorizations/$tx" ]; then
+        if [ -e "$txn/active.tree/update" ] || [ -L "$txn/active.tree/update" ]; then
+            [ -f "$txn/active.tree/update" ] && [ ! -L "$txn/active.tree/update" ] || exit 1
+            printf 'PRESENT\n' > "$txn/active.update.before"
+        else
+            printf 'ABSENT\n' > "$txn/active.update.before"
+        fi
+        chmod 600 "$txn/active.update.before"
+        prepare_active_view_without_update "$active" "$txn/active.before.without-update.tree" || exit 1
+        if [ -d "$txn/active.before.without-update.tree" ]; then
+            toybox touch -r "$active" "$txn/active.before.without-update.tree" || exit 1
+        fi
+        tree_hash "$txn/active.before.without-update.tree" > "$txn/active.before.without-update"
+        metadata_hash "$txn/active.before.without-update.tree" > "$txn/active.metadata.before.without-update"
+    fi
     touch "$txn/snapshot.ready"
     set_phase SNAPSHOTS_READY
     if [ "$metadata_bridge" = true ]; then prepare_ksu_metadata || exit 1; fi
@@ -599,8 +654,7 @@ deploy)
         for path in /data/adb/modules /data/adb/modules_update "$active" "$pending"; do
             [ -d "$path" ] && [ ! -L "$path" ] || exit 1
         done
-        [ -f "$active/update" ] && [ ! -L "$active/update" ] || exit 1
-        [ "$(find "$active" -mindepth 1 -maxdepth 1 -print)" = "$active/update" ] || exit 1
+        validate_ksu_active_layout || exit 1
     fi
     if [ "$metadata_bridge" = true ]; then
         reinject_ksu_metadata || exit 1

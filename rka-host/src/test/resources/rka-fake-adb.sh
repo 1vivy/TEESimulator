@@ -64,6 +64,11 @@ if [ "${RKA_FAKE_FIRST_INSTALL:-false}" = true ] && [ ! -e "$root/data/adb/modul
         layout-hidden-mount) : > "$root/data/adb/teesimulator-rka/.bound" ;;
     esac
 fi
+if [ "${RKA_FAKE_KSU_PROFILE:-legacy}" = ksu-next-dual ] && [ "${RKA_FAKE_FIRST_INSTALL:-false}" != true ] && [ ! -e "$root/data/adb/modules/tricky_store/module.prop" ]; then
+    mkdir -p "$root/data/adb/modules/tricky_store"
+    printf 'id=tricky_store\nversion=prior\n' > "$root/data/adb/modules/tricky_store/module.prop"
+    chmod 644 "$root/data/adb/modules/tricky_store/module.prop"
+fi
 
 write_shim() {
     local name=$1
@@ -108,8 +113,19 @@ case "${1-} ${2-}" in
     if [ "${RKA_FAKE_FAULT:-}" = install-only-update-parent ]; then mkdir -p /data/adb/modules_update; exit 1; fi
     rm -rf /data/adb/modules_update/tricky_store
     mkdir -p /data/adb/modules/tricky_store /data/adb/modules_update/tricky_store
-    : > /data/adb/modules/tricky_store/update
-    /usr/bin/unzip -q "$3" -d /data/adb/modules_update/tricky_store -x 'META-INF/*' ;;
+    /usr/bin/unzip -q "$3" -d /data/adb/modules_update/tricky_store -x 'META-INF/*'
+    if [ "${RKA_FAKE_FIRST_INSTALL:-false}" = true ]; then
+      cp /data/adb/modules_update/tricky_store/module.prop /data/adb/modules/tricky_store/module.prop
+    fi
+    [ -e /data/adb/modules/tricky_store/update ] || : > /data/adb/modules/tricky_store/update
+    case "${RKA_FAKE_NEXT_MUTATION:-}" in
+      active-missing-module-prop) rm -f /data/adb/modules/tricky_store/module.prop ;;
+      active-corrupt-module-prop) printf corrupt >> /data/adb/modules/tricky_store/module.prop ;;
+      active-extra) : > /data/adb/modules/tricky_store/unexpected ;;
+      active-module-prop-symlink) rm -f /data/adb/modules/tricky_store/module.prop; ln -s /data/adb/modules_update/tricky_store/module.prop /data/adb/modules/tricky_store/module.prop ;;
+      active-missing-update) rm -f /data/adb/modules/tricky_store/update ;;
+      active-update-symlink) rm -f /data/adb/modules/tricky_store/update; ln -s /data/adb/modules_update/tricky_store/module.prop /data/adb/modules/tricky_store/update ;;
+    esac ;;
   *) exit 1 ;;
 esac
 EOF
@@ -257,7 +273,9 @@ esac'
 write_shim ping 'exit 0'
 write_shim logcat 'exit 0'
 write_shim strings 'exit 1'
-write_shim toybox 'exit 0'
+write_shim toybox '
+if [ "${1-}" = touch ]; then shift; exec /usr/bin/touch "$@"; fi
+exit 0'
 write_shim unzip '
 if [ "${RKA_FAKE_NEXT_MUTATION:-}" = busybox-unzip ]; then
   case "${1-}" in
@@ -316,7 +334,8 @@ case "$last" in
   /data/adb/modules/tricky_store/module.prop|/data/adb/modules_update/tricky_store/module.prop)
     if [ -f /data/adb/teesimulator-rka/.bound ] && [ "${RKA_NSENTER:-}" = 1 ] && [ "$last" = /data/adb/modules/tricky_store/module.prop ]; then
       exec /usr/bin/stat -c %d:%i /data/adb/modules_update/tricky_store/module.prop
-    fi ;;
+    fi
+    if [ "${1-}" = -c ] && [ "${2-}" = %u:%g:%a ]; then printf "0:0:644\n"; exit 0; fi ;;
   /data/adb/modules/tricky_store)
     if [ ! -f /data/adb/teesimulator-rka/.bound ] && [ "$(cat /data/adb/teesimulator-rka/run/supervisor.state 2>/dev/null)" = STOPPED ]; then
       if [ "${RKA_FAKE_FAULT:-}" = active-hash ]; then exit 1; fi

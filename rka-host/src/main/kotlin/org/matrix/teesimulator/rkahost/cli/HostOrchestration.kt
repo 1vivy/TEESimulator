@@ -1,6 +1,7 @@
 package org.matrix.teesimulator.rkahost.cli
 
 import java.nio.file.Path
+import org.matrix.teesimulator.rkahost.evidence.donorPropertyPrivateInput
 
 class HostOrchestrator(
     private val pair: DevicePairSnapshot,
@@ -178,16 +179,29 @@ class HostOrchestrator(
                     Hashes.sha256(baseline.nonce.toByteArray()),
                     role,
                     sentinelScriptHash,
-                ),
+                ) + SentinelLimits.PRE_INSTALL.arguments(),
+                if (role == "DONOR") donorPropertyPrivateInput() else RootPrivateInput.EMPTY,
             )
-        if (result.exitCode != 0) throw HostCliException("ADB_COMMAND_FAILED")
+        if (result.exitCode != 0) {
+            val terminal = Regex(".* result=(SENTINEL_[A-Z_]+)").matchEntire(result.stdout.trim())
+            throw HostCliException(terminal?.groupValues?.get(1) ?: "ADB_COMMAND_FAILED")
+        }
         val response =
             Regex(
                     "sentinel_id=${baseline.sentinelId} action=${Regex.escape(action)} phase=([A-Z_]+) samples=([0-9]+)"
                 )
                 .matchEntire(result.stdout.trim())
                 ?: throw HostCliException("SENTINEL_RESPONSE_INVALID")
-        response.groupValues[2].toIntOrNull() ?: throw HostCliException("SENTINEL_RESPONSE_INVALID")
+        val samples =
+            response.groupValues[2].toIntOrNull()
+                ?: throw HostCliException("SENTINEL_RESPONSE_INVALID")
+        if (
+            samples !in 0..SentinelLimits.PRE_INSTALL.maximumSamples ||
+                (action == "start" && samples != 1) ||
+                (action in setOf("sample", "assert-live") && samples < 2)
+        ) {
+            throw HostCliException("SENTINEL_RESPONSE_INVALID")
+        }
         return when (response.groupValues[1]) {
             "INSTALLED_OBSERVED" -> SentinelPhase.INSTALLED_OBSERVED
             "ROOT_AUTHORITATIVE",

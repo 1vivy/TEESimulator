@@ -10,6 +10,130 @@ import org.junit.Test
 
 class PreInstallSentinelScriptTest {
     @Test
+    fun shippedSamplerIsPolicyAgnosticAndReadsPrivateSyntheticKeys() = withFixture { fixture ->
+        val source = Files.readString(fixture.script)
+        assertFalse(source.contains("ro.build."))
+        assertFalse(source.contains("ro.vendor."))
+
+        val started = fixture.action("start")
+        assertEquals(started.stderr, 0, started.exitCode)
+        Thread.sleep(1_300)
+        assertEquals(listOf("synthetic.alpha", "synthetic.beta"), fixture.requestedProperties())
+    }
+
+    @Test
+    fun exactLastAllowedFrameSucceedsAndNextTickFailsClosedWithoutOverwrite() {
+        withFixture(maxSamples = 2) { fixture ->
+            assertEquals(0, fixture.action("start").exitCode)
+            Thread.sleep(2_300)
+
+            assertEquals(2, fixture.sampleCount())
+            assertTrue(Files.exists(fixture.sentinel.resolve("samples/2")))
+            assertFalse(Files.exists(fixture.sentinel.resolve("samples/3")))
+            val exhausted = fixture.action("assert-live")
+            assertTrue(exhausted.exitCode != 0)
+            assertTrue(exhausted.stdout.contains("result=SENTINEL_SAMPLE_LIMIT"))
+        }
+    }
+
+    @Test
+    fun durationLimitFailsClosedWithCompletePriorFrames() {
+        withFixture(maxSamples = 8, maxDurationSeconds = 1) { fixture ->
+            assertEquals(0, fixture.action("start").exitCode)
+            Thread.sleep(2_300)
+
+            val exhausted = fixture.action("assert-live")
+            assertTrue(exhausted.exitCode != 0)
+            assertTrue(exhausted.stdout.contains("result=SENTINEL_DURATION_LIMIT"))
+            assertTrue(fixture.sampleCount() in 1..8)
+            assertTrue(Files.exists(fixture.sentinel.resolve("samples/1")))
+        }
+    }
+
+    @Test
+    fun everyAtomicFrameBindsNonceRoleSequenceAndCompletion() = withFixture { fixture ->
+        assertEquals(0, fixture.action("start").exitCode)
+        Thread.sleep(1_300)
+
+        val lines = Files.readAllLines(fixture.sentinel.resolve("samples/1"))
+        assertTrue(lines.contains("nonce_sha256=$NONCE_HASH"))
+        assertTrue(lines.contains("role=DONOR"))
+        assertTrue(lines.contains("sequence=1"))
+        assertEquals("complete=1", lines.last())
+    }
+
+    @Test
+    fun rejectsCrossNonceFrameAtAuthoritativeBoundary() = withFixture { fixture ->
+        assertEquals(0, fixture.action("start").exitCode)
+        Thread.sleep(1_300)
+        fixture.replaceInFirstSample("nonce_sha256=", "nonce_sha256=${"d".repeat(64)}")
+        assertTrue(fixture.action("assert-live").exitCode != 0)
+    }
+
+    @Test
+    fun rejectsPartialPublicationAndFileCountMismatch() = withFixture { fixture ->
+        assertEquals(0, fixture.action("start").exitCode)
+        Thread.sleep(1_300)
+        fixture.addPartialFrame()
+        assertTrue(fixture.action("assert-live").exitCode != 0)
+    }
+
+    @Test
+    fun task25RejectsServiceRestartDriftAndStillCleansBoundedTree() = withFixture { fixture ->
+        assertEquals(0, fixture.action("start").exitCode)
+        Thread.sleep(1_300)
+        fixture.replaceInFirstSample("keystore2=", "keystore2=7:9:${"f".repeat(64)}")
+        assertTrue(fixture.action("assert-live").exitCode != 0)
+        assertEquals(0, fixture.action("stop").exitCode)
+        assertFalse(Files.exists(fixture.sentinel))
+    }
+
+    @Test
+    fun rejectsMalformedOversizedDuplicateReplayOrderAndBindingFrames() {
+        val mutations =
+            listOf<(Fixture) -> Unit>(
+                { it.appendToFirstSample("duplicate=1\n") },
+                { it.appendToFirstSample("oversized=${"x".repeat(1_024)}\n") },
+                { it.replaceInFirstSample("trace=", "trace=${"x".repeat(300)}") },
+                { it.replaceInFirstSample("nonce_sha256=", "nonce_sha256=${"d".repeat(64)}") },
+                { it.replaceInFirstSample("sentinel_id=", "sentinel_id=${"e".repeat(64)}") },
+                { it.replaceInFirstSample("role=", "role=CANDIDATE") },
+                { it.replayFirstFrameAsSecond() },
+                { it.swapFirstTwoFrames() },
+                { it.removeCompletionMarker() },
+                { it.addPartialFrame() },
+                { it.replaceFirstFrameWithSymlink() },
+                { it.writeCount("1") },
+                { it.writeCount("999") },
+            )
+        mutations.forEach { mutation ->
+            withFixture { fixture ->
+                assertEquals(0, fixture.action("start").exitCode)
+                Thread.sleep(2_300)
+                mutation(fixture)
+                assertTrue(fixture.action("assert-live").exitCode != 0)
+            }
+        }
+    }
+
+    @Test
+    fun rejectsAsymmetricSymlinkAndFileRuntimeLayoutsBeforeSampling() {
+        listOf<(Fixture) -> Unit>(
+                { it.installControlWithoutManifest() },
+                { it.replaceModuleWithSymlink() },
+                { it.replaceModuleWithFile() },
+                { it.installSymlinkControl() },
+            )
+            .forEach { mutation ->
+                withFixture { fixture ->
+                    mutation(fixture)
+                    assertTrue(fixture.action("start").exitCode != 0)
+                    assertFalse(Files.exists(fixture.sentinel))
+                }
+            }
+    }
+
+    @Test
     fun samplesBeforeInstallAndKeepsAuthorityThroughInstalledRuntimeTransition() =
         withFixture { fixture ->
             assertEquals(0, fixture.action("start").exitCode)
@@ -81,8 +205,12 @@ class PreInstallSentinelScriptTest {
         }
     }
 
-    private fun withFixture(block: (Fixture) -> Unit) {
-        val fixture = Fixture()
+    private fun withFixture(
+        maxSamples: Int = 8,
+        maxDurationSeconds: Int = maxSamples * 2,
+        block: (Fixture) -> Unit,
+    ) {
+        val fixture = Fixture(maxSamples, maxDurationSeconds)
         try {
             block(fixture)
         } finally {
@@ -90,15 +218,17 @@ class PreInstallSentinelScriptTest {
         }
     }
 
-    private class Fixture {
+    private class Fixture(private val maxSamples: Int, private val maxDurationSeconds: Int) {
         private val root = Files.createTempDirectory("preinstall-sentinel-")
         private val tools = Files.createDirectory(root.resolve("tools"))
         private val runtime = Files.createDirectory(root.resolve("runtime"))
         private val module = Files.createDirectory(root.resolve("module"))
         private val state = Files.createDirectory(root.resolve("state"))
-        private val script =
+        val script =
             Path.of(System.getProperty("user.dir"))
                 .resolve("src/main/resources/rka-preinstall-sentinel.sh")
+        private val privateProperties = root.resolve("property-allowlist")
+        private val propertyTrace = root.resolve("property-trace")
         val sentinel: Path = runtime.resolve(ID)
 
         init {
@@ -106,13 +236,26 @@ class PreInstallSentinelScriptTest {
                 Files.setPosixFilePermissions(it, PosixFilePermissions.fromString("rwx------"))
             }
             executable("pidof", "#!/bin/sh\nexit 1\n")
-            executable("getprop", "#!/bin/sh\nprintf 'stable-value\\n'\n")
+            executable(
+                "getprop",
+                "#!/bin/sh\nprintf '%s\\n' \"${'$'}1\" >> \"${propertyTrace}\"\nprintf 'stable-value\\n'\n",
+            )
             executable("logcat", "#!/bin/sh\nexit 0\n")
+            Files.writeString(privateProperties, "synthetic.alpha\nsynthetic.beta\n")
+            Files.setPosixFilePermissions(
+                privateProperties,
+                PosixFilePermissions.fromString("rw-------"),
+            )
         }
 
         fun action(action: String): Result {
             val process =
                 ProcessBuilder(
+                        "sh",
+                        "-c",
+                        "exec 3<\"${'$'}1\"; shift; exec \"${'$'}@\"",
+                        "sentinel-test",
+                        privateProperties.toString(),
                         "sh",
                         script.toString(),
                         action,
@@ -120,6 +263,12 @@ class PreInstallSentinelScriptTest {
                         NONCE_HASH,
                         "DONOR",
                         SCRIPT_HASH,
+                        maxSamples.toString(),
+                        maxDurationSeconds.toString(),
+                        "1024",
+                        (maxSamples * 1024 + 8192).toString(),
+                        (maxSamples + 6).toString(),
+                        "256",
                     )
                     .apply {
                         environment()["PATH"] = "$tools:${environment()["PATH"]}"
@@ -133,6 +282,12 @@ class PreInstallSentinelScriptTest {
             val stderr = process.errorStream.bufferedReader().readText()
             return Result(process.waitFor(), stdout, stderr)
         }
+
+        fun sampleCount(): Int = Files.readString(sentinel.resolve("count")).trim().toInt()
+
+        fun requestedProperties(): List<String> =
+            if (Files.exists(propertyTrace)) Files.readAllLines(propertyTrace).distinct()
+            else emptyList()
 
         fun installRuntime() {
             val control = module.resolve("rka-control.sh")
@@ -155,7 +310,9 @@ class PreInstallSentinelScriptTest {
             val count = Files.readString(sentinel.resolve("count")).trim().toInt()
             return (1..count)
                 .map { sequence ->
-                    Files.readAllLines(sentinel.resolve("samples/$sequence"))[5].substringAfter('=')
+                    Files.readAllLines(sentinel.resolve("samples/$sequence"))
+                        .single { it.startsWith("uptime_ms=") }
+                        .substringAfter('=')
                         .toLong()
                 }
                 .zipWithNext { before, after -> after - before }
@@ -177,10 +334,74 @@ class PreInstallSentinelScriptTest {
             Files.writeString(sample, Files.readString(sample) + value)
         }
 
+        fun replayFirstFrameAsSecond() {
+            Files.write(
+                sentinel.resolve("samples/2"),
+                Files.readAllBytes(sentinel.resolve("samples/1")),
+            )
+        }
+
+        fun swapFirstTwoFrames() {
+            val first = Files.readAllBytes(sentinel.resolve("samples/1"))
+            val second = Files.readAllBytes(sentinel.resolve("samples/2"))
+            Files.write(sentinel.resolve("samples/1"), second)
+            Files.write(sentinel.resolve("samples/2"), first)
+        }
+
+        fun removeCompletionMarker() {
+            val sample = sentinel.resolve("samples/1")
+            Files.writeString(
+                sample,
+                Files.readAllLines(sample).dropLast(1).joinToString("\n", postfix = "\n"),
+            )
+        }
+
+        fun addPartialFrame() {
+            Files.writeString(sentinel.resolve("samples/.sample-partial.tmp"), "version=2\n")
+        }
+
+        fun replaceFirstFrameWithSymlink() {
+            val first = sentinel.resolve("samples/1")
+            Files.delete(first)
+            Files.createSymbolicLink(first, sentinel.resolve("samples/2"))
+        }
+
+        fun writeCount(value: String) {
+            Files.writeString(sentinel.resolve("count"), "$value\n")
+        }
+
+        fun installControlWithoutManifest() {
+            Files.writeString(module.resolve("rka-control.sh"), "#!/bin/sh\nexit 0\n")
+        }
+
+        fun replaceModuleWithSymlink() {
+            Files.delete(module)
+            val target = Files.createDirectory(root.resolve("module-target"))
+            Files.createSymbolicLink(module, target)
+        }
+
+        fun replaceModuleWithFile() {
+            Files.delete(module)
+            Files.writeString(module, "not-a-directory\n")
+        }
+
+        fun installSymlinkControl() {
+            val target = root.resolve("control-target")
+            Files.writeString(target, "#!/bin/sh\nexit 0\n")
+            Files.createSymbolicLink(module.resolve("rka-control.sh"), target)
+            val metadata = Files.createDirectories(module.resolve("META-INF"))
+            Files.writeString(
+                metadata.resolve("rka-artifacts.sha256"),
+                "${Hashes.sha256(Files.readAllBytes(target))}  rka-control.sh\n",
+            )
+        }
+
         fun replaceLastUptimeWithPrevious(delta: Long = 0) {
             val count = Files.readString(sentinel.resolve("count")).trim().toInt()
             val previous =
-                Files.readAllLines(sentinel.resolve("samples/${count - 1}"))[5].substringAfter('=')
+                Files.readAllLines(sentinel.resolve("samples/${count - 1}"))
+                    .single { it.startsWith("uptime_ms=") }
+                    .substringAfter('=')
                     .toLong()
             val sample = sentinel.resolve("samples/$count")
             Files.writeString(

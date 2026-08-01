@@ -149,6 +149,54 @@ class HostOrchestrationTest {
         assertFalse(runner.calls.any { "cleanup" in it })
     }
 
+    @Test
+    fun interruptedSamplingAndAssertionPreserveBaselineForDeterministicResume() {
+        val path = Files.createTempDirectory("sentinel-resume-").resolve("baseline.json")
+        val runner = RecordingRunner(failures = mutableMapOf("sample" to 1, "assert-live" to 1))
+        val host = HostOrchestrator(pair, runner)
+        host.sentinelStart(path, "nonce-A")
+
+        assertThrows(HostCliException::class.java) { host.sentinelSample(path) }
+        assertTrue(Files.exists(path))
+        host.sentinelSample(path)
+        assertThrows(HostCliException::class.java) { host.sentinelAssertLive(path) }
+        assertTrue(Files.exists(path))
+        host.sentinelAssertLive(path)
+        host.sentinelStop(path)
+
+        assertFalse(Files.exists(path))
+    }
+
+    @Test
+    fun interruptedStopIsIdempotentlyRetriedWithoutDroppingBaseline() {
+        val path = Files.createTempDirectory("sentinel-stop-resume-").resolve("baseline.json")
+        val runner = RecordingRunner(failures = mutableMapOf("stop" to 1))
+        val host = HostOrchestrator(pair, runner)
+        host.sentinelStart(path, "nonce-A")
+
+        assertThrows(HostCliException::class.java) { host.sentinelStop(path) }
+        assertTrue(Files.exists(path))
+        host.sentinelStop(path)
+
+        assertFalse(Files.exists(path))
+    }
+
+    @Test
+    fun misleadingSuccessAndOversizedSampleCountAreRejected() {
+        val misleading = Files.createTempDirectory("sentinel-misleading-").resolve("baseline.json")
+        val misleadingRunner = RecordingRunner(misleadingActions = setOf("start"))
+        assertThrows(HostCliException::class.java) {
+            HostOrchestrator(pair, misleadingRunner).sentinelStart(misleading, "nonce-A")
+        }
+        assertFalse(Files.exists(misleading))
+
+        val oversized = Files.createTempDirectory("sentinel-count-").resolve("baseline.json")
+        val oversizedRunner = RecordingRunner(sampleCounts = mapOf("assert-live" to 1_025))
+        val host = HostOrchestrator(pair, oversizedRunner)
+        host.sentinelStart(oversized, "nonce-A")
+        assertThrows(HostCliException::class.java) { host.sentinelAssertLive(oversized) }
+    }
+
     private fun assertFailedStartLeavesNoBaseline(failingStart: Int) {
         val path = Files.createTempDirectory("sentinel-failure-").resolve("baseline.json")
         val runner = RecordingRunner(failingStart)
@@ -162,7 +210,12 @@ class HostOrchestrationTest {
         assertTrue(runner.calls.any { "stop" in it })
     }
 
-    private class RecordingRunner(private val failingStart: Int? = null) : HostCommandRunner {
+    private class RecordingRunner(
+        private val failingStart: Int? = null,
+        private val failures: MutableMap<String, Int> = mutableMapOf(),
+        private val misleadingActions: Set<String> = emptySet(),
+        private val sampleCounts: Map<String, Int> = emptyMap(),
+    ) : HostCommandRunner {
         val calls = mutableListOf<List<String>>()
         private var starts = 0
         private var uptimeSamples = 0
@@ -198,16 +251,23 @@ class HostOrchestrationTest {
             serial: BoundSerial,
             script: String,
             arguments: List<String>,
+            privateInput: RootPrivateInput,
         ): HostCommandResult {
             calls += listOf("adb", "-s", serial.value, "shell", "su", "0", "sh") + arguments
             val action = arguments[0]
             if (action == "start" && ++starts == failingStart) {
                 return HostCommandResult(1, "", "injected")
             }
+            val remainingFailures = failures[action] ?: 0
+            if (remainingFailures > 0) {
+                failures[action] = remainingFailures - 1
+                return HostCommandResult(1, "success", "injected")
+            }
+            if (action in misleadingActions) return HostCommandResult(0, "success", "")
             val phase = if (action == "stop") "STOPPED" else "ROOT_AUTHORITATIVE"
             return HostCommandResult(
                 0,
-                "sentinel_id=${arguments[1]} action=$action phase=$phase samples=2\n",
+                "sentinel_id=${arguments[1]} action=$action phase=$phase samples=${sampleCounts[action] ?: if (action == "start") 1 else 2}\n",
                 "",
             )
         }

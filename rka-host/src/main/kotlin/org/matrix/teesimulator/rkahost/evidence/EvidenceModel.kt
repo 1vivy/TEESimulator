@@ -71,23 +71,8 @@ object EvidenceHash {
 }
 
 object DonorPropertyPolicy {
-    private val allowed =
-        setOf(
-            "ro.build.fingerprint",
-            "ro.build.version.release",
-            "ro.build.version.incremental",
-            "ro.vendor.build.fingerprint",
-        )
-    private val secretWords =
-        Regex("(?i)(secret|token|password|credential|key|alias|blob|private|auth)")
-
     fun validate(properties: Map<String, String>) {
-        require(properties.keys.all { it in allowed && !secretWords.containsMatchIn(it) }) {
-            "PROPERTY_NOT_ALLOWLISTED"
-        }
-        require(properties.values.none { it.contains('\n') || it.contains('\u0000') }) {
-            "PROPERTY_VALUE_INVALID"
-        }
+        validateDonorProperties(properties)
     }
 }
 

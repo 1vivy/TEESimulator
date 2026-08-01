@@ -25,13 +25,20 @@ serial=${'$'}2
 shift 2
 printf '%s\n' "${'$'}serial ${'$'}*" >> "${'$'}RKA_SYNTH_TRACE"
 if [[ " ${'$'}* " == *' shell su 0 sh '* ]]; then
+    IFS= read -r private_header
+    [[ "${'$'}private_header" == "exec 3<<'RKA_PRIVATE_INPUT_V1'" ]]
+    while IFS= read -r private_line; do
+        [[ "${'$'}private_line" != RKA_PRIVATE_INPUT_V1 ]] || break
+    done
     IFS= read -r fixed
     [[ "${'$'}fixed" == 'set -- '* ]]
     fixed=${'$'}{fixed#'set -- '}
     read -r action id _ <<< "${'$'}fixed"
     phase=ROOT_AUTHORITATIVE
+    samples=2
+    [[ "${'$'}action" != start ]] || samples=1
     [[ "${'$'}action" != stop ]] || phase=STOPPED
-    printf 'sentinel_id=%s action=%s phase=%s samples=2\n' "${'$'}id" "${'$'}action" "${'$'}phase"
+    printf 'sentinel_id=%s action=%s phase=%s samples=%s\n' "${'$'}id" "${'$'}action" "${'$'}phase" "${'$'}samples"
     exit 0
 fi
 case "${'$'}{*: -1}" in
@@ -79,6 +86,49 @@ esac
             val baseline = Files.readString(root.resolve("baseline.json"))
             assertFalse(baseline.contains(DONOR))
             assertFalse(baseline.contains(CANDIDATE))
+
+            writePair(root, "REBOUND_DONOR", "REBOUND_CANDIDATE")
+            Files.writeString(trace, "")
+            val crossPair =
+                runWrapper(
+                    root,
+                    hostAction(root.resolve("baseline.json"), "assert-live"),
+                    mapOf(
+                        "PATH" to "$tools:${System.getenv("PATH")}",
+                        "RKA_SYNTH_TRACE" to trace.toString(),
+                    ),
+                )
+            assertEquals(2, crossPair.exitCode)
+            assertTrue(crossPair.stderr.contains("PAIR_BINDING_MISMATCH"))
+            assertTrue(Files.readString(trace).isEmpty())
+            writePair(root, DONOR, CANDIDATE)
+
+            Files.writeString(trace, "")
+            val donorOnly =
+                runWrapper(
+                    root,
+                    hostCommand(root.resolve("donor-baseline.json"), "donor"),
+                    mapOf(
+                        "PATH" to "$tools:${System.getenv("PATH")}",
+                        "RKA_SYNTH_TRACE" to trace.toString(),
+                    ),
+                )
+            assertEquals(donorOnly.stderr, 0, donorOnly.exitCode)
+            assertTrue(Files.readString(trace).contains(DONOR))
+            assertFalse(Files.readString(trace).contains(CANDIDATE))
+
+            Files.writeString(trace, "")
+            val wrongScope =
+                runWrapper(
+                    root,
+                    hostCommand(root.resolve("wrong-baseline.json"), "candidate"),
+                    mapOf(
+                        "PATH" to "$tools:${System.getenv("PATH")}",
+                        "RKA_SYNTH_TRACE" to trace.toString(),
+                    ),
+                )
+            assertEquals(2, wrongScope.exitCode)
+            assertTrue(Files.readString(trace).isEmpty())
         }
     }
 
@@ -226,7 +276,7 @@ print("ORDINARY_ENV_PRESERVED=" + str(os.environ.get("RKA_SYNTH_KEEP") == "prese
         }
     }
 
-    private fun hostCommand(baseline: Path): List<String> =
+    private fun hostCommand(baseline: Path, scope: String? = null): List<String> =
         listOf(
             Path.of(System.getProperty("java.home"), "bin", "java").toString(),
             "--enable-native-access=ALL-UNNAMED",
@@ -239,6 +289,19 @@ print("ORDINARY_ENV_PRESERVED=" + str(os.environ.get("RKA_SYNTH_KEEP") == "prese
             baseline.toString(),
             "--nonce",
             "SYNTH_NONCE",
+        ) + if (scope == null) emptyList() else listOf("--scope", scope)
+
+    private fun hostAction(baseline: Path, action: String): List<String> =
+        listOf(
+            Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+            "--enable-native-access=ALL-UNNAMED",
+            "-cp",
+            System.getProperty("java.class.path"),
+            HostCli::class.java.name,
+            "sentinel",
+            action,
+            "--baseline",
+            baseline.toString(),
         )
 
     private fun runWrapper(

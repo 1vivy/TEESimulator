@@ -329,6 +329,8 @@ validate_ksu_active_layout() {
             [ "$active_entries" = "$expected_active_entries" ] || return 1
             [ -f "$active/module.prop" ] && [ ! -L "$active/module.prop" ] || return 1
             [ "$(stat -c %u:%g:%a "$active/module.prop")" = 0:0:644 ] || return 1
+            [ "$(stat -c %u:%g:%a "$active/update")" = 0:0:644 ] || return 1
+            [ ! -s "$active/update" ] || return 1
             cmp -s "$active/module.prop" "$pending/module.prop"
             ;;
         PRESENT_LAYOUT)

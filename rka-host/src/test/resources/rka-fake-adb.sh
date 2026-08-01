@@ -125,6 +125,7 @@ case "${1-} ${2-}" in
       active-module-prop-symlink) rm -f /data/adb/modules/tricky_store/module.prop; ln -s /data/adb/modules_update/tricky_store/module.prop /data/adb/modules/tricky_store/module.prop ;;
       active-missing-update) rm -f /data/adb/modules/tricky_store/update ;;
       active-update-symlink) rm -f /data/adb/modules/tricky_store/update; ln -s /data/adb/modules_update/tricky_store/module.prop /data/adb/modules/tricky_store/update ;;
+      active-update-nonempty) printf marker > /data/adb/modules/tricky_store/update ;;
     esac ;;
   *) exit 1 ;;
 esac
@@ -336,6 +337,16 @@ case "$last" in
       exec /usr/bin/stat -c %d:%i /data/adb/modules_update/tricky_store/module.prop
     fi
     if [ "${1-}" = -c ] && [ "${2-}" = %u:%g:%a ]; then printf "0:0:644\n"; exit 0; fi ;;
+  /data/adb/modules/tricky_store/update)
+    if [ "${1-}" = -c ] && [ "${2-}" = %u:%g:%a ]; then
+      case "${RKA_FAKE_NEXT_MUTATION:-}" in
+        active-update-wrong-owner) printf "1000:0:644\n" ;;
+        active-update-wrong-group) printf "0:1000:644\n" ;;
+        active-update-unsafe-mode) printf "0:0:666\n" ;;
+        *) printf "0:0:644\n" ;;
+      esac
+      exit 0
+    fi ;;
   /data/adb/modules/tricky_store)
     if [ ! -f /data/adb/teesimulator-rka/.bound ] && [ "$(cat /data/adb/teesimulator-rka/run/supervisor.state 2>/dev/null)" = STOPPED ]; then
       if [ "${RKA_FAKE_FAULT:-}" = active-hash ]; then exit 1; fi

@@ -36,6 +36,10 @@ class KsuNext330MetadataBridgeTest {
                 FixtureMutation.NEXT_ACTIVE_MODULE_PROP_SYMLINK,
                 FixtureMutation.NEXT_ACTIVE_MISSING_UPDATE,
                 FixtureMutation.NEXT_ACTIVE_UPDATE_SYMLINK,
+                FixtureMutation.NEXT_ACTIVE_UPDATE_WRONG_OWNER,
+                FixtureMutation.NEXT_ACTIVE_UPDATE_WRONG_GROUP,
+                FixtureMutation.NEXT_ACTIVE_UPDATE_UNSAFE_MODE,
+                FixtureMutation.NEXT_ACTIVE_UPDATE_NONEMPTY,
             )
             .forEach { mutation ->
                 Fixture(mutation, KernelProfile.KSU_NEXT_FIRST_INSTALL).use { fixture ->

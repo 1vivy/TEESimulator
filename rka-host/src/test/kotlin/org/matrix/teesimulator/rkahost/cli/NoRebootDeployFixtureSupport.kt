@@ -109,6 +109,10 @@ internal enum class FixtureMutation {
     NEXT_ACTIVE_MODULE_PROP_SYMLINK,
     NEXT_ACTIVE_MISSING_UPDATE,
     NEXT_ACTIVE_UPDATE_SYMLINK,
+    NEXT_ACTIVE_UPDATE_WRONG_OWNER,
+    NEXT_ACTIVE_UPDATE_WRONG_GROUP,
+    NEXT_ACTIVE_UPDATE_UNSAFE_MODE,
+    NEXT_ACTIVE_UPDATE_NONEMPTY,
     ARCHIVE_METADATA_MISSING,
     ARCHIVE_METADATA_DUPLICATE_PATH,
     ARCHIVE_METADATA_TRAVERSAL,
@@ -266,6 +270,14 @@ internal fun applyFixtureMutation(
             environment["RKA_FAKE_NEXT_MUTATION"] = "active-missing-update"
         FixtureMutation.NEXT_ACTIVE_UPDATE_SYMLINK ->
             environment["RKA_FAKE_NEXT_MUTATION"] = "active-update-symlink"
+        FixtureMutation.NEXT_ACTIVE_UPDATE_WRONG_OWNER ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "active-update-wrong-owner"
+        FixtureMutation.NEXT_ACTIVE_UPDATE_WRONG_GROUP ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "active-update-wrong-group"
+        FixtureMutation.NEXT_ACTIVE_UPDATE_UNSAFE_MODE ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "active-update-unsafe-mode"
+        FixtureMutation.NEXT_ACTIVE_UPDATE_NONEMPTY ->
+            environment["RKA_FAKE_NEXT_MUTATION"] = "active-update-nonempty"
         FixtureMutation.ARCHIVE_METADATA_MISSING,
         FixtureMutation.ARCHIVE_METADATA_DUPLICATE_PATH,
         FixtureMutation.ARCHIVE_METADATA_TRAVERSAL,

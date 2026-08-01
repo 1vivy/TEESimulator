@@ -126,6 +126,17 @@ exit 0
             archiveRoot.resolve("META-INF/rka-source.sha256"),
             "commit=$sourceSha\n${"a".repeat(64)}  module/module.prop\n",
         )
+        val artifactManifest = archiveRoot.resolve("META-INF/rka-artifacts.sha256")
+        val canonicalModuleLine =
+            Files.readAllLines(artifactManifest).single { it.endsWith("  module.prop") }
+        fun rewriteArtifactPath(path: String, preserveCanonical: Boolean = false) {
+            val lines = Files.readAllLines(artifactManifest)
+            val replacement = "${canonicalModuleLine.substringBefore("  ")}  $path"
+            val rewritten =
+                if (preserveCanonical) lines + replacement
+                else lines.map { line -> if (line == canonicalModuleLine) replacement else line }
+            Files.writeString(artifactManifest, rewritten.joinToString("\n", postfix = "\n"))
+        }
         when (mutation) {
             FixtureMutation.ARCHIVE_METADATA_MISSING ->
                 Files.delete(archiveRoot.resolve("META-INF/rka-source.sha256"))
@@ -145,12 +156,25 @@ exit 0
                     "commit=$sourceSha\n" + "a".repeat(1_048_577),
                 )
             FixtureMutation.ARCHIVE_ARTIFACT_METADATA_TAMPERED -> {
-                val artifactManifest = archiveRoot.resolve("META-INF/rka-artifacts.sha256")
                 Files.writeString(
                     artifactManifest,
                     "b".repeat(64) + Files.readString(artifactManifest).substring(64),
                 )
             }
+            FixtureMutation.ARCHIVE_ARTIFACT_DOT_PREFIX -> rewriteArtifactPath("./module.prop")
+            FixtureMutation.ARCHIVE_ARTIFACT_EMBEDDED_DOT ->
+                rewriteArtifactPath("module/./module.prop")
+            FixtureMutation.ARCHIVE_ARTIFACT_PARENT_ALIAS ->
+                rewriteArtifactPath("module/../module.prop")
+            FixtureMutation.ARCHIVE_ARTIFACT_LEADING_SLASH -> rewriteArtifactPath("/module.prop")
+            FixtureMutation.ARCHIVE_ARTIFACT_TRAILING_SLASH -> rewriteArtifactPath("module.prop/")
+            FixtureMutation.ARCHIVE_ARTIFACT_DOUBLE_SLASH ->
+                rewriteArtifactPath("module//module.prop")
+            FixtureMutation.ARCHIVE_ARTIFACT_BACKSLASH -> rewriteArtifactPath("module\\module.prop")
+            FixtureMutation.ARCHIVE_ARTIFACT_CONTROL -> rewriteArtifactPath("module\u0001.prop")
+            FixtureMutation.ARCHIVE_ARTIFACT_WHITESPACE -> rewriteArtifactPath("module .prop")
+            FixtureMutation.ARCHIVE_ARTIFACT_CANONICAL_ALIAS_DUPLICATE ->
+                rewriteArtifactPath("./module.prop", preserveCanonical = true)
             FixtureMutation.ARCHIVE_SOURCE_METADATA_MISMATCH ->
                 Files.writeString(
                     archiveRoot.resolve("META-INF/rka-source.sha256"),

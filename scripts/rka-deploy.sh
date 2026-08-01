@@ -237,8 +237,19 @@ validate_metadata_manifest() {
         case "$metadata_digest" in *[!0-9a-f]*|"") return 1 ;; esac
         [ "$(printf %s "$metadata_digest" | wc -c)" -eq 64 ] || return 1
         case "$metadata_path" in
-            ""|/*|.|..|../*|*/../*|*//*|*\\*|*[!A-Za-z0-9._/-]*) return 1 ;;
+            ""|/*|*/|*//*|*\\*|*[!A-Za-z0-9._/-]*) return 1 ;;
         esac
+        metadata_remaining=$metadata_path
+        while [ -n "$metadata_remaining" ]; do
+            metadata_component=${metadata_remaining%%/*}
+            case "$metadata_component" in
+                ""|.|..) return 1 ;;
+            esac
+            case "$metadata_remaining" in
+                */*) metadata_remaining=${metadata_remaining#*/} ;;
+                *) metadata_remaining= ;;
+            esac
+        done
         [ "$(printf %s "$metadata_path" | wc -c)" -le 240 ] || return 1
         ! grep -Fxq "$metadata_path" "$metadata_seen" || return 1
         printf '%s\n' "$metadata_path" >> "$metadata_seen"

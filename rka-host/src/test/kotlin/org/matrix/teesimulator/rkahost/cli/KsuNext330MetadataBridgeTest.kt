@@ -48,6 +48,31 @@ class KsuNext330MetadataBridgeTest {
     }
 
     @Test
+    fun artifactManifestRejectsCanonicalPathAliasesBeforeKernelSuInstallation() {
+        listOf(
+                FixtureMutation.ARCHIVE_ARTIFACT_DOT_PREFIX,
+                FixtureMutation.ARCHIVE_ARTIFACT_EMBEDDED_DOT,
+                FixtureMutation.ARCHIVE_ARTIFACT_PARENT_ALIAS,
+                FixtureMutation.ARCHIVE_ARTIFACT_LEADING_SLASH,
+                FixtureMutation.ARCHIVE_ARTIFACT_TRAILING_SLASH,
+                FixtureMutation.ARCHIVE_ARTIFACT_DOUBLE_SLASH,
+                FixtureMutation.ARCHIVE_ARTIFACT_BACKSLASH,
+                FixtureMutation.ARCHIVE_ARTIFACT_CONTROL,
+                FixtureMutation.ARCHIVE_ARTIFACT_WHITESPACE,
+                FixtureMutation.ARCHIVE_ARTIFACT_CANONICAL_ALIAS_DUPLICATE,
+            )
+            .forEach { mutation ->
+                Fixture(mutation, KernelProfile.KSU_NEXT_FIRST_INSTALL).use { fixture ->
+                    val result = fixture.run()
+
+                    assertEquals(mutation.name, 4, result.exitCode)
+                    assertTrue(mutation.name, fixture.moduleParentsAbsent())
+                    assertTrue(mutation.name, fixture.metadataTransactionTempAbsent())
+                }
+            }
+    }
+
+    @Test
     fun tamperedArtifactManifestFailsInstalledFileVerificationAndRollsBackAbsentParents() {
         Fixture(
                 FixtureMutation.ARCHIVE_ARTIFACT_METADATA_TAMPERED,

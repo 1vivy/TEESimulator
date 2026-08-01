@@ -255,8 +255,10 @@ exit 0
     fun run(network: String = "direct-auto"): DeployResult =
         execute(network, sealedDescriptor = true, activeMutation = mutation)
 
-    fun runAuthoritativeTraceLifecycle(installedHost: Path): AuthoritativeTraceLifecycleResult {
-        val projectRoot = Path.of(System.getProperty("user.dir")).parent
+    fun runAuthoritativeTraceLifecycle(
+        installedHost: Path,
+        projectRoot: Path = Path.of(System.getProperty("user.dir")).parent,
+    ): AuthoritativeTraceLifecycleResult {
         val baseline = root.resolve("physical-baseline.json")
         val receiptPath = root.resolve("physical-receipt.json")
         val sourceSha =
@@ -268,45 +270,11 @@ exit 0
                     check(process.waitFor() == 0)
                     value
                 }
-        fun command(vararg arguments: String): DeployResult {
-            val process =
-                ProcessBuilder(
-                        listOf(
-                            projectRoot.resolve("scripts/rka-with-device-pair.sh").toString(),
-                            "--pair",
-                            pair.toString(),
-                            "--",
-                        ) + arguments
-                    )
-                    .directory(projectRoot.toFile())
-                    .apply {
-                        environment()["RKA_DEPLOY_ADB"] = adb.toString()
-                        environment()["RKA_FAKE_LOG"] = log.toString()
-                        environment()["RKA_FAKE_DEVICE_ROOT"] = devices.toString()
-                        environment()["RKA_FAKE_TLS_ROOT"] = root.resolve("tls").toString()
-                        environment()["RKA_FAKE_KSU_PROFILE"] = kernelProfile.fixtureName
-                        environment()["RKA_FAKE_FIRST_INSTALL"] =
-                            kernelProfile.firstInstall.toString()
-                        environment()["RKA_FAKE_FIRST_INSTALL_PARENTS"] =
-                            kernelProfile.firstInstallParentLayout.fixtureValue
-                        environment()["RKA_FAKE_SYSTEM_OPENSSL"] =
-                            kernelProfile.systemOpenSsl.toString()
-                        environment()["RKA_FAKE_KSU_MODE_MUTATION"] = ""
-                        environment()["RKA_FAKE_PACKAGE_RUNTIME"] = packagedArchive.toString()
-                        environment()["PATH"] =
-                            "${installedHost.parent}:$tools:${environment()["PATH"]}"
-                    }
-                    .start()
-            return DeployResult(
-                process.waitFor(),
-                process.inputStream.bufferedReader().readText(),
-                process.errorStream.bufferedReader().readText(),
-            )
-        }
-
         return tlsServers.withServers(mutation) {
             val start =
-                command(
+                authoritativeCommand(
+                    installedHost,
+                    projectRoot,
                     installedHost.toString(),
                     "sentinel",
                     "start",
@@ -316,7 +284,9 @@ exit 0
                     "AUTHORITATIVE_NONCE",
                 )
             val deploy =
-                command(
+                authoritativeCommand(
+                    installedHost,
+                    projectRoot,
                     projectRoot.resolve("scripts/rka-deploy.sh").toString(),
                     "--pair-fd-env",
                     "RKA_DEVICE_PAIR_FD",
@@ -329,7 +299,9 @@ exit 0
                     evidence.toString(),
                 )
             val controlled =
-                command(
+                authoritativeCommand(
+                    installedHost,
+                    projectRoot,
                     installedHost.toString(),
                     "trace-adb",
                     "-s",
@@ -339,7 +311,9 @@ exit 0
                     "ro.build.version.release",
                 )
             val stop =
-                command(
+                authoritativeCommand(
+                    installedHost,
+                    projectRoot,
                     installedHost.toString(),
                     "sentinel",
                     "stop",
@@ -347,7 +321,9 @@ exit 0
                     baseline.toString(),
                 )
             val writeReceipt =
-                command(
+                authoritativeCommand(
+                    installedHost,
+                    projectRoot,
                     installedHost.toString(),
                     "evidence",
                     "manifest",
@@ -363,7 +339,9 @@ exit 0
                     receiptPath.toString(),
                 )
             val verify =
-                command(
+                authoritativeCommand(
+                    installedHost,
+                    projectRoot,
                     installedHost.toString(),
                     "verify-physical",
                     "--manifest",
@@ -397,7 +375,9 @@ exit 0
             val trace = PersistentAdbTrace.open(baseline, storedBaseline).snapshotForReceipt()
             val canonicalReceipt = EvidenceStore.read(receiptPath)
             val cleanup =
-                command(
+                authoritativeCommand(
+                    installedHost,
+                    projectRoot,
                     installedHost.toString(),
                     "sentinel",
                     "cleanup",
@@ -417,6 +397,145 @@ exit 0
                 Files.readString(log),
             )
         }
+    }
+
+    fun runFaithfulPostBindMutation(
+        installedHost: Path,
+        projectRoot: Path,
+        injectedAdb: Path,
+        marker: Path,
+        disablePostBindRevalidation: Boolean,
+    ): FaithfulDeployMutationResult {
+        val baselinePath = root.resolve("mutation-baseline.json")
+        val receiptPath = root.resolve("mutation-receipt.json")
+        val deploy = projectRoot.resolve("scripts/rka-deploy.sh")
+        val originalDeploySha = Hashes.sha256(Files.readAllBytes(deploy))
+        val start =
+            authoritativeCommand(
+                installedHost,
+                projectRoot,
+                installedHost.toString(),
+                "sentinel",
+                "start",
+                "--baseline",
+                baselinePath.toString(),
+                "--nonce",
+                "FAITHFUL_MUTATION_NONCE",
+            )
+        check(start.exitCode == 0) { "MUTATION_START_FAILED ${start.stderr}" }
+        val baseline = BaselineStore.read(baselinePath)
+        val injection =
+            "\"${injectedAdb.toAbsolutePath()}\" -s DONOR_A shell getprop post-bind-bypass\n"
+        val originalDeploy = Files.readString(deploy)
+        check(originalDeploy.contains("set -euo pipefail\n"))
+        Files.writeString(
+            deploy,
+            originalDeploy.replaceFirst("set -euo pipefail\n", "set -euo pipefail\n$injection"),
+        )
+        val wrapper = projectRoot.resolve("scripts/rka-with-device-pair.sh")
+        val originalWrapper = Files.readString(wrapper)
+        if (disablePostBindRevalidation) {
+            val guard = "if observed != expected:\n            fail(\"DEPLOY_SOURCE_MISMATCH\")"
+            check(originalWrapper.contains(guard))
+            Files.writeString(
+                wrapper,
+                originalWrapper.replaceFirst(guard, "if observed != expected:\n            pass"),
+            )
+        }
+        val mutatedDeploy =
+            authoritativeCommand(
+                installedHost,
+                projectRoot,
+                deploy.toString(),
+                "--pair-fd-env",
+                "RKA_DEVICE_PAIR_FD",
+                "--zip",
+                zip.toString(),
+                "--network",
+                "direct-auto",
+                "--no-reboot",
+                "--evidence",
+                evidence.toString(),
+            )
+        Files.writeString(deploy, originalDeploy)
+        Files.writeString(wrapper, originalWrapper)
+        val sourceSha =
+            ProcessBuilder("git", "rev-parse", "HEAD")
+                .directory(Path.of(System.getProperty("user.dir")).parent.toFile())
+                .start()
+                .let { process ->
+                    process.inputStream.bufferedReader().readText().trim().also {
+                        check(process.waitFor() == 0)
+                    }
+                }
+        val receipt =
+            authoritativeCommand(
+                installedHost,
+                projectRoot,
+                installedHost.toString(),
+                "evidence",
+                "manifest",
+                "--baseline",
+                baselinePath.toString(),
+                "--artifact",
+                zip.toString(),
+                "--source-sha",
+                sourceSha,
+                "--nonce",
+                "FAITHFUL_MUTATION_NONCE",
+                "--output",
+                receiptPath.toString(),
+            )
+        return FaithfulDeployMutationResult(
+            start,
+            mutatedDeploy,
+            receipt,
+            originalDeploySha,
+            baseline.deploySurface.entrypointSha256,
+            baseline.deploySurface.entrypointPathSha256,
+            PersistentAdbTrace.open(baselinePath, baseline).validateClean().verdict,
+            TraceLifecycleStore.read(baselinePath).state,
+            Files.exists(marker),
+        )
+    }
+
+    private fun authoritativeCommand(
+        installedHost: Path,
+        projectRoot: Path,
+        vararg arguments: String,
+    ): DeployResult {
+        val process =
+            ProcessBuilder(
+                    listOf(
+                        projectRoot.resolve("scripts/rka-with-device-pair.sh").toString(),
+                        "--pair",
+                        pair.toString(),
+                        "--",
+                    ) + arguments
+                )
+                .directory(projectRoot.toFile())
+                .apply {
+                    environment()["RKA_DEPLOY_ADB"] = adb.toString()
+                    environment()["RKA_FAKE_LOG"] = log.toString()
+                    environment()["RKA_FAKE_DEVICE_ROOT"] = devices.toString()
+                    environment()["RKA_FAKE_TLS_ROOT"] = root.resolve("tls").toString()
+                    environment()["RKA_FAKE_KSU_PROFILE"] = kernelProfile.fixtureName
+                    environment()["RKA_FAKE_FIRST_INSTALL"] = kernelProfile.firstInstall.toString()
+                    environment()["RKA_FAKE_FIRST_INSTALL_PARENTS"] =
+                        kernelProfile.firstInstallParentLayout.fixtureValue
+                    environment()["RKA_FAKE_SYSTEM_OPENSSL"] =
+                        kernelProfile.systemOpenSsl.toString()
+                    environment()["RKA_FAKE_KSU_MODE_MUTATION"] = ""
+                    environment()["RKA_FAKE_PACKAGE_RUNTIME"] = packagedArchive.toString()
+                    environment()["PATH"] =
+                        "${installedHost.parent}:$tools:${environment()["PATH"]}"
+                }
+                .start()
+        return DeployResult(
+            process.waitFor(),
+            process.inputStream.bufferedReader().readText(),
+            process.errorStream.bufferedReader().readText(),
+        )
     }
 
     private fun execute(

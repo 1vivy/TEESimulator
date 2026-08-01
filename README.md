@@ -68,6 +68,12 @@ It replaces TrickyStore and its forks completely. It reads config from the same 
 
 **Per-app rate limit.** Each app may request at most 2 hardware-backed keys per 30 seconds, and only 2 at a time. Past that, it receives a software-only certificate.
 
+### Task25 command-trace trust boundary
+
+The trace-completeness guarantee covers every ADB command issued by the exact hash-bound standard Task25 deploy source, HostCli, and traced adapter while their cooperative exclusive pair transaction is active. Source attestation fixes that code boundary, the pair lock fixes the transaction boundary, and the owner-only journal plus hash chain detects omission, tampering, and crashes inside it. The receipt binds the Agent-PGP-verified source SHA and the trace genesis, head, and event count; the commit signature and receipt binding do not extend that guarantee beyond the approved surface.
+
+This mechanism is not an OS sandbox. It cannot observe arbitrary out-of-band `adb` started by the same trusted host owner outside the approved wrapper. Such a command is outside the trusted-host threat model and invalidates the evidence session.
+
 ## Configuration
 
 All config files live in `/data/adb/tricky_store/`. TEESimulator reloads them the moment you save, so a reboot is not needed.

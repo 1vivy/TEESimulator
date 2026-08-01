@@ -17,6 +17,18 @@ internal data class AuthoritativeTraceLifecycleResult(
     val rawAdbLog: String,
 )
 
+internal data class FaithfulDeployMutationResult(
+    val start: DeployResult,
+    val mutatedDeploy: DeployResult,
+    val receipt: DeployResult,
+    val originalDeploySha256: String,
+    val boundDeploySha256: String,
+    val boundDeployPathSha256: String,
+    val traceVerdict: String,
+    val lifecycle: TraceLifecycleState,
+    val markerPresent: Boolean,
+)
+
 internal enum class CandidateManagerMode(val cliValue: String) {
     AUTHORIZED_HEADLESS("authorized_headless")
 }

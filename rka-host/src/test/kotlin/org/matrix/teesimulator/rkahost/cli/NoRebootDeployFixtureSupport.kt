@@ -36,6 +36,8 @@ internal enum class FixtureMutation {
     FAIL_DONOR_DEPLOY,
     FAIL_CANDIDATE_DEPLOY,
     FAIL_CANDIDATE_NETWORK,
+    DONOR_WLAN_CANDIDATE_TUN,
+    NETWORK_SIDE_SWAP,
     TUN_SUFFIX,
     TUN_MULTIPLE,
     TUN_SPECIAL,
@@ -124,6 +126,9 @@ internal fun applyFixtureMutation(
         FixtureMutation.FAIL_CANDIDATE_DEPLOY -> environment["RKA_FAKE_FAIL_DEPLOY"] = "CANDIDATE_B"
         FixtureMutation.FAIL_CANDIDATE_NETWORK ->
             environment["RKA_FAKE_FAIL_NETWORK"] = "CANDIDATE_B"
+        FixtureMutation.DONOR_WLAN_CANDIDATE_TUN ->
+            environment["RKA_FAKE_IP_MODE"] = "donor-wlan-candidate-tun"
+        FixtureMutation.NETWORK_SIDE_SWAP -> environment["RKA_FAKE_IP_MODE"] = "network-side-swap"
         FixtureMutation.TUN_SUFFIX -> environment["RKA_FAKE_IP_MODE"] = "suffix"
         FixtureMutation.TUN_MULTIPLE -> environment["RKA_FAKE_IP_MODE"] = "multiple"
         FixtureMutation.TUN_SPECIAL -> environment["RKA_FAKE_IP_MODE"] = "special"

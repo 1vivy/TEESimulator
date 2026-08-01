@@ -384,7 +384,16 @@ prepare-upload)
     chmod 700 "$state" "$state/upload"
     ;;
 network)
-    endpoints=$(ip -o -4 addr show up scope global 2>/dev/null | awk '
+    network_mode=${1-}
+    network_side=${2-}
+    network_purpose=${3-}
+    case "$network_mode:$network_side:$network_purpose" in
+        DONOR_DIALS:DONOR:SOURCE) interface_class='wlan|wifi' ;;
+        DONOR_DIALS:CANDIDATE:TARGET) interface_class='tun' ;;
+        CANDIDATE_DIALS:*) interface_class='tailscale|wlan|wifi' ;;
+        *) exit 2 ;;
+    esac
+    endpoints=$(ip -o -4 addr show up scope global 2>/dev/null | awk -v interface_class="$interface_class" '
         function valid_ipv4(value, address, octet, part) {
             if (value !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+$/) return 0
             split(value, address, "/")
@@ -402,7 +411,7 @@ network)
                 token = $field
                 normalized = token
                 sub(/@.*/, "", normalized)
-                if (token ~ /^tun[[:alnum:]_.-]*(@[[:alnum:]_.:-]+)?$/ && normalized ~ /^tun[[:alnum:]_.-]*$/) interface = normalized
+                if (token ~ ("^(" interface_class ")[[:alnum:]_.-]*(@[[:alnum:]_.:-]+)?$") && normalized ~ ("^(" interface_class ")[[:alnum:]_.-]*$")) interface = normalized
                 if (token == "inet" && field < NF && valid_ipv4($(field + 1))) endpoint = $(field + 1)
                 if (token == "scope" && field < NF && $(field + 1) == "global") global_scope = 1
             }
@@ -904,8 +913,8 @@ if [[ "$donor_ksu_profile" == "$KSU_NEXT_PROFILE" || "$candidate_ksu_profile" ==
     rm -f -- "$local_probe"
     trap - EXIT
 fi
-donor_network="$(remote "$donor_serial" network)" || fail DIRECT_PATH_UNAVAILABLE 3
-candidate_network="$(remote "$candidate_serial" network)" || fail DIRECT_PATH_UNAVAILABLE 3
+donor_network="$(remote "$donor_serial" network DONOR_DIALS DONOR SOURCE)" || fail DIRECT_PATH_UNAVAILABLE 3
+candidate_network="$(remote "$candidate_serial" network DONOR_DIALS CANDIDATE TARGET)" || fail DIRECT_PATH_UNAVAILABLE 3
 donor_endpoint="${donor_network##* endpoint=}"
 candidate_endpoint="${candidate_network##* endpoint=}"
 [[ "$donor_endpoint" =~ ^[0-9.]+$ && "$candidate_endpoint" =~ ^[0-9.]+$ ]] ||

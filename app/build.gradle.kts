@@ -336,9 +336,22 @@ androidComponents {
 
                 doLast {
                     val stageDirectory = tempModuleDir.get().asFile
+                    mapOf(
+                            "lib/arm64-v8a/libTEESimulator.so" to "libTEESimulator.so",
+                            "lib/arm64-v8a/libcertgen.so" to "libcertgen.so",
+                            "lib/arm64-v8a/libinject.so" to "inject",
+                            "lib/arm64-v8a/libsupervisor.so" to "supervisor",
+                        )
+                        .forEach { (source, target) ->
+                            stageDirectory.resolve(source).copyTo(
+                                stageDirectory.resolve(target),
+                                overwrite = true,
+                            )
+                        }
                     val executableEntries =
                         setOf(
                             "daemon",
+                            "inject",
                             "rka-agent-pgp-verify",
                             "rka-control.sh",
                             "rka-paths.sh",
@@ -346,6 +359,7 @@ androidComponents {
                             "rka-sidecar",
                             "rka-supervisor.sh",
                             "service.sh",
+                            "supervisor",
                             "uninstall.sh",
                         )
                     val artifactEntries =
@@ -437,6 +451,7 @@ androidComponents {
                 from(tempModuleDir) {
                     include(
                         "daemon",
+                        "inject",
                         "rka-agent-pgp-verify",
                         "rka-control.sh",
                         "rka-paths.sh",
@@ -444,6 +459,7 @@ androidComponents {
                         "rka-sidecar",
                         "rka-supervisor.sh",
                         "service.sh",
+                        "supervisor",
                         "uninstall.sh",
                     )
                     filePermissions { unix("0755") }
@@ -451,6 +467,7 @@ androidComponents {
                 from(tempModuleDir) {
                     exclude(
                         "daemon",
+                        "inject",
                         "rka-agent-pgp-verify",
                         "rka-control.sh",
                         "rka-paths.sh",
@@ -458,6 +475,7 @@ androidComponents {
                         "rka-sidecar",
                         "rka-supervisor.sh",
                         "service.sh",
+                        "supervisor",
                         "uninstall.sh",
                     )
                     filePermissions { unix("0644") }
@@ -561,6 +579,9 @@ val verifyRkaModuleArchive by
             val commonEntries =
                 setOf(
                     "daemon",
+                    "inject",
+                    "libTEESimulator.so",
+                    "libcertgen.so",
                     "customize.sh",
                     "rka-agent-pgp-public.gpg",
                     "rka-agent-pgp-verify",
@@ -575,6 +596,7 @@ val verifyRkaModuleArchive by
                     "sepolicy.probes",
                     "sepolicy.rule",
                     "service.sh",
+                    "supervisor",
                     "uninstall.sh",
                     "webroot/index.html",
                     "webroot/app.js",
@@ -591,6 +613,7 @@ val verifyRkaModuleArchive by
             val executableEntries =
                 setOf(
                     "daemon",
+                    "inject",
                     "rka-agent-pgp-verify",
                     "rka-control.sh",
                     "rka-paths.sh",
@@ -598,6 +621,7 @@ val verifyRkaModuleArchive by
                     "rka-sidecar",
                     "rka-supervisor.sh",
                     "service.sh",
+                    "supervisor",
                     "uninstall.sh",
                 )
             val resolvedArchives =
@@ -627,6 +651,11 @@ val verifyRkaModuleArchive by
                     val sourceManifest = rootProject.projectDir.resolve("module/rka-runtime.manifest").readBytes()
                     val archiveManifest = zip.getInputStream(zip.getEntry("rka-runtime.manifest")).readBytes()
                     if (!archiveManifest.contentEquals(sourceManifest)) reject("MANIFEST_MISMATCH")
+                    val sourceCustomize =
+                        rootProject.projectDir.resolve("module/rka-ksu-customize.sh").readBytes()
+                    val archiveCustomize =
+                        zip.getInputStream(zip.getEntry("customize.sh")).readBytes()
+                    if (!archiveCustomize.contentEquals(sourceCustomize)) reject("FORBIDDEN_ENTRY")
                     if (!names.containsAll(commonEntries)) reject("ENTRY_MISSING")
                     val variantEntry = if (archive.name.endsWith("-Release.zip")) "classes.dex" else "service.apk"
                     require(names.contains(variantEntry)) { "Archive $archive lacks $variantEntry." }

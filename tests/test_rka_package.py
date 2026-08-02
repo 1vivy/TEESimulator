@@ -298,6 +298,13 @@ class RkaPackageTest(unittest.TestCase):
         expected_executables = set(manifest["archive_executables"].split(","))
         with ZipFile(release) as archive:
             self.assertEqual(archive.read("rka-runtime.manifest"), RUNTIME_MANIFEST.read_bytes())
+            for runtime_entry, arm64_entry in {
+                "inject": "lib/arm64-v8a/libinject.so",
+                "libTEESimulator.so": "lib/arm64-v8a/libTEESimulator.so",
+                "libcertgen.so": "lib/arm64-v8a/libcertgen.so",
+                "supervisor": "lib/arm64-v8a/libsupervisor.so",
+            }.items():
+                self.assertEqual(archive.read(runtime_entry), archive.read(arm64_entry), runtime_entry)
             relevant_entries = {
                 info.filename
                 for info in archive.infolist()
@@ -314,7 +321,14 @@ class RkaPackageTest(unittest.TestCase):
                 expected_mode = 0o755 if info.filename in expected_executables else 0o644
                 self.assertEqual(info.external_attr >> 16 & 0o777, expected_mode, info.filename)
             hashes = self.parse_hash_manifest(archive.read("META-INF/rka-artifacts.sha256"))
-            self.assertEqual(set(hashes), {info.filename for info in archive.infolist() if not info.is_dir() and not info.filename.startswith("META-INF/")})
+            installed_entries = {
+                info.filename
+                for info in archive.infolist()
+                if not info.is_dir()
+                and not info.filename.startswith("META-INF/")
+                and info.filename != "customize.sh"
+            }
+            self.assertEqual(set(hashes), installed_entries)
             for name, expected_hash in hashes.items():
                 self.assertEqual(hashlib.sha256(archive.read(name)).hexdigest(), expected_hash, name)
 

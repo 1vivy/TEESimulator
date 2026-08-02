@@ -350,7 +350,7 @@ validate_installed_module_contract() {
     [ -z "$(find "$pending" -mindepth 1 ! -type f ! -type d -print -quit)" ] || return 1
     while read -r installed_digest installed_file; do
         case "$installed_file" in
-            daemon|rka-agent-pgp-verify|rka-control.sh|rka-paths.sh|rka-sepolicy-probe.sh|rka-sidecar|rka-supervisor.sh|service.sh|uninstall.sh) installed_mode=755 ;;
+            daemon|inject|rka-agent-pgp-verify|rka-control.sh|rka-paths.sh|rka-sepolicy-probe.sh|rka-sidecar|rka-supervisor.sh|service.sh|supervisor|uninstall.sh) installed_mode=755 ;;
             *) installed_mode=644 ;;
         esac
         [ -f "$pending/$installed_file" ] && [ ! -L "$pending/$installed_file" ] || return 1

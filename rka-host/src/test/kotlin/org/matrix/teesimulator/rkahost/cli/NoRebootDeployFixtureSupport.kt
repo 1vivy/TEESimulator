@@ -462,7 +462,7 @@ private fun Fixture.transactionPaths() =
     }
 
 internal const val fixtureManifestCommand =
-    "sha256sum daemon module.prop rka-agent-pgp-verify rka-control.sh rka-paths.sh rka-runtime.manifest rka-sepolicy-probe.sh rka-sidecar rka-supervisor.sh sepolicy.probes sepolicy.rule service.sh uninstall.sh webroot/index.html > META-INF/rka-artifacts.sha256"
+    "sha256sum daemon inject module.prop rka-agent-pgp-verify rka-control.sh rka-paths.sh rka-runtime.manifest rka-sepolicy-probe.sh rka-sidecar rka-supervisor.sh sepolicy.probes sepolicy.rule service.sh supervisor uninstall.sh webroot/index.html > META-INF/rka-artifacts.sha256"
 
 internal val fixtureSupervisor =
     """#!/bin/sh

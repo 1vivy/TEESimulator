@@ -119,10 +119,12 @@ exit 0
         Files.writeString(archiveRoot.resolve("rka-supervisor.sh"), fixtureSupervisor)
         listOf(
                 "daemon",
+                "inject",
                 "rka-agent-pgp-verify",
                 "rka-paths.sh",
                 "rka-sepolicy-probe.sh",
                 "service.sh",
+                "supervisor",
                 "uninstall.sh",
             )
             .forEach { Files.writeString(archiveRoot.resolve(it), "#!/bin/sh\nexit 0\n") }
@@ -682,7 +684,9 @@ os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zi
         Files.isRegularFile(devices.resolve("DONOR_A/root/data/adb/teesimulator-rka/.bound"))
 
     fun donorNormalUnmountAttempted(): Boolean =
-        Files.isRegularFile(devices.resolve("DONOR_A/root/data/adb/teesimulator-rka/.umount-normal"))
+        Files.isRegularFile(
+            devices.resolve("DONOR_A/root/data/adb/teesimulator-rka/.umount-normal")
+        )
 
     fun donorLazyUnmountAttempted(): Boolean =
         Files.isRegularFile(devices.resolve("DONOR_A/root/data/adb/teesimulator-rka/.umount-lazy"))

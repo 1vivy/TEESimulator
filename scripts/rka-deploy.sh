@@ -241,6 +241,15 @@ snapshot_tree() {
 $snapshot_entries
 EOF
 }
+tree_matches_receipts() {
+    receipt_path=$1
+    receipt_tree=$2
+    receipt_metadata=$3
+    [ -f "$receipt_tree" ] && [ ! -L "$receipt_tree" ] || return 1
+    [ -f "$receipt_metadata" ] && [ ! -L "$receipt_metadata" ] || return 1
+    [ "$(tree_hash "$receipt_path")" = "$(cat "$receipt_tree")" ] || return 1
+    [ "$(metadata_hash "$receipt_path")" = "$(cat "$receipt_metadata")" ]
+}
 set_phase() {
     value=$1
     printf "%s\n" "$value" > "$txn/phase.next"
@@ -396,17 +405,6 @@ validate_installed_module_contract() {
         [ "$(stat -c '%u:%g:%a' "$pending/$installed_directory")" = "0:0:$installed_mode" ] || return 1
     done < "$installed_expected_directories"
 }
-prepare_active_view_without_update() {
-    active_view_source=$1
-    active_view_destination=$2
-    [ ! -e "$active_view_source" ] && [ ! -L "$active_view_source" ] && return 0
-    [ -d "$active_view_source" ] && [ ! -L "$active_view_source" ] || return 1
-    snapshot_tree "$active_view_source" "$active_view_destination" || return 1
-    if [ -e "$active_view_destination/update" ] || [ -L "$active_view_destination/update" ]; then
-        [ -f "$active_view_destination/update" ] && [ ! -L "$active_view_destination/update" ] || return 1
-        rm -f "$active_view_destination/update" || return 1
-    fi
-}
 first_install_pids_layout_is_safe() {
     first_install_pids=$state/run/pids
     [ ! -e "$first_install_pids" ] && [ ! -L "$first_install_pids" ] && return 0
@@ -482,35 +480,16 @@ validate_first_install_parent_rollback() {
     validate_first_install_parents
 }
 validate_ksu_active_layout() {
-    active_layout=$(cat "$txn/layout.before") || return 1
     [ -d "$active" ] && [ ! -L "$active" ] || return 1
     [ -f "$active/update" ] && [ ! -L "$active/update" ] || return 1
-    case "$active_layout" in
-        FIRST_INSTALL_ABSENT_LAYOUT|FIRST_INSTALL_EMPTY_LAYOUT|FIRST_INSTALL_EXISTING_PARENTS)
-            active_entries=$(find "$active" -mindepth 1 -maxdepth 1 -print | LC_ALL=C sort) || return 1
-            expected_active_entries=$(printf '%s\n%s' "$active/module.prop" "$active/update")
-            [ "$active_entries" = "$expected_active_entries" ] || return 1
-            [ -f "$active/module.prop" ] && [ ! -L "$active/module.prop" ] || return 1
-            [ "$(stat -c %u:%g:%a "$active/module.prop")" = 0:0:644 ] || return 1
-            [ "$(stat -c %u:%g:%a "$active/update")" = 0:0:644 ] || return 1
-            [ ! -s "$active/update" ] || return 1
-            cmp -s "$active/module.prop" "$pending/module.prop"
-            ;;
-        PRESENT_LAYOUT)
-            prepare_active_view_without_update "$active" "$txn/active.after.without-update.tree" || return 1
-            if [ -d "$txn/active.after.without-update.tree" ]; then
-                toybox touch -r "$txn/active.before.without-update.tree" "$txn/active.after.without-update.tree" || return 1
-            fi
-            [ "$(tree_hash "$txn/active.after.without-update.tree")" = "$(cat "$txn/active.before.without-update")" ] || return 1
-            [ "$(metadata_hash "$txn/active.after.without-update.tree")" = "$(cat "$txn/active.metadata.before.without-update")" ] || return 1
-            case "$(cat "$txn/active.update.before")" in
-                PRESENT) cmp -s "$active/update" "$txn/active.tree/update" ;;
-                ABSENT) ;;
-                *) return 1 ;;
-            esac
-            ;;
-        *) return 1 ;;
-    esac
+    active_entries=$(find "$active" -mindepth 1 -maxdepth 1 -print | LC_ALL=C sort) || return 1
+    expected_active_entries=$(printf '%s\n%s' "$active/module.prop" "$active/update")
+    [ "$active_entries" = "$expected_active_entries" ] || return 1
+    [ -f "$active/module.prop" ] && [ ! -L "$active/module.prop" ] || return 1
+    [ "$(stat -c %u:%g:%a "$active/module.prop")" = 0:0:644 ] || return 1
+    [ "$(stat -c %u:%g:%a "$active/update")" = 0:0:644 ] || return 1
+    [ ! -s "$active/update" ] || return 1
+    cmp -s "$active/module.prop" "$pending/module.prop"
 }
 case "$mode" in
 preflight)
@@ -781,21 +760,6 @@ deploy)
     metadata_hash "$active" > "$txn/active.metadata.before"
     snapshot_tree "$active" "$txn/active.tree" || exit 1
     if [ -d "$txn/active.tree" ]; then [ "$(tree_hash "$txn/active.tree")" = "$(cat "$txn/active.before")" ] || exit 1; fi
-    if [ -f "$state/manager-authorizations/$tx" ] && [ "$module_layout" = PRESENT_LAYOUT ]; then
-        if [ -e "$txn/active.tree/update" ] || [ -L "$txn/active.tree/update" ]; then
-            [ -f "$txn/active.tree/update" ] && [ ! -L "$txn/active.tree/update" ] || exit 1
-            printf 'PRESENT\n' > "$txn/active.update.before"
-        else
-            printf 'ABSENT\n' > "$txn/active.update.before"
-        fi
-        chmod 600 "$txn/active.update.before"
-        prepare_active_view_without_update "$active" "$txn/active.before.without-update.tree" || exit 1
-        if [ -d "$txn/active.before.without-update.tree" ]; then
-            toybox touch -r "$active" "$txn/active.before.without-update.tree" || exit 1
-        fi
-        tree_hash "$txn/active.before.without-update.tree" > "$txn/active.before.without-update"
-        metadata_hash "$txn/active.before.without-update.tree" > "$txn/active.metadata.before.without-update"
-    fi
     case "$module_layout" in
         FIRST_INSTALL_EMPTY_LAYOUT|FIRST_INSTALL_EXISTING_PARENTS) snapshot_first_install_parents || exit 1 ;;
     esac
@@ -1117,6 +1081,8 @@ rollback)
         SNAPSHOTS_READY) ;;
         *) exit 1 ;;
     esac
+    tree_matches_receipts "$txn/active.tree" "$txn/active.before" "$txn/active.metadata.before" || exit 1
+    tree_matches_receipts "$txn/pending.tree" "$txn/pending.before" "$txn/pending.metadata.before" || exit 1
     if [ -x "$active/rka-supervisor.sh" ]; then nsenter -t 1 -m -- "$active/rka-supervisor.sh" stop || :; fi
     if awk -v p="$active" "\$5 == p {found=1} END {exit !found}" /proc/1/mountinfo; then
         if ! nsenter -t 1 -m -- umount "$active"; then
@@ -1139,14 +1105,28 @@ rollback)
         fi
         ! awk -v p="$active" "\$5 == p {found=1} END {exit !found}" /proc/1/mountinfo || exit 1
     fi
-    if [ -d "$pending" ]; then mv "$pending" "$state/module-quarantine/$tx.failed"; fi
-    rm -rf "$active"
-    if [ -d "$txn/active.tree" ]; then mv "$txn/active.tree" "$active"; fi
-    if [ -d "$txn/pending.tree" ]; then mv "$txn/pending.tree" "$pending"; fi
-    [ "$(tree_hash "$active")" = "$(cat "$txn/active.before")" ] || exit 1
-    [ "$(tree_hash "$pending")" = "$(cat "$txn/pending.before")" ] || exit 1
-    [ "$(metadata_hash "$active")" = "$(cat "$txn/active.metadata.before")" ] || exit 1
-    [ "$(metadata_hash "$pending")" = "$(cat "$txn/pending.metadata.before")" ] || exit 1
+    if ! tree_matches_receipts "$pending" "$txn/pending.before" "$txn/pending.metadata.before"; then
+        if [ -e "$pending" ] || [ -L "$pending" ]; then
+            [ -d "$pending" ] && [ ! -L "$pending" ] || exit 1
+            rollback_quarantine="$state/module-quarantine/$tx.failed"
+            if [ ! -e "$rollback_quarantine" ] && [ ! -L "$rollback_quarantine" ]; then
+                mv "$pending" "$rollback_quarantine"
+            else
+                [ -d "$rollback_quarantine" ] && [ ! -L "$rollback_quarantine" ] || exit 1
+                rm -rf "$pending"
+            fi
+        fi
+        snapshot_tree "$txn/pending.tree" "$pending" || exit 1
+    fi
+    if ! tree_matches_receipts "$active" "$txn/active.before" "$txn/active.metadata.before"; then
+        if [ -e "$active" ] || [ -L "$active" ]; then
+            [ -d "$active" ] && [ ! -L "$active" ] || exit 1
+            rm -rf "$active"
+        fi
+        snapshot_tree "$txn/active.tree" "$active" || exit 1
+    fi
+    tree_matches_receipts "$active" "$txn/active.before" "$txn/active.metadata.before" || exit 1
+    tree_matches_receipts "$pending" "$txn/pending.before" "$txn/pending.metadata.before" || exit 1
     case "$(cat "$txn/layout.before" 2>/dev/null)" in
         FIRST_INSTALL_ABSENT_LAYOUT)
             for parent in /data/adb/modules /data/adb/modules_update; do

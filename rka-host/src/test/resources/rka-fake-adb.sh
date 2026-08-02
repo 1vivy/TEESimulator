@@ -198,9 +198,7 @@ case "${1-} ${2-}" in
       directory-mode) chmod 0700 /data/adb/modules_update/tricky_store/webroot ;;
       symlink-type) rm -f /data/adb/modules_update/tricky_store/rka-control.sh; ln -s module.prop /data/adb/modules_update/tricky_store/rka-control.sh ;;
     esac
-    if [ "${RKA_FAKE_FIRST_INSTALL:-false}" = true ]; then
-      cp /data/adb/modules_update/tricky_store/module.prop /data/adb/modules/tricky_store/module.prop
-    fi
+    cp /data/adb/modules_update/tricky_store/module.prop /data/adb/modules/tricky_store/module.prop
     [ -e /data/adb/modules/tricky_store/update ] || : > /data/adb/modules/tricky_store/update
     case "${RKA_FAKE_NEXT_MUTATION:-}" in
       active-missing-module-prop) rm -f /data/adb/modules/tricky_store/module.prop ;;
@@ -430,6 +428,22 @@ exec /usr/bin/awk "$@"'
 write_shim stat '
 last=
 for value in "$@"; do last=$value; done
+if [ "${RKA_FAKE_ROLLBACK_VERIFY_ONCE:-}" = true ] &&
+   [ "${RKA_FAKE_SERIAL:-}" = DONOR_A ] &&
+   [ "$last" = /data/adb/modules/tricky_store ] &&
+   [ ! -f /data/adb/teesimulator-rka/.bound ] &&
+   [ -d /data/adb/teesimulator-rka/module-quarantine ]; then
+  if [ -f /data/adb/teesimulator-rka/.rollback-active-restored ] &&
+     [ ! -f /data/adb/teesimulator-rka/.rollback-verify-fired ]; then
+    : > /data/adb/teesimulator-rka/.rollback-verify-fired
+    exit 1
+  fi
+  if [ ! -f /data/adb/teesimulator-rka/.rollback-active-restored ] &&
+     [ ! -f /data/adb/teesimulator-rka/.rollback-verify-precheck ]; then
+    : > /data/adb/teesimulator-rka/.rollback-verify-precheck
+    exit 1
+  fi
+fi
 case "$last" in
   /data/adb/teesimulator-rka/probes/*.manager-appid)
     if [ "${1-}" = -c ] && [ "${2-}" = %u:%g:%a ]; then printf "0:0:700\n"; exit 0; fi ;;
@@ -495,7 +509,13 @@ else
 fi'
 write_shim cp '
 if [ "${RKA_FAKE_FAULT:-}" = active-copy ] && [ "${1-}" = -a ] && [ "${2-}" = /data/adb/modules/tricky_store ]; then exit 1; fi
-exec /usr/bin/cp "$@"'
+/usr/bin/cp "$@" || exit 1
+if [ "${RKA_FAKE_ROLLBACK_VERIFY_ONCE:-}" = true ]; then
+  case "${2-}:${3-}" in
+    /data/adb/teesimulator-rka/deploy-transactions/*/active.tree:/data/adb/modules/tricky_store)
+      : > /data/adb/teesimulator-rka/.rollback-active-restored ;;
+  esac
+fi'
 write_shim mount '
 if [ "${1-}" = --bind ]; then
   rm -rf /data/adb/teesimulator-rka/active-underlay
@@ -679,6 +699,7 @@ printf '%s\n' "$wire_payload" | bwrap \
     --setenv RKA_FAKE_MISMATCH_PIN "$([ "${RKA_FAKE_MISMATCH_SERIAL:-}" = "$serial" ] && printf true || printf false)" \
     --setenv RKA_FAKE_TLS_PROTOCOL "${RKA_FAKE_TLS_PROTOCOL:-TLS1.3}" \
     --setenv RKA_FAKE_PROBE_STATUS "${RKA_FAKE_PROBE_STATUS:-}" \
+    --setenv RKA_FAKE_ROLLBACK_VERIFY_ONCE "${RKA_FAKE_ROLLBACK_VERIFY_ONCE:-}" \
     --setenv RKA_FAKE_FAULT "${RKA_FAKE_FAULT:-}" \
     --setenv RKA_FAKE_WEBUI_OWNER "${RKA_FAKE_WEBUI_OWNER:-}" \
     --setenv RKA_FAKE_ZYGOTE "${RKA_FAKE_ZYGOTE:-}" \

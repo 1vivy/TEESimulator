@@ -324,6 +324,23 @@ class NoRebootDeployFailureTest {
     }
 
     @Test
+    fun rollbackVerificationFailureRetainsSnapshotsForExactRetry() {
+        Fixture().use { fixture ->
+            val installed = fixture.run()
+            assertEquals(installed.stderr, 0, installed.exitCode)
+            val before = fixture.donorModuleSnapshot()
+
+            assertEquals(4, fixture.runWithMutation(FixtureMutation.ROLLBACK_VERIFY_ONCE).exitCode)
+            val repeatedRollback = fixture.rollbackDonorAgain()
+
+            assertEquals(repeatedRollback.stderr, 0, repeatedRollback.exitCode)
+            assertSnapshotEquals(before, fixture.donorModuleSnapshot())
+            assertTrue(fixture.donorBindPresent())
+            assertTrue(fixture.donorRuntimeRunning())
+        }
+    }
+
+    @Test
     fun remoteArchiveHashMismatchFailsBeforeInstall() {
         Fixture(FixtureMutation.CORRUPT_REMOTE_ARCHIVE).use { fixture ->
             val result = fixture.run()

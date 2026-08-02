@@ -97,6 +97,7 @@ internal enum class FixtureMutation {
     ROLLBACK_BUSY_BIND_NESTED,
     ROLLBACK_BUSY_BIND_LIVE,
     ROLLBACK_BUSY_BIND_AMBIGUOUS,
+    ROLLBACK_VERIFY_ONCE,
     AFTER_STOP,
     AFTER_UNMOUNT,
     ACTIVE_HASH,
@@ -233,6 +234,10 @@ internal fun applyFixtureMutation(
         FixtureMutation.ROLLBACK_BUSY_BIND_AMBIGUOUS -> {
             environment["RKA_FAKE_MISMATCH_SERIAL"] = "CANDIDATE_B"
             environment["RKA_FAKE_BUSY_UMOUNT"] = value.name.substringAfterLast('_').lowercase()
+        }
+        FixtureMutation.ROLLBACK_VERIFY_ONCE -> {
+            environment["RKA_FAKE_PROBE_STATUS"] = "unavailable"
+            environment["RKA_FAKE_ROLLBACK_VERIFY_ONCE"] = "true"
         }
         FixtureMutation.AFTER_STOP -> environment["RKA_FAKE_FAULT"] = "after-stop"
         FixtureMutation.AFTER_UNMOUNT -> environment["RKA_FAKE_FAULT"] = "after-unmount"

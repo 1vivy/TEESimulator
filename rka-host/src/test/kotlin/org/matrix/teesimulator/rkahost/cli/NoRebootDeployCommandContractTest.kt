@@ -69,9 +69,11 @@ class NoRebootDeployCommandContractTest {
     fun rollbackQuarantinesFailedPendingAndRestoresBothPriorTrees() {
         val rollback = script.substringAfter("rollback)\n").substringBefore("*) exit 2")
 
-        assertTrue(rollback.contains("mv \"\$pending\" \"\$state/module-quarantine/\$tx.failed\""))
-        assertTrue(rollback.contains("mv \"\$txn/active.tree\" \"\$active\""))
-        assertTrue(rollback.contains("mv \"\$txn/pending.tree\" \"\$pending\""))
+        assertTrue(rollback.contains("mv \"\$pending\" \"\$rollback_quarantine\""))
+        assertTrue(rollback.contains("snapshot_tree \"\$txn/active.tree\" \"\$active\""))
+        assertTrue(rollback.contains("snapshot_tree \"\$txn/pending.tree\" \"\$pending\""))
+        assertFalse(rollback.contains("mv \"\$txn/active.tree\""))
+        assertFalse(rollback.contains("mv \"\$txn/pending.tree\""))
         assertTrue(rollback.contains("additive_sepolicy_may_persist=true"))
     }
 

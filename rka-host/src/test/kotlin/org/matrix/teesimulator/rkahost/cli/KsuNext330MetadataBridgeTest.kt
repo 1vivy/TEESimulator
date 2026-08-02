@@ -22,6 +22,10 @@ class KsuNext330MetadataBridgeTest {
             val result = fixture.run()
 
             assertEquals(result.stderr, 0, result.exitCode)
+            assertEquals(
+                "id=tricky_store\nversion=fixture\n",
+                fixture.activeModuleBytes().decodeToString(),
+            )
             assertTrue(fixture.pendingMetadataIsReinjected())
             assertTrue(fixture.pendingManifestVerifies())
         }

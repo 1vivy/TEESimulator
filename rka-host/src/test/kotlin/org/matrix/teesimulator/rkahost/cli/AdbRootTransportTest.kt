@@ -96,7 +96,7 @@ class AdbRootTransportTest {
         val invalidSerial =
             fixture.runTransport("SERIAL_A;touch_bad", "printf safe\n", listOf("mode"))
         val empty = fixture.runTransport("SERIAL_A", "", listOf("mode"))
-        val oversized = fixture.runTransport("SERIAL_A", "${"x".repeat(65536)}\n", listOf("mode"))
+        val oversized = fixture.runOversizedTransport("SERIAL_A", 98304)
         val invalidArgument = fixture.runTransport("SERIAL_A", "printf safe\n", listOf("bad;arg"))
         val delimiter =
             fixture.runTransport(
@@ -206,6 +206,25 @@ private class TransportFixture(private val projectRoot: Path, private val transp
                 script,
             ) + arguments
         return run(command, environment)
+    }
+
+    fun runOversizedTransport(serial: String, bytes: Int): TransportResult {
+        val shell =
+            "source \"\$1\"; payload=\$(head -c \"\$4\" /dev/zero | tr '\\0' x); " +
+                "payload+=\$'\\n'; rka_adb_root_run \"\$2\" \"\$3\" \"\$payload\" mode"
+        return run(
+            listOf(
+                "bash",
+                "-c",
+                shell,
+                "bash",
+                transport.toString(),
+                fakeAdb.toString(),
+                serial,
+                bytes.toString(),
+            ),
+            emptyMap(),
+        )
     }
 
     fun invocations(): Int =

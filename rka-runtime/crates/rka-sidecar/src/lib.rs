@@ -9,6 +9,9 @@ use std::{
 
 use thiserror::Error;
 
+#[doc(hidden)]
+pub mod direct_activation;
+mod direct_bridge;
 pub mod direct_identity;
 pub mod direct_profile;
 #[doc(hidden)]

@@ -29,6 +29,7 @@ object CandidateRuntimeRegistry {
                     FileRemoteCandidateStore(
                         Path.of("/data/adb/teesimulator-rka/state/candidate-keystore")
                     ),
+                    target.aaidDer,
                 )
             state = State.Authorized(InstalledRuntime(target.uid, identityHash, service))
         }

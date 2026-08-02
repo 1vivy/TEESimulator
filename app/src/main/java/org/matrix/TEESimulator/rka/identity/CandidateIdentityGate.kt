@@ -23,6 +23,8 @@ internal constructor(internal val uid: Int, internal val snapshot: CandidateIden
 
     fun identityHash() = snapshot.identityHash()
 
+    fun aaidDer() = snapshot.aaidDer()
+
     override fun toString() = "IdentityAdmission(epoch=${snapshot.epoch}, identityHash=<redacted>)"
 }
 

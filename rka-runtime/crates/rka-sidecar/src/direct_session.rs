@@ -20,6 +20,10 @@ use thiserror::Error;
 
 use crate::{
     LifecycleRole,
+    bridge::{
+        ExchangeRole, decode_frame as decode_bridge_frame, encode_frame as encode_bridge_frame,
+    },
+    direct_bridge::DirectBridgeAdapter,
     direct_profile::{DialMode, DirectProfile},
     donor::DonorRuntime,
     provisioning_io::FileStateStore,
@@ -78,6 +82,49 @@ pub fn run_donor(runtime: &mut DonorRuntime) -> Result<(), DirectSessionError> {
         )? {
             DonorIteration::Served => {}
             DonorIteration::Retry => std::thread::sleep(Duration::from_secs(1)),
+        }
+    }
+}
+
+#[doc(hidden)]
+pub fn run_donor_bridge() -> Result<(), DirectSessionError> {
+    let (state, profile, _) =
+        crate::direct_profile::load(LifecycleRole::Donor).map_err(|_| DirectSessionError::State)?;
+    if profile.dial_mode != DialMode::DonorDials {
+        return Err(DirectSessionError::State);
+    }
+    let mut adapter = DirectBridgeAdapter::new(&state);
+    loop {
+        let Ok(socket) = connect_bound(
+            profile.listen_interface,
+            SocketAddrV4::new(profile.endpoint, PORT),
+            BUDGET,
+        ) else {
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
+        };
+        let donor = donor_client(&state, &profile)?;
+        let dispatched = Cell::new(false);
+        let result = donor.serve_once(socket, |request| {
+            let request = decode_bridge_frame(request, ExchangeRole::CandidateRequest)
+                .map_err(|_| rka_transport::TlsError::Admission)?;
+            let prepared = adapter
+                .prepare(request)
+                .map_err(|()| rka_transport::TlsError::Admission)?;
+            dispatched.set(true);
+            let response = adapter
+                .dispatch(&prepared)
+                .map_err(|()| rka_transport::TlsError::Admission)?;
+            let response = DirectBridgeAdapter::finish(&prepared, response)
+                .map_err(|()| rka_transport::TlsError::Admission)?;
+            let encoded = encode_bridge_frame(&response, ExchangeRole::CandidateResponse)
+                .map_err(|_| rka_transport::TlsError::Admission)?;
+            Ok(encoded.as_slice().to_vec())
+        });
+        match (result, dispatched.get()) {
+            (Ok(()), _) => {}
+            (Err(_), true) => return Err(DirectSessionError::Ambiguous),
+            (Err(_), false) => std::thread::sleep(Duration::from_secs(1)),
         }
     }
 }

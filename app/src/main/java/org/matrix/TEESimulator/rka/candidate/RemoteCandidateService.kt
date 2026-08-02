@@ -6,10 +6,13 @@ class RemoteCandidateService(
     private val admittedIdentity: IdentityHash,
     private val backend: RemoteCandidateBackend,
     private val store: RemoteCandidateStore,
+    aaidDer: ByteArray = byteArrayOf(0x30, 0),
     private val handleSource: () -> RemoteKeyHandle = {
         RemoteKeyHandle.of(ByteArray(16).also(SecureRandom()::nextBytes))
     },
 ) {
+    private val admittedAaid = aaidDer.copyOf()
+
     private data class LiveOperation(
         val keyId: CandidateKeyId,
         val handle: RemoteOperationHandle,
@@ -61,6 +64,7 @@ class RemoteCandidateService(
                     aliasHandle,
                     request.identityHash,
                     request.shape.copiedChallenge(),
+                    admittedAaid.copyOf(),
                 )
             )
         if (generated is CandidateResult.Failure) return CandidateRoute.Remote(generated)

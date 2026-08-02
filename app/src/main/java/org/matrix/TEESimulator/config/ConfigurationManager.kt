@@ -19,7 +19,11 @@ import org.matrix.TEESimulator.rka.identity.CandidateIdentityGate
  * configuration files change.
  */
 object ConfigurationManager {
-    data class ConfiguredCandidateIdentity(val uid: Int, val identityHash: ByteArray)
+    data class ConfiguredCandidateIdentity(
+        val uid: Int,
+        val identityHash: ByteArray,
+        val aaidDer: ByteArray,
+    )
 
     /** Defines the processing mode for a given package. */
     enum class Mode {
@@ -118,7 +122,7 @@ object ConfigurationManager {
                             AndroidCandidateIdentityAuthority(packageManager),
                         )
                         .admitRemote()
-                ConfiguredCandidateIdentity(uid, admission.identityHash())
+                ConfiguredCandidateIdentity(uid, admission.identityHash(), admission.aaidDer())
             }
             .getOrNull()
 

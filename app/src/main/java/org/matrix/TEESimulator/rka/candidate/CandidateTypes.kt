@@ -211,6 +211,7 @@ data class RemoteGenerateCommand(
     val aliasHandle: RemoteKeyHandle,
     val identityHash: IdentityHash,
     val challenge: ByteArray,
+    val aaidDer: ByteArray = byteArrayOf(0x30, 0),
 )
 
 data class RemoteKeyMaterial(

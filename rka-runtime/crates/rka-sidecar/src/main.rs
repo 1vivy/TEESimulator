@@ -13,9 +13,8 @@ use std::{
 };
 
 use rka_sidecar::{
-    LifecycleRole, committed_profile_epoch, dispatch_rotation,
-    donor::{DonorIngress, DonorRuntime},
-    provision_once, run,
+    LifecycleRole, committed_profile_epoch, dispatch_rotation, donor::DonorIngress, provision_once,
+    run,
 };
 
 const BROKER_SOCKET: &str = "/data/adb/teesimulator-rka/run/sockets/broker.sock";
@@ -83,6 +82,9 @@ fn main() -> ExitCode {
             }
         };
     }
+    if command == Some(OsStr::new("activate-direct")) {
+        return activate_direct(&args);
+    }
     let command = match parse_command(&args) {
         Ok(command) => command,
         Err(error) => {
@@ -95,6 +97,36 @@ fn main() -> ExitCode {
         Err(error) => {
             report_error(&*error);
             ExitCode::FAILURE
+        }
+    }
+}
+
+fn activate_direct(args: &[OsString]) -> ExitCode {
+    let Some(role_arg) = args.get(1).filter(|_| args.len() == 2) else {
+        let _ = writeln!(
+            io::stderr().lock(),
+            "direct_activation_status=invalid_context"
+        );
+        return ExitCode::from(2);
+    };
+    let Ok(role) = LifecycleRole::parse(role_arg.as_os_str()) else {
+        let _ = writeln!(
+            io::stderr().lock(),
+            "direct_activation_status=invalid_context"
+        );
+        return ExitCode::from(2);
+    };
+    match rka_sidecar::direct_activation::activate(role) {
+        Ok(receipt) => {
+            if write!(io::stdout().lock(), "{receipt}").is_ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(2)
+            }
+        }
+        Err(status) => {
+            let _ = writeln!(io::stderr().lock(), "direct_activation_status={status}");
+            ExitCode::from(2)
         }
     }
 }
@@ -166,15 +198,15 @@ fn report_error(error: &dyn Error) {
 }
 
 fn run_donor() -> Result<(), Box<dyn Error>> {
+    if rka_sidecar::direct_profile::donor_dials(LifecycleRole::Donor)? {
+        return rka_sidecar::direct_session::run_donor_bridge().map_err(Into::into);
+    }
     let state_root = env::var_os("RKA_STATE_ROOT")
         .map(PathBuf::from)
         .ok_or("RKA_STATE_ROOT is required")?;
     let broker_socket =
         env::var_os("RKA_DONOR_SOCKET").map_or_else(|| PathBuf::from(BROKER_SOCKET), PathBuf::from);
-    let mut runtime = DonorRuntime::open(&state_root, &broker_socket);
-    if rka_sidecar::direct_profile::donor_dials(LifecycleRole::Donor)? {
-        return rka_sidecar::direct_session::run_donor(&mut runtime).map_err(Into::into);
-    }
+    let mut runtime = rka_sidecar::donor::DonorRuntime::open(&state_root, &broker_socket);
     let ingress = DonorIngress::bind(&state_root)?;
     loop {
         ingress.serve_once(&mut runtime)?;

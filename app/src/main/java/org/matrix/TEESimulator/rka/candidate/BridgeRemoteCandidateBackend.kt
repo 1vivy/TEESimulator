@@ -163,6 +163,7 @@ internal object CandidateBridgePayloadCodec {
         write(command.aliasHandle.copyBytes())
         write(command.identityHash.copyBytes())
         writeBounded(command.challenge, 1, 128 * 1024)
+        writeBounded(command.aaidDer, 1, 128 * 1024)
     }
 
     fun handleCommand(handle: RemoteKeyHandle): ByteArray = handle.copyBytes()

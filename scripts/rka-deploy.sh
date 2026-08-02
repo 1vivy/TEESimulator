@@ -934,6 +934,19 @@ pair)
     chmod 600 "$profile_tmp"
     profile_sha=$(sha256sum "$profile_tmp" | awk "{print \$1}")
     mv "$profile_tmp" "$state/profiles/direct.conf"
+    runtime_role=$(printf '%s' "$role" | tr '[:upper:]' '[:lower:]')
+    activation=$(
+        RKA_STATE_ROOT="$state" \
+        RKA_PROFILE_PATH="$state/profiles/direct.conf" \
+        RKA_EXPECTED_PROFILE_EPOCH="$profile_epoch" \
+        RKA_PAIR_TRANSACTION_ID="$tx" \
+            nsenter -t 1 -m -- "$active/rka-sidecar" activate-direct "$runtime_role"
+    ) || { set_pair_phase ACTIVATION_FAILED; exit 1; }
+    [ "$activation" = "RESULT=ACTIVATED profile_epoch=$profile_epoch" ] || {
+        set_pair_phase ACTIVATION_FAILED
+        exit 1
+    }
+    set_pair_phase ACTIVATED || exit 1
     set_pair_phase RUNTIME_STARTING || exit 1
     if ! RKA_REQUIRE_DIRECT_READY=true RKA_DIRECT_PROFILE_PATH="$state/profiles/direct.conf" nsenter -t 1 -m -- "$active/rka-supervisor.sh" start; then
         set_pair_phase RUNTIME_START_FAILED || exit 1
@@ -1395,14 +1408,21 @@ split_certificate() {
 mapfile -t donor_certificate_arguments < <(split_certificate "$donor_certificate")
 mapfile -t candidate_certificate_arguments < <(split_certificate "$candidate_certificate")
 complete_pair() {
+    pair_failure_stage=CANDIDATE_PAIR
     candidate_pair_result="$(remote "$candidate_serial" pair "$transaction_id" CANDIDATE "$donor_pin" "$candidate_endpoint" "$candidate_endpoint" "${donor_certificate_arguments[@]}")" || return 1
+    pair_failure_stage=DONOR_PAIR
     donor_pair_result="$(remote "$donor_serial" pair "$transaction_id" DONOR "$candidate_pin" "$candidate_endpoint" "$donor_endpoint" "${candidate_certificate_arguments[@]}")" || return 1
+    pair_failure_stage=DIRECT_PROBE
     remote "$donor_serial" direct-probe "$transaction_id" DONOR >/dev/null || return 1
+    pair_failure_stage=DONOR_VERIFY
     remote "$donor_serial" verify "$transaction_id" "$donor_boot" >/dev/null || return 1
+    pair_failure_stage=CANDIDATE_VERIFY
     remote "$candidate_serial" verify "$transaction_id" "$candidate_boot" >/dev/null || return 1
+    pair_failure_stage=NONE
 }
+pair_failure_stage=UNSTARTED
 complete_pair || {
-    fail_after_rollback PAIR_VERIFICATION_FAILED
+    fail_after_rollback "PAIR_VERIFICATION_FAILED_${pair_failure_stage}"
 }
 trap - ERR INT TERM
 

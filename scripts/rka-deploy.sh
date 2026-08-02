@@ -1256,27 +1256,48 @@ rka_adb_protected_push "$adb_command" "$candidate_serial" "$zip_path" "$REMOTE_Z
 rka_adb_protected_push "$adb_command" "$donor_serial" "$zip_path.source-sha" "$REMOTE_ZIP.source-sha" "$source_receipt_sha" 600 "$transaction_id" DONOR-source
 rka_adb_protected_push "$adb_command" "$candidate_serial" "$zip_path.source-sha" "$REMOTE_ZIP.source-sha" "$source_receipt_sha" 600 "$transaction_id" CANDIDATE-source
 
-rollback_pair() {
-    set +e
-    remote "$candidate_serial" rollback "$transaction_id" CANDIDATE >/dev/null
-    remote "$donor_serial" rollback "$transaction_id" DONOR >/dev/null
-    set -e
+reconnect_for_rollback() {
+    local serial=$1
+    "$adb_command" -s "$serial" reconnect >/dev/null 2>&1 || :
+    case "$serial" in
+        *:*) "$adb_command" -s "$serial" connect "$serial" >/dev/null 2>&1 || : ;;
+    esac
 }
-trap 'rollback_pair' ERR INT TERM
-donor_result="$(remote "$donor_serial" deploy "$transaction_id" "$REMOTE_ZIP" DONOR "$archive_sha" "$source_sha")" || {
-    rollback_pair
+rollback_device() (
+    set +e
+    local serial=$1 role=$2 attempt
+    for attempt in 1 2 3; do
+        remote "$serial" rollback "$transaction_id" "$role" >/dev/null && exit 0
+        [ "$attempt" -eq 3 ] && break
+        reconnect_for_rollback "$serial"
+        sleep 1
+    done
+    exit 1
+)
+rollback_pair() (
+    set +e
+    local candidate_status=0 donor_status=0
+    rollback_device "$candidate_serial" CANDIDATE || candidate_status=$?
+    rollback_device "$donor_serial" DONOR || donor_status=$?
+    [ "$candidate_status" -eq 0 ] && [ "$donor_status" -eq 0 ]
+)
+fail_after_rollback() {
+    local result=$1
     trap - ERR INT TERM
-    fail DEPLOY_TRANSACTION_FAILED 4
+    rollback_pair || fail "${result}_ROLLBACK_INCOMPLETE" 5
+    fail "$result" 4
+}
+trap 'rollback_pair >/dev/null 2>&1 || :' ERR INT TERM
+donor_result="$(remote "$donor_serial" deploy "$transaction_id" "$REMOTE_ZIP" DONOR "$archive_sha" "$source_sha")" || {
+    fail_after_rollback DEPLOY_TRANSACTION_FAILED
 }
 candidate_result="$(remote "$candidate_serial" deploy "$transaction_id" "$REMOTE_ZIP" CANDIDATE "$archive_sha" "$source_sha")" || {
-    rollback_pair
-    trap - ERR INT TERM
-    fail DEPLOY_TRANSACTION_FAILED 4
+    fail_after_rollback DEPLOY_TRANSACTION_FAILED
 }
 donor_pin="$(sed -n 's/.* pin=\([0-9a-f]\{64\}\).*/\1/p' <<<"$donor_result")"
 candidate_pin="$(sed -n 's/.* pin=\([0-9a-f]\{64\}\).*/\1/p' <<<"$candidate_result")"
-donor_identity="$(remote "$donor_serial" identity-public)" || fail PAIR_PIN_INVALID 4
-candidate_identity="$(remote "$candidate_serial" identity-public)" || fail PAIR_PIN_INVALID 4
+donor_identity="$(remote "$donor_serial" identity-public)" || fail_after_rollback PAIR_PIN_INVALID
+candidate_identity="$(remote "$candidate_serial" identity-public)" || fail_after_rollback PAIR_PIN_INVALID
 donor_certificate="${donor_identity##* certificate_hex=}"
 candidate_certificate="${candidate_identity##* certificate_hex=}"
 donor_staged="$(sed -n 's/.* staged_hash=\([0-9a-f]\{64\}\).*/\1/p' <<<"$donor_result")"
@@ -1286,9 +1307,7 @@ candidate_staged="$(sed -n 's/.* staged_hash=\([0-9a-f]\{64\}\).*/\1/p' <<<"$can
     "$candidate_identity" == "RESULT=IDENTITY_PUBLIC certificate_hex=$candidate_certificate" &&
     "$donor_certificate" =~ ^[0-9a-f]+$ && "$candidate_certificate" =~ ^[0-9a-f]+$ &&
     ${#donor_certificate} -le 32768 && ${#candidate_certificate} -le 32768 ]] || {
-    rollback_pair
-    trap - ERR INT TERM
-    fail PAIR_PIN_INVALID 4
+    fail_after_rollback PAIR_PIN_INVALID
 }
 split_certificate() {
     local value=$1
@@ -1308,9 +1327,7 @@ complete_pair() {
     remote "$candidate_serial" verify "$transaction_id" "$candidate_boot" >/dev/null || return 1
 }
 complete_pair || {
-    rollback_pair
-    trap - ERR INT TERM
-    fail PAIR_VERIFICATION_FAILED 4
+    fail_after_rollback PAIR_VERIFICATION_FAILED
 }
 trap - ERR INT TERM
 

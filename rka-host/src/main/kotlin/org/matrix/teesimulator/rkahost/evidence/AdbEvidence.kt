@@ -35,8 +35,9 @@ object AdbCommandTracePolicy {
 
     val policySha256: String =
         EvidenceHash.sha256(
-            "version=1\n" +
+            "version=2\n" +
                 "transport=adb-bound-serial\n" +
+                "recovery=bound-reconnect,bound-connect\n" +
                 "forbidden=${forbiddenCommands.sorted().joinToString(",")}\n" +
                 "direct-service=${directServiceCommands.sorted().joinToString(",")}\n" +
                 "shell-smuggling=true\n" +
@@ -55,6 +56,16 @@ object AdbCommandTracePolicy {
         }
         if (argv.any { it.any { character -> character in ";&|`$()<>\\\n\r\u0000" } }) {
             throw CommandRejected("ADB_SHELL_SMUGGLING")
+        }
+        when (argv[3]) {
+            "connect" ->
+                if (argv.size != 5 || argv[4] != argv[2]) {
+                    throw CommandRejected("UNBOUND_DEVICE_COMMAND")
+                }
+            "reconnect" ->
+                if (argv.size != 4) {
+                    throw CommandRejected("ADB_ARGV_INVALID")
+                }
         }
         val tokens = argv.drop(3).flatMap(::commandTokens)
         if (containsForbiddenCommand(tokens)) {

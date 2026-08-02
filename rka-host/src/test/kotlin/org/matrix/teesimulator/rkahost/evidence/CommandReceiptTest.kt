@@ -49,6 +49,25 @@ class CommandReceiptTest {
     }
 
     @Test
+    fun reconnectCommandsRemainBoundToTheSelectedSerial() {
+        AdbCommandTracePolicy.requireAllowed(listOf("adb", "-s", "serial-A", "reconnect"))
+        AdbCommandTracePolicy.requireAllowed(
+            listOf("adb", "-s", "192.0.2.7:5555", "connect", "192.0.2.7:5555")
+        )
+
+        assertThrows(CommandRejected::class.java) {
+            AdbCommandTracePolicy.requireAllowed(
+                listOf("adb", "-s", "192.0.2.7:5555", "connect", "192.0.2.8:5555")
+            )
+        }
+        assertThrows(CommandRejected::class.java) {
+            AdbCommandTracePolicy.requireAllowed(
+                listOf("adb", "-s", "serial-A", "reconnect", "offline")
+            )
+        }
+    }
+
+    @Test
     fun classifies_reboot_before_any_runner_or_shape_fallback() {
         // Given: a literal reboot argv whose only valid outcome is a hard no-reboot classification.
         val runner = RecordingRunner()

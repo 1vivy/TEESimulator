@@ -79,6 +79,7 @@ internal enum class FixtureMutation {
     INCOMPATIBLE_CANDIDATE,
     FAIL_DONOR_DEPLOY,
     FAIL_CANDIDATE_DEPLOY,
+    OFFLINE_DURING_CANDIDATE_VERIFY,
     HOSTILE_LOGCAT,
     FAIL_CANDIDATE_NETWORK,
     DONOR_WLAN_CANDIDATE_TUN,
@@ -212,6 +213,8 @@ internal fun applyFixtureMutation(
             environment["RKA_FAKE_INCOMPATIBLE"] = "CANDIDATE_B"
         FixtureMutation.FAIL_DONOR_DEPLOY -> environment["RKA_FAKE_FAIL_DEPLOY"] = "DONOR_A"
         FixtureMutation.FAIL_CANDIDATE_DEPLOY -> environment["RKA_FAKE_FAIL_DEPLOY"] = "CANDIDATE_B"
+        FixtureMutation.OFFLINE_DURING_CANDIDATE_VERIFY ->
+            environment["RKA_FAKE_OFFLINE_ON_VERIFY"] = "CANDIDATE_B"
         FixtureMutation.HOSTILE_LOGCAT -> environment["RKA_FAKE_HOSTILE_LOGCAT"] = "true"
         FixtureMutation.FAIL_CANDIDATE_NETWORK ->
             environment["RKA_FAKE_FAIL_NETWORK"] = "CANDIDATE_B"

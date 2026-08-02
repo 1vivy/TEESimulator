@@ -671,6 +671,11 @@ os.execv(sys.argv[2], [sys.argv[2], "--pair-fd-env", "RKA_DEVICE_PAIR_FD", "--zi
             devices.resolve("DONOR_A/root/data/adb/modules/tricky_store/module.prop")
         )
 
+    fun candidateActiveModuleBytes(): ByteArray =
+        Files.readAllBytes(
+            devices.resolve("CANDIDATE_B/root/data/adb/modules/tricky_store/module.prop")
+        )
+
     fun donorModuleSnapshot(): ModuleSnapshot {
         val module = devices.resolve("DONOR_A/root/data/adb/modules/tricky_store/module.prop")
         return ModuleSnapshot(

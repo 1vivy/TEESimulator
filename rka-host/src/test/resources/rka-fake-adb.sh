@@ -5,6 +5,22 @@ serial=$2
 shift 2
 device="$RKA_FAKE_DEVICE_ROOT/$serial"
 root="$device/root"
+offline="$device/adb.offline"
+
+if [ "${1-}" = reconnect ]; then
+    printf '%s %s\n' "$serial" "$*" >> "$RKA_FAKE_LOG"
+    rm -f "$offline"
+    exit 0
+fi
+if [ "${1-}" = connect ] && [ "${2-}" = "$serial" ]; then
+    printf '%s %s\n' "$serial" "$*" >> "$RKA_FAKE_LOG"
+    rm -f "$offline"
+    exit 0
+fi
+if [ -e "$offline" ]; then
+    printf 'adb: device offline\n' >&2
+    exit 1
+fi
 
 if [ "${1-}" = push ]; then
     printf '%s %s\n' "$serial" "$*" >> "$RKA_FAKE_LOG"
@@ -79,6 +95,13 @@ if [ "$mode" = network ] && [ "${RKA_FAKE_FAIL_NETWORK:-}" = "$serial" ]; then
     exit 1
 fi
 if [ "$mode" = deploy ] && [ "${RKA_FAKE_FAIL_DEPLOY:-}" = "$serial" ]; then
+    exit 1
+fi
+if [ "$mode" = verify ] && [ "${RKA_FAKE_OFFLINE_ON_VERIFY:-}" = "$serial" ] &&
+    [ ! -e "$device/adb.offline.triggered" ]; then
+    : > "$device/adb.offline.triggered"
+    : > "$offline"
+    printf 'adb: device offline\n' >&2
     exit 1
 fi
 if [ "$mode" = deploy ] && [ "${RKA_FAKE_CORRUPT_ARCHIVE_SERIAL:-}" = "$serial" ]; then

@@ -43,7 +43,13 @@ class NoRebootDeployFailureTest {
             .forEach { mutation ->
                 Fixture(mutation).use { fixture ->
                     val result = fixture.run()
-                    assertEquals(mutation.name, 4, result.exitCode)
+                    assertEquals(mutation.name, 5, result.exitCode)
+                    assertTrue(
+                        "${mutation.name}: ${result.stderr}",
+                        result.stderr.contains(
+                            "RESULT=PAIR_VERIFICATION_FAILED_ROLLBACK_INCOMPLETE"
+                        ),
+                    )
                     assertTrue(mutation.name, result.stderr.contains("ROLLBACK_BUSY_BIND_UNSAFE"))
                     assertTrue(mutation.name, fixture.donorNormalUnmountAttempted())
                     assertFalse(mutation.name, fixture.donorLazyUnmountAttempted())
@@ -230,6 +236,24 @@ class NoRebootDeployFailureTest {
             println(
                 "EFFECT_RECEIPT scenario=second-side-failure rollback_devices=2 order=${fixture.redactedOrder()}"
             )
+        }
+    }
+
+    @Test
+    fun transientCandidateOfflineReconnectsBeforeExactPairRollback() {
+        Fixture().use { fixture ->
+            val installed = fixture.run()
+            assertEquals(installed.stderr, 0, installed.exitCode)
+            val donorBefore = fixture.activeModuleBytes()
+            val candidateBefore = fixture.candidateActiveModuleBytes()
+
+            val result = fixture.runWithMutation(FixtureMutation.OFFLINE_DURING_CANDIDATE_VERIFY)
+
+            assertEquals(result.stderr, 4, result.exitCode)
+            assertTrue(result.stderr.contains("RESULT=PAIR_VERIFICATION_FAILED"))
+            assertArrayEquals(donorBefore, fixture.activeModuleBytes())
+            assertArrayEquals(candidateBefore, fixture.candidateActiveModuleBytes())
+            assertTrue(fixture.trace().any { it == "CANDIDATE_B reconnect" })
         }
     }
 

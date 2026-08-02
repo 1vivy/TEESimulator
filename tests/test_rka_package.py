@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import hashlib
 import base64
+import hashlib
 import os
+import select
+import signal
 import socket
 import threading
 from pathlib import Path
@@ -60,12 +62,66 @@ class RkaPackageTest(unittest.TestCase):
 
     def test_ksu_install_output_cannot_retain_the_adb_transport(self) -> None:
         deploy = (REPOSITORY_ROOT / "scripts" / "rka-deploy.sh").read_text(encoding="utf-8")
+        function_start = deploy.index("run_ksud_module_install() {\n")
+        function_end = deploy.index("\n}\n", function_start) + 3
+        function_source = deploy[function_start:function_end]
 
-        self.assertIn(
-            'ksud module install "$archive" > "$txn/ksu-install.stdout" '
-            '2> "$txn/ksu-install.stderr"',
-            deploy,
-        )
+        with TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            child_pid_path = temporary / "child.pid"
+            fake_ksud = temporary / "ksud"
+            fake_ksud.write_text(
+                "#!/bin/sh\n"
+                "sleep 30 &\n"
+                'printf "%s\\n" "$!" > "$RKA_FAKE_CHILD_PID"\n',
+                encoding="utf-8",
+            )
+            fake_ksud.chmod(0o755)
+            install_stdout = temporary / "install.stdout"
+            install_stderr = temporary / "install.stderr"
+            archive = temporary / "module.zip"
+            archive.touch()
+            read_fd, write_fd = os.pipe()
+            child_pid: int | None = None
+            try:
+                result = run(
+                    [
+                        "sh",
+                        "-c",
+                        function_source
+                        + '\nrun_ksud_module_install "$1" "$2" "$3"\n',
+                        "rka-install-test",
+                        str(install_stdout),
+                        str(install_stderr),
+                        str(archive),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    env=os.environ
+                    | {
+                        "PATH": f"{temporary}:{os.environ['PATH']}",
+                        "RKA_FAKE_CHILD_PID": str(child_pid_path),
+                    },
+                    pass_fds=(write_fd,),
+                    text=True,
+                    timeout=5,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                child_pid = int(child_pid_path.read_text(encoding="ascii"))
+                os.close(write_fd)
+                write_fd = -1
+                readable, _, _ = select.select([read_fd], [], [], 1)
+                self.assertEqual(readable, [read_fd])
+                self.assertEqual(os.read(read_fd, 1), b"")
+            finally:
+                if write_fd >= 0:
+                    os.close(write_fd)
+                os.close(read_fd)
+                if child_pid is not None:
+                    try:
+                        os.kill(child_pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
 
     def test_sepolicy_probe_manifest_is_complete_bounded_and_live(self) -> None:
         rules = [

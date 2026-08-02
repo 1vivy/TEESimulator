@@ -272,6 +272,29 @@ restore_prior_runtime() {
     nsenter -t 1 -m -- "$active/rka-supervisor.sh" status > "$txn/recovered.graph" || return 1
     cmp -s "$txn/prior.graph" "$txn/recovered.graph"
 }
+run_ksud_module_install() {
+    install_stdout=$1
+    install_stderr=$2
+    install_archive=$3
+    ksud_binary=$(command -v ksud) || return 1
+    [ -x "$ksud_binary" ] || return 1
+    sh -c '
+        install_stdout=$1
+        install_stderr=$2
+        ksud_binary=$3
+        install_archive=$4
+        exec </dev/null >"$install_stdout" 2>"$install_stderr"
+        for descriptor_path in /proc/self/fd/*; do
+            descriptor=${descriptor_path##*/}
+            case "$descriptor" in
+                0|1|2) ;;
+                ""|*[!0-9]*) exit 126 ;;
+                *) eval "exec ${descriptor}>&-" ;;
+            esac
+        done
+        exec "$ksud_binary" module install "$install_archive"
+    ' rka-ksu-install "$install_stdout" "$install_stderr" "$ksud_binary" "$install_archive"
+}
 validate_metadata_manifest() {
     metadata_file=$1
     metadata_kind=$2
@@ -780,7 +803,7 @@ deploy)
     set_phase SNAPSHOTS_READY
     if [ "$metadata_bridge" = true ]; then prepare_ksu_metadata || exit 1; fi
     if [ -e "$pending" ]; then rm -rf "$pending"; fi
-    if ! ksud module install "$archive" > "$txn/ksu-install.stdout" 2> "$txn/ksu-install.stderr"; then exit 1; fi
+    if ! run_ksud_module_install "$txn/ksu-install.stdout" "$txn/ksu-install.stderr" "$archive"; then exit 1; fi
     [ -d "$pending" ] && [ ! -L "$pending" ] || exit 1
     if [ -f "$state/manager-authorizations/$tx" ]; then
         for path in /data/adb/modules /data/adb/modules_update "$active" "$pending"; do

@@ -129,7 +129,8 @@ class KsuNext330FirstInstallTest {
 
     @Test
     fun rollbackAfterSuccessfulFirstInstallRebuildsPreexistingDerivedViews() {
-        Fixture(kernelProfile = KernelProfile.KSU_NEXT_FIRST_INSTALL_EXISTING_PARENTS).use { fixture ->
+        Fixture(kernelProfile = KernelProfile.KSU_NEXT_FIRST_INSTALL_EXISTING_PARENTS).use { fixture
+            ->
             assertEquals(0, fixture.run().exitCode)
 
             val rollback = fixture.rollbackDonorAgain()

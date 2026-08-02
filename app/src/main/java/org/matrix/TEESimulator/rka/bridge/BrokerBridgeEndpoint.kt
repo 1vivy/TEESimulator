@@ -132,8 +132,10 @@ private class DefaultBrokerBridgeEndpoint(
                 removeCorrelation(request.requestId)
             }
         } catch (error: RuntimeException) {
+            val frame = error.stackTrace.firstOrNull()
             SystemLogger.warning(
-                "RKA bridge envelope failed: stage=$stage type=${error.javaClass.simpleName}"
+                "RKA bridge envelope failed: stage=$stage type=${error.javaClass.simpleName} " +
+                    "frame=${frame?.className}:${frame?.methodName}:${frame?.lineNumber}"
             )
             failureAndClose(BridgeError.Io)
         }

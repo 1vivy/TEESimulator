@@ -78,6 +78,26 @@ $rka_entries
 EOF
 }
 
+rka_runtime_tree_is_valid() {
+    rka_path_is_private_directory "$rka_state_root/run" || return 1
+    rka_runtime_socket=$rka_state_root/run/sockets/broker.sock
+    rka_entries=$(find "$rka_state_root/run" -mindepth 1 -print) || return 1
+    while IFS= read -r rka_entry; do
+        [ -n "$rka_entry" ] || continue
+        [ ! -L "$rka_entry" ] || return 1
+        if [ -d "$rka_entry" ]; then
+            rka_path_is_private_directory "$rka_entry" || return 1
+        elif [ "$rka_entry" = "$rka_runtime_socket" ]; then
+            [ -S "$rka_entry" ] || return 1
+            [ "$(stat -c '%u:%g:%a' "$rka_entry")" = "$(id -u):$(id -g):$RKA_LAYOUT_FILE_MODE" ] || return 1
+        else
+            rka_private_file_is_valid "$rka_entry" || return 1
+        fi
+    done <<EOF
+$rka_entries
+EOF
+}
+
 rka_atomic_replace() {
     rka_parent_directory=$1
     rka_destination=$2
@@ -140,13 +160,13 @@ EOF
     rka_optional_private_file_is_valid "$rka_state_root/secrets/transport.key" || return 1
     rka_optional_private_file_is_valid "$rka_state_root/trust/transport-trust.pem" || return 1
     rka_optional_private_file_is_valid "$rka_state_root/journal/mutation.state" || return 1
+    rka_runtime_tree_is_valid || return 1
     for rka_protected_tree in \
         "$rka_state_root/profiles" \
         "$rka_state_root/secrets" \
         "$rka_state_root/trust" \
         "$rka_state_root/journal" \
         "$rka_state_root/sidecar" \
-        "$rka_state_root/run" \
         "$rka_state_root/staging" \
         "$rka_state_root/quarantine" \
         "$rka_state_root/test-keys"; do

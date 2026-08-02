@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import socket
 from subprocess import CompletedProcess, run
 from tempfile import TemporaryDirectory
 import unittest
@@ -166,6 +167,36 @@ class RkaPathsTest(unittest.TestCase):
             os.chmod(secret_path, 0o644)
 
             result = self.run_control(config_root, state_root, "initialize")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "INERT_INVALID_CONFIG\n")
+
+    def test_accepts_the_exact_owned_runtime_socket(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            config_root = temporary_root / "tricky_store"
+            state_root = temporary_root / "teesimulator-rka"
+            self.assertEqual(self.run_control(config_root, state_root, "initialize").returncode, 0)
+            socket_path = state_root / "run" / "sockets" / "broker.sock"
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.bind(str(socket_path))
+                os.chmod(socket_path, 0o600)
+                result = self.run_control(config_root, state_root, "initialize")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "READY\n")
+
+    def test_rejects_any_other_runtime_socket(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            config_root = temporary_root / "tricky_store"
+            state_root = temporary_root / "teesimulator-rka"
+            self.assertEqual(self.run_control(config_root, state_root, "initialize").returncode, 0)
+            socket_path = state_root / "run" / "sockets" / "unexpected.sock"
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.bind(str(socket_path))
+                os.chmod(socket_path, 0o600)
+                result = self.run_control(config_root, state_root, "initialize")
 
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "INERT_INVALID_CONFIG\n")

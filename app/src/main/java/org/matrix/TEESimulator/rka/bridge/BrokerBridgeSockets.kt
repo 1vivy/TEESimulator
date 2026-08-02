@@ -68,11 +68,14 @@ private constructor(
     private val directory: BridgeSocketDirectoryHandle,
     private val socketNode: BridgeSocketNodeHandle,
 ) : Closeable {
-    internal fun boundedTransport(): BridgeTransport =
-        DeferredBridgeTransport(
-            factory = binding::acceptTransport,
-            abortPending = { runCatching { binding.close() } },
-        )
+    internal fun nextTransport(): BridgeResult<BridgeTransport> =
+        try {
+            BridgeResult.Success(binding.acceptTransport())
+        } catch (_: SecurityException) {
+            BridgeResult.Failure(BridgeError.SelinuxDenied)
+        } catch (_: Exception) {
+            BridgeResult.Failure(BridgeError.SocketBindDenied)
+        }
 
     internal fun socketMetadata(): SocketMetadata =
         when (socketNode.inspect()) {

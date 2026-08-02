@@ -258,6 +258,15 @@ set_phase() {
     mv "$txn/phase.next" "$txn/phase"
     sync "$txn/phase"
 }
+set_pair_phase() {
+    value=$1
+    case "$value" in ""|*[!A-Z0-9_]*) return 1 ;; esac
+    [ "$(printf %s "$value" | wc -c)" -le 64 ] || return 1
+    printf "%s\n" "$value" > "$txn/pair.phase.next"
+    chmod 600 "$txn/pair.phase.next"
+    mv "$txn/pair.phase.next" "$txn/pair.phase"
+    sync "$txn/pair.phase"
+}
 restore_prior_runtime() {
     prior_bind=$(cat "$txn/prior.bind" 2>/dev/null) || prior_bind=false
     if [ "$prior_bind" = true ] && ! awk -v p="$active" "\$5 == p {found=1} END {exit !found}" /proc/1/mountinfo; then
@@ -901,6 +910,7 @@ pair)
     [ "$peer_certificate_length" -le 32768 ] && [ $((peer_certificate_length % 2)) -eq 0 ] || exit 2
     txn="$state/deploy-transactions/$tx"
     [ -f "$txn/installed" ] || exit 1
+    set_pair_phase PREPARING || exit 1
     profile_epoch=$(sed -n '3s/^profile_epoch=//p' "$state/profiles/active.conf") || exit 1
     case "$profile_epoch" in ""|*[!0-9]*) exit 1 ;; esac
     profile_tmp="$state/profiles/.direct.$tx.tmp"
@@ -916,18 +926,32 @@ pair)
     chmod 600 "$profile_tmp"
     profile_sha=$(sha256sum "$profile_tmp" | awk "{print \$1}")
     mv "$profile_tmp" "$state/profiles/direct.conf"
-    RKA_REQUIRE_DIRECT_READY=true RKA_DIRECT_PROFILE_PATH="$state/profiles/direct.conf" nsenter -t 1 -m -- "$active/rka-supervisor.sh" start
+    set_pair_phase RUNTIME_STARTING || exit 1
+    if ! RKA_REQUIRE_DIRECT_READY=true RKA_DIRECT_PROFILE_PATH="$state/profiles/direct.conf" nsenter -t 1 -m -- "$active/rka-supervisor.sh" start; then
+        set_pair_phase RUNTIME_START_FAILED || exit 1
+        exit 1
+    fi
+    set_pair_phase RUNTIME_STARTED || exit 1
     : > "$txn/sepolicy-probes.stdout"
     : > "$txn/sepolicy-probes.stderr"
+    probe_index=0
     while IFS="|" read -r rule_hash probe; do
+        probe_index=$((probe_index + 1))
+        set_pair_phase "POLICY_PROBE_${probe_index}_RUNNING" || exit 1
         [ -n "$rule_hash" ] && [ -n "$probe" ] || exit 1
         command=$(printf %s "$probe" | base64 -d) || exit 1
         [ -n "$command" ] && [ "$(printf %s "$command" | wc -c)" -le 256 ] || exit 1
-        timeout 5 nsenter -t 1 -m -- sh -eu -c "$command" >> "$txn/sepolicy-probes.stdout" 2>> "$txn/sepolicy-probes.stderr"
+        if ! timeout 5 nsenter -t 1 -m -- sh -eu -c "$command" >> "$txn/sepolicy-probes.stdout" 2>> "$txn/sepolicy-probes.stderr"; then
+            set_pair_phase "POLICY_PROBE_${probe_index}_FAILED" || exit 1
+            exit 1
+        fi
     done < "$txn/sepolicy.probes.validated"
-    nsenter -t 1 -m -- "$active/rka-supervisor.sh" status > "$txn/new.graph"
-    grep -q "broker=RUNNING" "$txn/new.graph"
-    grep -q "sidecar=RUNNING" "$txn/new.graph"
+    set_pair_phase POLICY_PROBES_PASSED || exit 1
+    set_pair_phase GRAPH_VERIFYING || exit 1
+    nsenter -t 1 -m -- "$active/rka-supervisor.sh" status > "$txn/new.graph" || { set_pair_phase GRAPH_FAILED; exit 1; }
+    grep -q "broker=RUNNING" "$txn/new.graph" || { set_pair_phase GRAPH_FAILED; exit 1; }
+    grep -q "sidecar=RUNNING" "$txn/new.graph" || { set_pair_phase GRAPH_FAILED; exit 1; }
+    set_pair_phase GRAPH_VERIFIED || exit 1
     receipt="$state/run/direct-profile.receipt"
     peer_pin_sha=$(printf %s "$peer_pin" | xxd -r -p | sha256sum | awk "{print \$1}")
     [ -f "$receipt" ] && [ ! -L "$receipt" ] && [ "$(cat "$receipt")" = "version=1
@@ -936,6 +960,7 @@ profile_epoch=$profile_epoch
 peer_pin_sha256=$peer_pin_sha
 dial_mode=DONOR_DIALS
 transport=DIRECT" ] || exit 1
+    set_pair_phase PROFILE_RECEIPT_VERIFIED || exit 1
     init_ns=$(readlink /proc/1/ns/mnt) || exit 1
     manager_process=me.weishu.kernelsu
     include_ksud=true
@@ -946,6 +971,7 @@ transport=DIRECT" ] || exit 1
         manager_process=$(sed -n '4s/^package=//p' "$authorization") || exit 1
         include_ksud=false
         if [ "$surface" = HEADLESS_AUTHORIZED_MANAGER ]; then
+            set_pair_phase MOUNT_VIEWS_VERIFYING || exit 1
             [ -n "$manager_process" ] || exit 1
             [ "$(sed -n '14s/^authorization_mode=//p' "$authorization")" = authorized_headless ] || exit 1
             nsenter -t 1 -m -- cmp -s "$active/webroot/index.html" "$pending/webroot/index.html" || exit 1
@@ -963,6 +989,7 @@ transport=DIRECT" ] || exit 1
                 printf "%s=%s|%s\n" "$name" "$ns" "$inode" >> "$txn/mount-views.receipt"
             done
             chmod 600 "$txn/mount-views.receipt"
+            set_pair_phase COMPLETE || exit 1
             printf "RESULT=PAIRED profile_sha256=%s graph_hash=%s mount_views_sha256=%s surface=HEADLESS_AUTHORIZED_MANAGER\n" "$profile_sha" "$(sha256sum "$txn/new.graph" | awk "{print \$1}")" "$(sha256sum "$txn/mount-views.receipt" | awk "{print \$1}")"
             exit 0
         fi
@@ -1067,6 +1094,7 @@ function process_record(line, fields, identity, pid, process) {
         printf "manager_pid=%s\nmanager_uid=%s\nmanager_process=me.weishu.kernelsu\nmanager_record=%s\nrenderer_pid=%s\nrenderer_uid=%s\nrenderer_process=com.google.android.webview:sandboxed_process0\nrenderer_record=%s\nrenderer_parent_pid=%s\nzygote_pid=%s\nzygote_name=%s\nzygote_uid=%s\nzygote_command=%s\nprovider_package=com.google.android.webview\nhosting_record=%s\n" "$manager_pid" "$manager_uid" "$manager_record" "$webui_pid" "$webui_uid" "$renderer_record" "$renderer_parent_pid" "$zygote_pid" "$zygote_name" "$zygote_uid" "$zygote_command" "$hosting_record" > "$txn/webui-owner.receipt"
     fi
     chmod 600 "$txn/webui-owner.receipt"
+    set_pair_phase MOUNT_VIEWS_VERIFYING || exit 1
     active_inode=$(nsenter -t 1 -m -- stat -c %d:%i "$active/module.prop") || exit 1
     printf "init=%s\n" "$init_ns" > "$txn/mount-views.receipt"
     process_views="manager:$manager_pid webui:$webui_pid"
@@ -1089,6 +1117,7 @@ function process_record(line, fields, identity, pid, process) {
         printf "%s=%s|%s\n" "$name" "$ns" "$inode" >> "$txn/mount-views.receipt"
     done
     chmod 600 "$txn/mount-views.receipt"
+    set_pair_phase COMPLETE || exit 1
     printf "RESULT=PAIRED profile_sha256=%s graph_hash=%s mount_views_sha256=%s\n" "$profile_sha" "$(sha256sum "$txn/new.graph" | awk "{print \$1}")" "$(sha256sum "$txn/mount-views.receipt" | awk "{print \$1}")"
     ;;
 direct-probe)

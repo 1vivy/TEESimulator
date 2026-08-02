@@ -111,7 +111,7 @@ class RkaPackageTest(unittest.TestCase):
             expected = (
                 "unix_broker_probe" if "unix_stream_socket" in rule else
                 "scratch_transition_probe" if rule.startswith(("type ", "type_transition")) or "teesimulator_rka_socket" in rule else
-                "toybox"
+                "broker_socket_probe"
             )
             self.assertEqual(dispatch[digest], expected, rule)
         self.assert_live_probe_contract(helper)
@@ -142,6 +142,24 @@ class RkaPackageTest(unittest.TestCase):
             complete_pair.index('remote "$candidate_serial" pair'),
             complete_pair.index('remote "$donor_serial" pair'),
         )
+
+    def test_pair_persists_bounded_step_receipts(self) -> None:
+        source = (REPOSITORY_ROOT / "scripts" / "rka-deploy.sh").read_text(encoding="utf-8")
+        pair = source.split("pair)\n", 1)[1].split("\ndirect-probe)", 1)[0]
+        phases = [
+            "PREPARING",
+            "RUNTIME_STARTING",
+            "RUNTIME_STARTED",
+            "POLICY_PROBES_PASSED",
+            "GRAPH_VERIFYING",
+            "GRAPH_VERIFIED",
+            "PROFILE_RECEIPT_VERIFIED",
+        ]
+
+        offsets = [pair.index(f"set_pair_phase {phase}") for phase in phases]
+        self.assertEqual(offsets, sorted(offsets))
+        self.assertIn('set_pair_phase "POLICY_PROBE_${probe_index}_FAILED"', pair)
+        self.assertEqual(pair.count("set_pair_phase COMPLETE"), 2)
 
     def test_sepolicy_probe_helper_executes_all_manifest_hashes(self) -> None:
         hashes = [line.split("|", 1)[0] for line in SEPOLICY_PROBES.read_text(encoding="ascii").splitlines()]
@@ -439,6 +457,8 @@ class RkaPackageTest(unittest.TestCase):
     def assert_live_probe_contract(self, helper: str) -> None:
         for required in (
             "toybox nc -U -w 2 \"$socket\"",
+            "wait_for_socket \"$socket\"",
+            "broker_socket_probe",
             "mkdir -p \"$scratch/sockets\"",
             "scratch=$state/p/$2",
             "scratch_socket=$scratch/sockets/broker.sock",

@@ -34,6 +34,20 @@ class BrokerBridgeFourthFollowupTest {
     }
 
     @Test
+    fun donor_listener_stays_bound_while_idle_and_only_connected_io_is_deadline_bounded() {
+        val factory = productionSource("BrokerBridgeFactory.kt")
+        val donorStart = factory.indexOf("fun acceptDonor(")
+        val candidateStart = factory.indexOf("fun exchangeCandidate(")
+        val donor = factory.substring(donorStart, candidateStart)
+
+        assertTrue(donor.contains("value.nextTransport()"))
+        assertTrue(donor.contains("createProductionBrokerEndpoint("))
+        assertFalse(donor.contains("BoundedBridgeExecution().run("))
+        assertFalse(donor.contains("InlineBridgeExecution"))
+        assertFalse(donor.contains("value.close()"))
+    }
+
+    @Test
     fun production_uses_type_transitions_and_never_relabels_socket_objects() {
         val socketPath = productionSource("SecureSocketPath.kt")
         val policy = String(Files.readAllBytes(repositoryRoot().resolve("module/sepolicy.rule")))

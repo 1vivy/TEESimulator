@@ -3,58 +3,58 @@ package org.matrix.TEESimulator.rka.bridge
 import java.util.concurrent.atomic.AtomicReference
 
 object BrokerBridgeFactory {
+    private val donorLock = Any()
+    private var donorServer: DonorBridgeServer? = null
+
     /**
      * Runs bind, accept, authentication, I/O and dispatch through the production bounded bridge. A
      * successful response remains live and ownership transfers to the caller, which must close it.
      */
     fun acceptDonor(dispatch: (BridgeMessage) -> BridgeMessage): BridgeResult<BridgeMessage> {
-        val server = AtomicReference<DonorBridgeServer?>()
-        val transport = AtomicReference<BridgeTransport?>()
-        val endpoint = AtomicReference<BrokerBridgeEndpoint?>()
-        val authorization = AtomicReference<ProductionPeerAuthorization?>()
-        return BoundedBridgeExecution().run(
-            BridgeLimits.DEADLINE_MILLIS,
-            {
-                endpoint.get()?.peerDied()
-                authorization.get()?.close()
-                runCatching { transport.get()?.close() }
-                runCatching { server.get()?.close() }
-            },
-        ) {
+        return synchronized(donorLock) {
             val captured = captureProductionPeerAuthorization(BrokerSidecarRole.DONOR)
-            if (captured is BridgeResult.Failure) return@run captured
+            if (captured is BridgeResult.Failure) return captured
             val peerAuthorization = (captured as BridgeResult.Success).value
-            authorization.set(peerAuthorization)
             try {
-                val bound = DonorBridgeServer.bind()
-                if (bound is BridgeResult.Failure) return@run bound
-                val value = (bound as BridgeResult.Success).value
-                server.set(value)
-                val connected = value.boundedTransport()
-                transport.set(connected)
+                val value =
+                    donorServer
+                        ?: when (val bound = bindDonorServer()) {
+                            is BridgeResult.Failure -> return bound
+                            is BridgeResult.Success -> bound.value
+                        }
+                val accepted = value.nextTransport()
+                if (accepted is BridgeResult.Failure) {
+                    closeDonorServer(value)
+                    return accepted
+                }
+                val connected = (accepted as BridgeResult.Success).value
                 val valueEndpoint =
                     createProductionBrokerEndpoint(
                         peerAuthorization,
                         value::socketMetadata,
                         connected,
-                        InlineBridgeExecution,
                     )
-                endpoint.set(valueEndpoint)
                 try {
                     valueEndpoint.acceptAndDispatch(dispatch)
                 } finally {
                     valueEndpoint.peerDied()
                     connected.close()
-                    value.close()
-                    transport.set(null)
-                    server.set(null)
-                    endpoint.set(null)
                 }
             } finally {
                 peerAuthorization.close()
-                authorization.set(null)
             }
         }
+    }
+
+    private fun bindDonorServer(): BridgeResult<DonorBridgeServer> {
+        val bound = DonorBridgeServer.bind()
+        if (bound is BridgeResult.Success) donorServer = bound.value
+        return bound
+    }
+
+    private fun closeDonorServer(server: DonorBridgeServer) {
+        if (donorServer === server) donorServer = null
+        server.close()
     }
 
     /**

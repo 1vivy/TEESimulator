@@ -1,5 +1,8 @@
 package org.matrix.teesimulator.rkahost.cli
 
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -47,6 +50,44 @@ class KsuNext330FirstInstallTest {
                     )
                 ),
             )
+        }
+    }
+
+    @Test
+    fun emptyRootOwnedPrivatePidDirectoriesPermitFirstInstall() {
+        Fixture(kernelProfile = KernelProfile.KSU_NEXT_FIRST_INSTALL).use { fixture ->
+            fixture.preparePidDirectories()
+
+            val result = fixture.run()
+
+            assertEquals(result.stderr, 0, result.exitCode)
+            assertTrue(fixture.firstInstallFacts(), fixture.hasFirstInstallReceipts())
+        }
+    }
+
+    @Test
+    fun populatedOrSymlinkPidDirectoriesFailBeforeTransfer() {
+        listOf("populated", "symlink").forEach { layout ->
+            Fixture(kernelProfile = KernelProfile.KSU_NEXT_FIRST_INSTALL).use { fixture ->
+                fixture.preparePidDirectories(layout)
+
+                val result = fixture.run()
+
+                assertEquals(layout, 3, result.exitCode)
+                assertFalse(layout, fixture.trace().any { " push " in " $it " })
+            }
+        }
+    }
+
+    @Test
+    fun nonPrivatePidDirectoriesFailBeforeTransfer() {
+        Fixture(kernelProfile = KernelProfile.KSU_NEXT_FIRST_INSTALL).use { fixture ->
+            fixture.preparePidDirectories("world-readable")
+
+            val result = fixture.run()
+
+            assertEquals(result.stderr, 3, result.exitCode)
+            assertFalse(fixture.trace().any { " push " in " $it " })
         }
     }
 
@@ -138,6 +179,35 @@ class KsuNext330FirstInstallTest {
 
             assertEquals(3, result.exitCode)
             assertFalse(fixture.trace().any { " push " in " $it " })
+        }
+    }
+
+    private fun Fixture.preparePidDirectories(layout: String = "empty") {
+        listOf("DONOR_A", "CANDIDATE_B").forEach { serial ->
+            val pidDirectory = devices.resolve("$serial/root/data/adb/teesimulator-rka/run/pids")
+            Files.createDirectories(pidDirectory.parent)
+            when (layout) {
+                "empty" -> Files.createDirectory(pidDirectory)
+                "populated" -> {
+                    Files.createDirectory(pidDirectory)
+                    Files.writeString(pidDirectory.resolve("broker.pid"), "1 1 1\n")
+                }
+                "symlink" -> {
+                    val target = devices.resolve("$serial/root/tmp/pid-target")
+                    Files.createDirectories(target)
+                    Files.createSymbolicLink(pidDirectory, Path.of("/tmp/pid-target"))
+                }
+                "world-readable" -> Files.createDirectory(pidDirectory)
+                else -> error("unknown PID layout: $layout")
+            }
+            if (!Files.isSymbolicLink(pidDirectory)) {
+                Files.setPosixFilePermissions(
+                    pidDirectory,
+                    PosixFilePermissions.fromString(
+                        if (layout == "world-readable") "rwxr-xr-x" else "rwx------"
+                    ),
+                )
+            }
         }
     }
 }

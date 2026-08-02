@@ -438,6 +438,11 @@ case "$last" in
     if [ "${1-}" = -c ] && [ "${2-}" = %u:%a ]; then printf "0:600\n"; exit 0; fi ;;
   /data/adb/teesimulator-rka/trust/transport-self.pem)
     if [ "${1-}" = -c ] && [ "${2-}" = %u:%a ]; then printf "0:600\n"; exit 0; fi ;;
+  /data/adb/teesimulator-rka/run/pids)
+    if [ "${1-}" = -c ] && [ "${2-}" = %u:%g:%a ]; then
+      printf "0:0:%s\n" "$(/usr/bin/stat -c %a "$last")"
+      exit 0
+    fi ;;
   /data/adb/modules/tricky_store/module.prop|/data/adb/modules_update/tricky_store/module.prop)
     if [ -f /data/adb/teesimulator-rka/.bound ] && [ "${RKA_NSENTER:-}" = 1 ] && [ "$last" = /data/adb/modules/tricky_store/module.prop ]; then
       exec /usr/bin/stat -c %d:%i /data/adb/modules_update/tricky_store/module.prop

@@ -384,11 +384,18 @@ prepare_active_view_without_update() {
         rm -f "$active_view_destination/update" || return 1
     fi
 }
+first_install_pids_layout_is_safe() {
+    first_install_pids=$state/run/pids
+    [ ! -e "$first_install_pids" ] && [ ! -L "$first_install_pids" ] && return 0
+    [ -d "$first_install_pids" ] && [ ! -L "$first_install_pids" ] || return 1
+    [ "$(stat -c '%u:%g:%a' "$first_install_pids")" = '0:0:700' ] || return 1
+    [ -z "$(find "$first_install_pids" -mindepth 1 -print -quit)" ]
+}
 classify_ksu_module_layout() {
     if [ ! -e /data/adb/modules ] && [ ! -L /data/adb/modules ] && [ ! -e /data/adb/modules_update ] && [ ! -L /data/adb/modules_update ]; then
         [ ! -e "$active" ] && [ ! -L "$active" ] && [ ! -e "$pending" ] && [ ! -L "$pending" ] || return 1
         ! awk -v p="$active" "\$5 == p {found=1} END {exit !found}" /proc/1/mountinfo || return 1
-        [ ! -d "$state/run/pids" ] || return 1
+        first_install_pids_layout_is_safe || return 1
         printf 'FIRST_INSTALL_ABSENT_LAYOUT'
         return
     fi
@@ -397,7 +404,7 @@ classify_ksu_module_layout() {
     done
     if [ ! -e "$active" ] && [ ! -L "$active" ] && [ ! -e "$pending" ] && [ ! -L "$pending" ]; then
         ! awk -v p="$active" "\$5 == p {found=1} END {exit !found}" /proc/1/mountinfo || return 1
-        [ ! -d "$state/run/pids" ] || return 1
+        first_install_pids_layout_is_safe || return 1
         if [ -z "$(find /data/adb/modules -mindepth 1 -maxdepth 1 -print)" ] && [ -z "$(find /data/adb/modules_update -mindepth 1 -maxdepth 1 -print)" ]; then
             printf 'FIRST_INSTALL_EMPTY_LAYOUT'
         else

@@ -32,11 +32,15 @@ class RkaPackageTest(unittest.TestCase):
         rejects = self.fake_ksu_next_apply(rules)
 
         self.assertEqual(rejects, [])
-        self.assertEqual(len(rules), 14)
+        self.assertEqual(len(rules), 15)
         self.assertFalse(any("magisk" in rule for rule in rules))
         self.assertFalse(any("tcp_socket" in rule or "udp_socket" in rule for rule in rules))
         self.assertIn(
             "allow ksu ksu unix_stream_socket { create bind connect listen accept read write getattr getopt setopt shutdown }",
+            rules,
+        )
+        self.assertIn(
+            "allow ksu teesimulator_rka_socket_dir sock_file relabelfrom",
             rules,
         )
 

@@ -74,7 +74,7 @@ ensure_socket_context() {
     observed_context=$(path_context "$1") || return 1
     [ "$observed_context" = "$socket_context" ] && return 0
     case $observed_context in
-        u:object_r:unlabeled:s0|u:object_r:adb_data_file:s0) ;;
+        u:object_r:unlabeled:s0|u:object_r:adb_data_file:s0|u:object_r:teesimulator_rka_socket_dir:s0) ;;
         *) return 1 ;;
     esac
     toybox chcon "$socket_context" "$1" || return 1

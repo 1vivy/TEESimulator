@@ -133,15 +133,21 @@
   }
 
   function checked(value) {
+    const errno =
+      typeof value?.errno === "string" && /^(?:0|[1-9][0-9]{0,2})$/.test(value.errno)
+        ? Number(value.errno)
+        : value?.errno;
     if (
       value === null ||
       typeof value !== "object" ||
-      typeof value.errno !== "number" ||
+      !Number.isSafeInteger(errno) ||
+      errno < 0 ||
+      errno > 255 ||
       typeof value.stdout !== "string"
     ) {
       throw new Error("WebUI bridge response was malformed");
     }
-    return value;
+    return { errno, stdout: value.stdout, stderr: value.stderr };
   }
 
   async function invoke(action, confirmation = "") {

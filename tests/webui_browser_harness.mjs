@@ -62,12 +62,12 @@ function bridgePreload() {
     function callback(name, errno, stdout, stderr = "") {
       const match = /^globalThis\\.__teesimulatorRkaCallbacks\\.(request[1-9][0-9]*)$/.exec(name);
       if (match === null) throw new Error("unsafe callback expression");
-      queueMicrotask(() => globalThis.__teesimulatorRkaCallbacks[match[1]](errno, stdout, stderr));
+      queueMicrotask(() => globalThis.__teesimulatorRkaCallbacks[match[1]](String(errno), stdout, stderr));
     }
     globalThis.ksu = { exec(command, callbackName) {
       globalThis.__bridge.log.push(command);
       if (location.hash === "#malformed") {
-        callback(callbackName, "0", status());
+        callback(callbackName, "invalid", status());
         return;
       }
       if (globalThis.__bridge.deferNext) {

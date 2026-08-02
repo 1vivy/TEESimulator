@@ -92,6 +92,64 @@ class TrustedSidecarIdentityTest {
         assertTrue(!identityMatches(PeerCredentials(0, 0, snapshot.pid), snapshot, observed))
     }
 
+    @Test
+    fun donor_admits_only_the_exact_root_provisioning_process_from_the_supervised_inode() {
+        val donor = requireNotNull(SupervisorRecordTextParser.parse(validRecord()))
+        val supervised = requireNotNull(donor.snapshotFor(BrokerSidecarRole.DONOR))
+        val credentials = PeerCredentials(0, 0, 84)
+        val observed =
+            ObservedProcessIdentity(
+                startTimeTicks = 991,
+                cmdline = listOf(SupervisorRecordFields.FIXED_EXECUTABLE, "provision"),
+                executablePath = supervised.executablePath,
+                executableInode = supervised.executableInode,
+            )
+
+        val admitted =
+            provisioningPeerSnapshot(
+                BrokerSidecarRole.DONOR,
+                credentials,
+                supervised,
+                observed,
+            )
+
+        assertEquals(credentials.pid, requireNotNull(admitted).pid)
+        assertEquals(observed.startTimeTicks, admitted.startTimeTicks)
+        assertTrue(identityMatches(credentials, admitted, observed))
+        assertNull(
+            provisioningPeerSnapshot(
+                BrokerSidecarRole.CANDIDATE,
+                credentials,
+                supervised,
+                observed,
+            )
+        )
+        assertNull(
+            provisioningPeerSnapshot(
+                BrokerSidecarRole.DONOR,
+                PeerCredentials(1, 0, credentials.pid),
+                supervised,
+                observed,
+            )
+        )
+        assertNull(
+            provisioningPeerSnapshot(
+                BrokerSidecarRole.DONOR,
+                credentials,
+                supervised,
+                observed.copy(cmdline = listOf(SupervisorRecordFields.FIXED_EXECUTABLE, "health")),
+            )
+        )
+        assertNull(
+            provisioningPeerSnapshot(
+                BrokerSidecarRole.DONOR,
+                credentials,
+                supervised,
+                observed.copy(executableInode = 1235),
+            )
+        )
+    }
+
     private fun validRecord() =
         """
         version=1

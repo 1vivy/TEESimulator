@@ -156,16 +156,50 @@ private class DescriptorPeerAuthorization(
                 .getOrElse {
                     return BridgeResult.Failure(BridgeError.PeerDied)
                 }
-        return if (identityMatches(credentials, snapshot, observed)) {
-            BridgeResult.Success(snapshot)
-        } else {
-            BridgeResult.Failure(BridgeError.PeerIdentityMismatch)
-        }
+        val admitted =
+            if (identityMatches(credentials, snapshot, observed)) {
+                snapshot
+            } else {
+                runCatching { LinuxProcessIdentitySource().read(credentials.pid) }
+                    .getOrNull()
+                    ?.let { provisioningPeerSnapshot(expectedRole, credentials, snapshot, it) }
+            }
+        return admitted?.let { BridgeResult.Success(it) }
+            ?: BridgeResult.Failure(BridgeError.PeerIdentityMismatch)
     }
 
     override fun close() {
         handle.close()
     }
+}
+
+internal fun provisioningPeerSnapshot(
+    expectedRole: BrokerSidecarRole,
+    credentials: PeerCredentials,
+    supervised: SupervisorSnapshot,
+    observed: ObservedProcessIdentity,
+): SupervisorSnapshot? {
+    if (
+        expectedRole != BrokerSidecarRole.DONOR ||
+            credentials.uid != supervised.uid ||
+            credentials.gid != supervised.gid
+    ) {
+        return null
+    }
+    val expectedCommand = listOf(SupervisorRecordFields.FIXED_EXECUTABLE, "provision")
+    if (
+        observed.cmdline != expectedCommand ||
+            observed.executablePath != supervised.executablePath ||
+            supervised.executableInode == null ||
+            observed.executableInode != supervised.executableInode
+    ) {
+        return null
+    }
+    return supervised.copy(
+        pid = credentials.pid,
+        startTimeTicks = observed.startTimeTicks,
+        cmdline = observed.cmdline,
+    )
 }
 
 private class TrustedRecordHandle

@@ -151,6 +151,10 @@ provision_rkp_inputs() {
     provision_socket=$rka_state_root/run/sockets/broker.sock
     [ -S "$provision_socket" ] && [ ! -L "$provision_socket" ] || return 1
     [ "$(stat -c '%u:%g:%a' "$provision_socket")" = "$(id -u):$(id -g):600" ] || return 1
+    provision_sidecar=${RKA_SIDECAR:-$rka_state_root/bin/rka-sidecar}
+    [ -f "$provision_sidecar" ] && [ ! -L "$provision_sidecar" ] &&
+        [ -x "$provision_sidecar" ] || return 1
+    [ "$(stat -c '%u:%g:%a' "$provision_sidecar")" = "$(id -u):$(id -g):700" ] || return 1
     [ "$(provision_getprop remote_provisioning.enable_rkpd)" = true ] || return 1
     provision_hostname=$(provision_getprop remote_provisioning.hostname) || return 1
     case $provision_hostname in ''|.*|*..*|*.|*[!a-z0-9.-]*) return 1 ;; esac
@@ -176,7 +180,7 @@ provision_rkp() {
         RKA_PROVISIONING_VERSION="$provision_version" \
         RKA_PROFILE_EPOCH="$provision_epoch" \
         RKA_KEY_COUNT=1 \
-            "${RKA_SIDECAR:-$script_directory/rka-sidecar}" provision
+            "$provision_sidecar" provision
     ) || return 1
     [ "$provision_output" = "role=donor status=READY
 RESULT=PROVISIONED" ] || return 1

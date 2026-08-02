@@ -1398,7 +1398,6 @@ complete_pair() {
     candidate_pair_result="$(remote "$candidate_serial" pair "$transaction_id" CANDIDATE "$donor_pin" "$candidate_endpoint" "$candidate_endpoint" "${donor_certificate_arguments[@]}")" || return 1
     donor_pair_result="$(remote "$donor_serial" pair "$transaction_id" DONOR "$candidate_pin" "$candidate_endpoint" "$donor_endpoint" "${candidate_certificate_arguments[@]}")" || return 1
     remote "$donor_serial" direct-probe "$transaction_id" DONOR >/dev/null || return 1
-    remote "$candidate_serial" direct-probe "$transaction_id" CANDIDATE >/dev/null || return 1
     remote "$donor_serial" verify "$transaction_id" "$donor_boot" >/dev/null || return 1
     remote "$candidate_serial" verify "$transaction_id" "$candidate_boot" >/dev/null || return 1
 }

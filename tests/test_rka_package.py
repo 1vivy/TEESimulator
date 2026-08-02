@@ -148,6 +148,8 @@ class RkaPackageTest(unittest.TestCase):
             complete_pair.index('remote "$candidate_serial" pair'),
             complete_pair.index('remote "$donor_serial" pair'),
         )
+        self.assertEqual(complete_pair.count('direct-probe "$transaction_id" DONOR'), 1)
+        self.assertNotIn('direct-probe "$transaction_id" CANDIDATE', complete_pair)
 
     def test_pair_persists_bounded_step_receipts(self) -> None:
         source = (REPOSITORY_ROOT / "scripts" / "rka-deploy.sh").read_text(encoding="utf-8")

@@ -4,15 +4,13 @@ use std::{
     env,
     fs::{self, File, OpenOptions},
     io::Write,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpStream},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
-use ring::digest::{SHA256, digest};
-use rka_transport::{TlsError, probe_pinned_tls};
-
 use crate::{LifecycleRole, SidecarError};
+use ring::digest::{SHA256, digest};
 
 const MAX_PROFILE_BYTES: u64 = 4096;
 const PROFILE_NAME: &str = "profiles/direct.conf";
@@ -184,7 +182,7 @@ pub fn consume(role: LifecycleRole) -> Result<(), SidecarError> {
     commit_receipt(&receipt_path, receipt.as_bytes())
 }
 
-/// Verifies the exact direct profile over TLS 1.3 and commits a redacted receipt.
+/// Verifies that the donor can reach the candidate listener and commits a redacted receipt.
 pub fn probe() -> Result<String, &'static str> {
     let role = env::var_os("RKA_DIRECT_PROBE_ROLE")
         .ok_or("invalid_profile")
@@ -201,13 +199,7 @@ pub fn probe() -> Result<String, &'static str> {
         return Err("invalid_profile");
     }
     let address = SocketAddr::V4(SocketAddrV4::new(profile.endpoint, 37373));
-    probe_pinned_tls(address, profile.peer_pin, std::time::Duration::from_secs(8)).map_err(
-        |error| match error {
-            TlsError::Deadline | TlsError::Io => "unavailable",
-            TlsError::Version => "version_rejected",
-            _ => "peer_rejected",
-        },
-    )?;
+    probe_tcp(address, std::time::Duration::from_secs(8))?;
     let profile_hash = digest(&SHA256, &raw);
     let pin_hash = digest(&SHA256, &profile.peer_pin);
     let mode = match profile.dial_mode {
@@ -215,16 +207,22 @@ pub fn probe() -> Result<String, &'static str> {
         DialMode::DonorDials => "DONOR_DIALS",
     };
     let receipt = format!(
-        "version=1\nprotocol=TLSv1.3\nprofile_sha256={}\nprofile_epoch={}\npeer_pin_sha256={}\ndial_mode={mode}\ntransport=DIRECT\n",
+        "version=1\nprotocol=TCP_REACHABILITY\nprofile_sha256={}\nprofile_epoch={}\npeer_pin_config_sha256={}\ndial_mode={mode}\ntransport=DIRECT\n",
         hex(profile_hash.as_ref()),
         profile.epoch,
         hex(pin_hash.as_ref()),
     );
     commit_receipt(&receipt_path, receipt.as_bytes()).map_err(|_| "receipt_failed")?;
     Ok(format!(
-        "RESULT=DIRECT protocol=TLSv1.3 profile_sha256={}\n",
+        "RESULT=DIRECT protocol=TCP_REACHABILITY profile_sha256={}\n",
         hex(profile_hash.as_ref())
     ))
+}
+
+fn probe_tcp(address: SocketAddr, budget: std::time::Duration) -> Result<(), &'static str> {
+    let socket = TcpStream::connect_timeout(&address, budget).map_err(|_| "unavailable")?;
+    let _ = socket.shutdown(Shutdown::Both);
+    Ok(())
 }
 
 pub(crate) fn load(role: LifecycleRole) -> Result<(PathBuf, DirectProfile, Vec<u8>), SidecarError> {
@@ -332,4 +330,19 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(encoded, "{byte:02x}");
         encoded
     })
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use std::net::TcpListener;
+
+    use super::probe_tcp;
+
+    #[test]
+    fn tcp_probe_accepts_an_idle_listener_without_requiring_application_data() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind test listener");
+        let address = listener.local_addr().expect("read listener address");
+
+        probe_tcp(address, std::time::Duration::from_secs(1)).expect("probe idle listener");
+    }
 }

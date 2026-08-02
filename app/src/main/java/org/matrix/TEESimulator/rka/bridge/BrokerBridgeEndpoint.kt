@@ -3,6 +3,7 @@ package org.matrix.TEESimulator.rka.bridge
 import java.io.Closeable
 import java.io.InputStream
 import java.io.OutputStream
+import org.matrix.TEESimulator.logging.SystemLogger
 
 interface BridgeTransport : Closeable {
     /** Must be backed by SO_PEERCRED on production Unix-domain transports. */
@@ -57,64 +58,84 @@ private class DefaultBrokerBridgeEndpoint(
     private fun dispatchOne(
         dispatch: (BridgeMessage) -> BridgeMessage
     ): BridgeResult<BridgeMessage> {
-        val authentication = authenticate()
-        if (authentication is BridgeResult.Failure) return failureAndClose(authentication.error)
-        val initial = (authentication as BridgeResult.Success).value
-        val input =
-            try {
-                transport.input()
-            } catch (_: SecurityException) {
-                return failureAndClose(BridgeError.SelinuxDenied)
+        var stage = "AUTHENTICATE"
+        return try {
+            val authentication = authenticate()
+            if (authentication is BridgeResult.Failure) {
+                return failureAndClose(authentication.error)
             }
-        val decoded = BridgeCodec.decode(input, BridgeExchangeRole.DONOR_REQUEST)
-        if (decoded is BridgeResult.Failure) return failureAndClose(decoded.error)
-        val request = (decoded as BridgeResult.Success).value
-        val correlation =
-            try {
-                BridgeProtocol.correlationFor(request, initial.generation)
-            } catch (_: IllegalArgumentException) {
+            val initial = (authentication as BridgeResult.Success).value
+            stage = "INPUT"
+            val input =
+                try {
+                    transport.input()
+                } catch (_: SecurityException) {
+                    return failureAndClose(BridgeError.SelinuxDenied)
+                }
+            stage = "DECODE"
+            val decoded = BridgeCodec.decode(input, BridgeExchangeRole.DONOR_REQUEST)
+            if (decoded is BridgeResult.Failure) return failureAndClose(decoded.error)
+            val request = (decoded as BridgeResult.Success).value
+            stage = "CORRELATION"
+            val correlation =
+                try {
+                    BridgeProtocol.correlationFor(request, initial.generation)
+                } catch (_: IllegalArgumentException) {
+                    request.close()
+                    return failureAndClose(BridgeError.UnexpectedTag)
+                }
+            if (!addCorrelation(correlation)) {
                 request.close()
-                return failureAndClose(BridgeError.UnexpectedTag)
+                return failureAndClose(BridgeError.DuplicateCorrelation)
             }
-        if (!addCorrelation(correlation)) {
-            request.close()
-            return failureAndClose(BridgeError.DuplicateCorrelation)
-        }
-        try {
-            if (!reauthenticate(initial)) {
-                return failureAndClose(BridgeError.PeerIdentityChanged)
-            }
-            val response = dispatch(request)
-            var transferred = false
             try {
+                stage = "REQUEST_REAUTHENTICATE"
                 if (!reauthenticate(initial)) {
                     return failureAndClose(BridgeError.PeerIdentityChanged)
                 }
-                if (!correlation.accepts(response)) {
-                    return failureAndClose(BridgeError.UnknownCorrelation)
-                }
-                val encoded = BridgeCodec.encode(response, BridgeExchangeRole.DONOR_RESPONSE)
+                stage = "DISPATCH"
+                val response = dispatch(request)
+                var transferred = false
                 try {
+                    stage = "RESPONSE_REAUTHENTICATE"
                     if (!reauthenticate(initial)) {
                         return failureAndClose(BridgeError.PeerIdentityChanged)
                     }
-                    transport.output().write(encoded)
-                    transport.output().flush()
-                } catch (_: SecurityException) {
-                    return failureAndClose(BridgeError.SelinuxDenied)
-                } catch (_: Exception) {
-                    return failureAndClose(BridgeError.PeerDied)
+                    stage = "RESPONSE_CORRELATION"
+                    if (!correlation.accepts(response)) {
+                        return failureAndClose(BridgeError.UnknownCorrelation)
+                    }
+                    stage = "ENCODE"
+                    val encoded = BridgeCodec.encode(response, BridgeExchangeRole.DONOR_RESPONSE)
+                    try {
+                        stage = "WRITE_REAUTHENTICATE"
+                        if (!reauthenticate(initial)) {
+                            return failureAndClose(BridgeError.PeerIdentityChanged)
+                        }
+                        stage = "WRITE"
+                        transport.output().write(encoded)
+                        transport.output().flush()
+                    } catch (_: SecurityException) {
+                        return failureAndClose(BridgeError.SelinuxDenied)
+                    } catch (_: Exception) {
+                        return failureAndClose(BridgeError.PeerDied)
+                    } finally {
+                        encoded.fill(0)
+                    }
+                    transferred = true
+                    BridgeResult.Success(response)
                 } finally {
-                    encoded.fill(0)
+                    if (!transferred) response.close()
                 }
-                transferred = true
-                return BridgeResult.Success(response)
             } finally {
-                if (!transferred) response.close()
+                request.close()
+                removeCorrelation(request.requestId)
             }
-        } finally {
-            request.close()
-            removeCorrelation(request.requestId)
+        } catch (error: RuntimeException) {
+            SystemLogger.warning(
+                "RKA bridge envelope failed: stage=$stage type=${error.javaClass.simpleName}"
+            )
+            failureAndClose(BridgeError.Io)
         }
     }
 

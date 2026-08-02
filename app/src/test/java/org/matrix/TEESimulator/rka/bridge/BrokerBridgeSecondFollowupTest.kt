@@ -79,12 +79,7 @@ class BrokerBridgeSecondFollowupTest {
                 "type_transition ksu adb_data_file dir teesimulator_rka_socket_dir sockets\n"
             )
         )
-        assertTrue(
-            policy.contains(
-                "type_transition ksu teesimulator_rka_socket_dir sock_file " +
-                    "teesimulator_rka_socket broker.sock\n"
-            )
-        )
+        assertFalse(policy.contains("type_transition ksu teesimulator_rka_socket_dir sock_file"))
         assertFalse(policy.contains("magisk"))
     }
 

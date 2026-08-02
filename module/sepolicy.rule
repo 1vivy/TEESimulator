@@ -10,7 +10,8 @@ allow crash_dump platform_app process *
 type teesimulator_rka_socket_dir file_type
 type teesimulator_rka_socket file_type
 type_transition ksu adb_data_file dir teesimulator_rka_socket_dir sockets
-type_transition ksu teesimulator_rka_socket_dir sock_file teesimulator_rka_socket broker.sock
 allow ksu ksu unix_stream_socket { create bind connect listen accept read write getattr getopt setopt shutdown }
 allow ksu teesimulator_rka_socket_dir dir { search open read getattr write add_name remove_name setattr }
 allow ksu teesimulator_rka_socket sock_file { create open read write getattr setattr unlink }
+allow ksu unlabeled sock_file relabelfrom
+allow ksu teesimulator_rka_socket sock_file relabelto

@@ -140,6 +140,14 @@ private constructor(
             if (afterChmod is BridgeResult.Failure) {
                 return failAfterBind(binding, directory, node, afterChmod, delete = false)
             }
+            val labeled = node.labelDedicatedContext()
+            if (labeled is BridgeResult.Failure) {
+                return failAfterBind(binding, directory, node, labeled)
+            }
+            val afterLabel = node.verifyStillNamed()
+            if (afterLabel is BridgeResult.Failure) {
+                return failAfterBind(binding, directory, node, afterLabel, delete = false)
+            }
             val context = node.verifyDedicatedContext()
             if (context is BridgeResult.Failure) {
                 return failAfterBind(binding, directory, node, context)

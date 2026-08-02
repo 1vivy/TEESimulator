@@ -188,9 +188,14 @@ class SecureSocketPathTest {
                 return verifyStillNamed()
             }
 
-            override fun verifyDedicatedContext(): BridgeResult<Unit> {
+            override fun labelDedicatedContext(): BridgeResult<Unit> {
                 if (nodeContextError != null) return BridgeResult.Failure(nodeContextError)
                 if (swapPhase == SwapPhase.DURING_CONTEXT_VERIFY) insertCompetitor()
+                return verifyStillNamed()
+            }
+
+            override fun verifyDedicatedContext(): BridgeResult<Unit> {
+                if (nodeContextError != null) return BridgeResult.Failure(nodeContextError)
                 return verifyStillNamed()
             }
 

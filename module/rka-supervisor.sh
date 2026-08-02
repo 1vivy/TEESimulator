@@ -401,7 +401,11 @@ remove_runtime_socket() {
     private_directory "$socket_directory" || return 1
     [ ! -e "$socket_path" ] && [ ! -L "$socket_path" ] && return 0
     [ -S "$socket_path" ] && [ ! -L "$socket_path" ] || return 1
-    [ "$(stat -c '%u:%g:%a' "$socket_path")" = "$(id -u):$(id -g):600" ] || return 1
+    socket_owner=$(id -u):$(id -g)
+    case $(stat -c '%u:%g:%a' "$socket_path") in
+        "$socket_owner:600"|"$socket_owner:700") ;;
+        *) return 1 ;;
+    esac
     rm -f "$socket_path" || return 1
     sync -f "$socket_directory"
 }

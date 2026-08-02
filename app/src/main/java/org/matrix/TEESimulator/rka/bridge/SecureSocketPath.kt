@@ -27,6 +27,8 @@ internal interface BridgeSocketNodeHandle : Closeable {
 
     fun chmodOwnerOnly(): BridgeResult<Unit>
 
+    fun labelDedicatedContext(): BridgeResult<Unit>
+
     fun verifyDedicatedContext(): BridgeResult<Unit>
 
     fun inspect(): BridgeResult<BridgePathIdentity>
@@ -327,6 +329,15 @@ private class AndroidBridgeSocketNodeHandle(
         else BridgeResult.Failure(BridgeError.SocketPathChanged)
     }
 
+    override fun labelDedicatedContext(): BridgeResult<Unit> {
+        if (!heldNodeUnchanged()) return BridgeResult.Failure(BridgeError.SocketPathChanged)
+        if (!setFileContext(nodeAnchor, SOCKET_CONTEXT)) {
+            return BridgeResult.Failure(BridgeError.SocketLabelDenied)
+        }
+        return if (heldNodeUnchanged()) BridgeResult.Success(Unit)
+        else BridgeResult.Failure(BridgeError.SocketPathChanged)
+    }
+
     override fun inspect(): BridgeResult<BridgePathIdentity> {
         if (!heldNodeUnchanged()) return BridgeResult.Failure(BridgeError.SocketPathChanged)
         val stat = inspectStat() ?: return BridgeResult.Failure(BridgeError.SocketPathChanged)
@@ -498,6 +509,14 @@ private fun fileContext(path: Path): String? =
                 .invoke(null, path.toString()) as? String
         }
         .getOrNull()
+
+private fun setFileContext(path: Path, context: String): Boolean =
+    runCatching {
+            Class.forName("android.os.SELinux")
+                .getMethod("setFileContext", String::class.java, String::class.java)
+                .invoke(null, path.toString(), context) as? Boolean
+        }
+        .getOrNull() == true
 
 private fun descriptorPath(descriptor: FileDescriptor): String =
     "/proc/self/fd/${descriptorNumber(descriptor)}"

@@ -389,6 +389,23 @@ class RkaSupervisorTest(unittest.TestCase):
             self.clean(root, state)
             temporary.cleanup()
 
+    def test_stop_removes_owned_half_bound_runtime_socket(self) -> None:
+        temporary, root, state = self.fixture("DONOR")
+        socket_directory = state / "run" / "sockets"
+        socket_directory.mkdir(parents=True)
+        os.chmod(socket_directory, 0o700)
+        socket_path = socket_directory / "broker.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            listener.bind(str(socket_path))
+            os.chmod(socket_path, 0o700)
+            self.assertEqual(self.command(root, state, "stop").returncode, 0)
+            self.assertFalse(socket_path.exists())
+        finally:
+            listener.close()
+            self.clean(root, state)
+            temporary.cleanup()
+
     def test_stop_rejects_an_unexpected_runtime_socket_entry(self) -> None:
         temporary, root, state = self.fixture("CANDIDATE")
         socket_directory = state / "run" / "sockets"

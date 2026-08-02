@@ -48,14 +48,14 @@ class BrokerBridgeFourthFollowupTest {
     }
 
     @Test
-    fun production_uses_type_transitions_and_never_relabels_socket_objects() {
+    fun production_relabels_only_the_anchored_bound_socket() {
         val socketPath = productionSource("SecureSocketPath.kt")
         val policy = String(Files.readAllBytes(repositoryRoot().resolve("module/sepolicy.rule")))
 
-        assertFalse(socketPath.contains("setFileContext"))
+        assertTrue(socketPath.contains("setFileContext(nodeAnchor, SOCKET_CONTEXT)"))
         assertFalse(socketPath.contains("restorecon"))
-        assertFalse(policy.contains("relabelfrom"))
-        assertFalse(policy.contains("relabelto"))
+        assertTrue(policy.contains("allow ksu unlabeled sock_file relabelfrom\n"))
+        assertTrue(policy.contains("allow ksu teesimulator_rka_socket sock_file relabelto\n"))
         for (domain in listOf("ksu")) {
             assertTrue(
                 policy.contains(
@@ -63,11 +63,8 @@ class BrokerBridgeFourthFollowupTest {
                         "teesimulator_rka_socket_dir sockets"
                 )
             )
-            assertTrue(
-                policy.contains(
-                    "type_transition $domain teesimulator_rka_socket_dir sock_file " +
-                        "teesimulator_rka_socket broker.sock"
-                )
+            assertFalse(
+                policy.contains("type_transition $domain teesimulator_rka_socket_dir sock_file")
             )
         }
         assertFalse(policy.contains("magisk"))
@@ -89,19 +86,21 @@ class BrokerBridgeFourthFollowupTest {
                 "allow ksu ksu unix_stream_socket { create bind connect listen accept read write getattr getopt setopt shutdown }",
                 "allow ksu teesimulator_rka_socket_dir dir { search open read getattr write add_name remove_name setattr }",
                 "allow ksu teesimulator_rka_socket sock_file { create open read write getattr setattr unlink }",
+                "allow ksu unlabeled sock_file relabelfrom",
+                "allow ksu teesimulator_rka_socket sock_file relabelto",
             )
         val actual =
             policy
                 .filter {
                     it.startsWith("allow ") &&
                         (it.contains(" unix_stream_socket ") ||
-                            it.contains(" teesimulator_rka_socket"))
+                            it.contains(" teesimulator_rka_socket") ||
+                            it.contains(" unlabeled sock_file relabelfrom"))
                 }
                 .toSet()
 
         assertTrue(actual == expected)
         assertFalse(actual.any { it.contains(" *") })
-        assertFalse(policy.any { it.contains("relabel") })
     }
 
     private fun productionSource(name: String): String =

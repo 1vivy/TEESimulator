@@ -32,7 +32,7 @@ class RkaPackageTest(unittest.TestCase):
         rejects = self.fake_ksu_next_apply(rules)
 
         self.assertEqual(rejects, [])
-        self.assertEqual(len(rules), 10)
+        self.assertEqual(len(rules), 11)
         self.assertFalse(any("magisk" in rule for rule in rules))
         self.assertFalse(any("tcp_socket" in rule or "udp_socket" in rule for rule in rules))
         self.assertIn(
@@ -110,6 +110,7 @@ class RkaPackageTest(unittest.TestCase):
         for digest, rule in rule_by_digest.items():
             expected = (
                 "unix_broker_probe" if "unix_stream_socket" in rule else
+                "broker_socket_probe" if "relabel" in rule else
                 "scratch_transition_probe" if rule.startswith(("type ", "type_transition")) or "teesimulator_rka_socket" in rule else
                 "broker_socket_probe"
             )
@@ -118,6 +119,7 @@ class RkaPackageTest(unittest.TestCase):
         for replacement in (
             ("toybox nc -U -w 2", "toybox stat -c"),
             ("toybox nc -l -U -s \"$scratch_socket\"", "toybox stat -c"),
+            ("toybox ls -Zd \"$socket\"", "toybox stat -c"),
             ("scratch=$state/p/$2", "scratch=$state/policy-probes/$1"),
             ("mv \"$scratch/sockets/create\"", "toybox stat -c"),
             ("rm -f \"$scratch_socket\"", ":"),
@@ -174,7 +176,7 @@ class RkaPackageTest(unittest.TestCase):
             tools.mkdir()
             toybox = tools / "toybox"
             toybox.write_text(
-                "#!/bin/sh\ncommand=$1\nshift\ncase $command in nc) exec /usr/bin/nc \"$@\" ;; stat) exec /usr/bin/stat \"$@\" ;; *) exit 64 ;; esac\n",
+                "#!/bin/sh\ncommand=$1\nshift\ncase $command in nc) exec /usr/bin/nc \"$@\" ;; stat) exec /usr/bin/stat \"$@\" ;; ls) exec /usr/bin/ls \"$@\" ;; *) exit 64 ;; esac\n",
                 encoding="utf-8",
             )
             toybox.chmod(0o755)
@@ -202,6 +204,8 @@ class RkaPackageTest(unittest.TestCase):
                 "PATH": f"{tools}:{os.environ['PATH']}",
                 "RKA_SEPOLICY_PROBE_STATE": str(state),
                 "RKA_SEPOLICY_PROBE_SOCKET": str(broker),
+                "RKA_SEPOLICY_EXPECTED_SOCKET_DIRECTORY_CONTEXT": "?",
+                "RKA_SEPOLICY_EXPECTED_SOCKET_CONTEXT": "?",
             }
             try:
                 for digest in hashes:
@@ -464,6 +468,10 @@ class RkaPackageTest(unittest.TestCase):
             "scratch_socket=$scratch/sockets/broker.sock",
             "[ \"${#scratch_socket}\" -le 107 ]",
             "toybox nc -l -U -s \"$scratch_socket\"",
+            "toybox ls -Zd \"$scratch/sockets\"",
+            "toybox ls -Zd \"$socket\"",
+            "expected_socket_directory_context",
+            "expected_socket_context",
             "toybox nc -U -w 2 \"$scratch_socket\"",
             "rm -f \"$scratch_socket\"",
             "mv \"$scratch/sockets/create\" \"$scratch/sockets/renamed\"",
@@ -490,9 +498,9 @@ class RkaPackageTest(unittest.TestCase):
             if action.startswith('scratch_transition_probe "$1" '):
                 scratch_keys.append(action.removesuffix(" ;;").rsplit(" ", 1)[1])
         self.assertEqual(set(dispatch), set(rule_by_digest))
-        self.assertEqual(len(scratch_keys), 6)
+        self.assertEqual(len(scratch_keys), 5)
         self.assertEqual(len(scratch_keys), len(set(scratch_keys)))
-        self.assertEqual(set(scratch_keys), {f"t{index:02d}" for index in range(1, 7)})
+        self.assertEqual(set(scratch_keys), {f"t{index:02d}" for index in range(1, 6)})
 
 
 if __name__ == "__main__":

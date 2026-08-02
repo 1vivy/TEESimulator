@@ -780,7 +780,7 @@ deploy)
     set_phase SNAPSHOTS_READY
     if [ "$metadata_bridge" = true ]; then prepare_ksu_metadata || exit 1; fi
     if [ -e "$pending" ]; then rm -rf "$pending"; fi
-    if ! ksud module install "$archive"; then exit 1; fi
+    if ! ksud module install "$archive" > "$txn/ksu-install.stdout" 2> "$txn/ksu-install.stderr"; then exit 1; fi
     [ -d "$pending" ] && [ ! -L "$pending" ] || exit 1
     if [ -f "$state/manager-authorizations/$tx" ]; then
         for path in /data/adb/modules /data/adb/modules_update "$active" "$pending"; do

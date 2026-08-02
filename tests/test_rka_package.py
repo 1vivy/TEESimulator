@@ -58,6 +58,15 @@ class RkaPackageTest(unittest.TestCase):
             f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  out/{archive.name}\n",
         )
 
+    def test_ksu_install_output_cannot_retain_the_adb_transport(self) -> None:
+        deploy = (REPOSITORY_ROOT / "scripts" / "rka-deploy.sh").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'ksud module install "$archive" > "$txn/ksu-install.stdout" '
+            '2> "$txn/ksu-install.stderr"',
+            deploy,
+        )
+
     def test_sepolicy_probe_manifest_is_complete_bounded_and_live(self) -> None:
         rules = [
             line

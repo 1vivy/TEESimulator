@@ -18,6 +18,7 @@ zip_path=
 network=
 evidence=
 no_reboot=false
+donor_manager_mode=compatible_manager
 candidate_manager_mode=compatible_manager
 while (( $# > 0 )); do
     case "$1" in
@@ -25,6 +26,7 @@ while (( $# > 0 )); do
         --zip) zip_path="${2-}"; shift 2 ;;
         --network) network="${2-}"; shift 2 ;;
         --evidence) evidence="${2-}"; shift 2 ;;
+        --donor-manager-mode) donor_manager_mode="${2-}"; shift 2 ;;
         --candidate-manager-mode) candidate_manager_mode="${2-}"; shift 2 ;;
         --no-reboot) no_reboot=true; shift ;;
         *) fail ARGUMENT_INVALID ;;
@@ -35,7 +37,10 @@ done
 [[ -n "$zip_path" && -f "$zip_path" && ! -L "$zip_path" && -n "$evidence" ]] ||
     fail ARGUMENT_INVALID
 [[ "$evidence" = /* && ! -L "$evidence" ]] || fail ARGUMENT_INVALID
-case "$candidate_manager_mode" in compatible_manager|authorized_headless) ;; *) fail ARGUMENT_INVALID ;; esac
+case "$donor_manager_mode:$candidate_manager_mode" in
+    compatible_manager:compatible_manager|compatible_manager:authorized_headless|authorized_headless:compatible_manager|authorized_headless:authorized_headless) ;;
+    *) fail ARGUMENT_INVALID ;;
+esac
 
 project_root="$(cd -- "${BASH_SOURCE[0]%/*}/.." && pwd -P)"
 # shellcheck source=scripts/rka-adb-root.sh
@@ -623,7 +628,7 @@ READ_ONLY_PROBE_TRANSFER)
 manager-probe)
     tx=$1 probe=$2 expected_probe_sha=$3 expected_boot=$4 role=$5 authorization_mode=$6
     case "$tx$expected_probe_sha" in *[!A-Za-z0-9._-]*) exit 2 ;; esac
-    case "$role:$authorization_mode" in DONOR:compatible_manager|CANDIDATE:compatible_manager|CANDIDATE:authorized_headless) ;; *) exit 2 ;; esac
+    case "$role:$authorization_mode" in DONOR:compatible_manager|DONOR:authorized_headless|CANDIDATE:compatible_manager|CANDIDATE:authorized_headless) ;; *) exit 2 ;; esac
     [ "$(printf %s "$expected_probe_sha" | wc -c)" -eq 64 ] || exit 2
     expected_probe="$state/probes/$tx.$role.manager-appid"
     [ "$probe" = "$expected_probe" ] && [ -f "$probe" ] && [ ! -L "$probe" ] || exit 1
@@ -665,9 +670,9 @@ EOF
         [ "$activity" = "$next_activity" ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_ACTIVITY\n"; exit; }
         printf '%s\n' "$package_dump" | grep -Fq 'versionName=v3.3.0' || { printf "RESULT=INCOMPATIBLE reason=MANAGER_VERSION\n"; exit; }
         printf '%s\n' "$package_dump" | grep -Eq 'versionCode=33214([[:space:]]|$)' || { printf "RESULT=INCOMPATIBLE reason=MANAGER_CODE\n"; exit; }
-        surface=KSU_NEXT_MANAGER
+        [ "$authorization_mode" != compatible_manager ] || surface=KSU_NEXT_MANAGER
     else
-        [ "$role:$authorization_mode" = CANDIDATE:authorized_headless ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_AUTHORIZATION_MODE\n"; exit; }
+        [ "$authorization_mode" = authorized_headless ] || { printf "RESULT=INCOMPATIBLE reason=MANAGER_AUTHORIZATION_MODE\n"; exit; }
     fi
     [ "$(sha256sum /proc/sys/kernel/random/boot_id | awk '{print $1}')" = "$expected_boot" ] || { printf "RESULT=INCOMPATIBLE reason=BOOT_ID_DRIFT\n"; exit; }
     receipt="$state/manager-authorizations/$tx"
@@ -1306,7 +1311,7 @@ if [[ "$donor_ksu_profile" == "$KSU_NEXT_PROFILE" || "$candidate_ksu_profile" ==
     unzip -p -- "$zip_path" rka-sidecar > "$local_probe"
     chmod 700 "$local_probe"
     [[ "$(sha256sum -- "$local_probe" | awk '{print $1}')" == "$probe_sha" ]] || fail ARCHIVE_INVALID
-    authorize_next_manager "$donor_serial" DONOR "$donor_boot" "$donor_ksu_profile" compatible_manager
+    authorize_next_manager "$donor_serial" DONOR "$donor_boot" "$donor_ksu_profile" "$donor_manager_mode"
     authorize_next_manager "$candidate_serial" CANDIDATE "$candidate_boot" "$candidate_ksu_profile" "$candidate_manager_mode"
     rm -f -- "$local_probe"
     trap - EXIT

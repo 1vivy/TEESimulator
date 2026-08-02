@@ -167,6 +167,20 @@ class RkaPackageTest(unittest.TestCase):
         self.assertIn('set_pair_phase "POLICY_PROBE_${probe_index}_FAILED"', pair)
         self.assertEqual(pair.count("set_pair_phase COMPLETE"), 2)
 
+    def test_donor_can_use_exact_manager_authorization_without_a_live_webview(self) -> None:
+        source = (REPOSITORY_ROOT / "scripts" / "rka-deploy.sh").read_text(encoding="utf-8")
+
+        self.assertIn('--donor-manager-mode) donor_manager_mode="${2-}"', source)
+        self.assertIn("DONOR:authorized_headless", source)
+        self.assertIn(
+            'authorize_next_manager "$donor_serial" DONOR "$donor_boot" "$donor_ksu_profile" "$donor_manager_mode"',
+            source,
+        )
+        self.assertIn(
+            '[ "$authorization_mode" != compatible_manager ] || surface=KSU_NEXT_MANAGER',
+            source,
+        )
+
     def test_deploy_sanitizes_stopped_runtime_before_initialization(self) -> None:
         source = (REPOSITORY_ROOT / "scripts" / "rka-deploy.sh").read_text(encoding="utf-8")
         deploy = source.split("deploy)\n", 1)[1].split("\npair)", 1)[0]

@@ -13,8 +13,8 @@ pub enum ConfigError {
     /// A value is empty or exceeds its fixed boundary.
     #[error("provisioning configuration value is outside its fixed boundary")]
     InvalidValue,
-    /// A URL is not a canonical HTTPS root base.
-    #[error("provisioning base URL is not a canonical HTTPS root")]
+    /// A URL is not a canonical HTTPS provisioning base.
+    #[error("provisioning base URL is not canonical HTTPS")]
     InvalidBaseUrl,
     /// A fetch response is not the exact bounded CBOR shape.
     #[error("invalid provisioning response")]
@@ -24,23 +24,31 @@ pub enum ConfigError {
     ChallengeSize,
 }
 
-/// Canonical HTTPS origin with no credentials, path, query, or fragment.
+/// Canonical HTTPS provisioning base with no credentials, query, or fragment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BaseUrl(String);
 
 impl BaseUrl {
-    /// Parses a strict canonical HTTPS root base.
+    /// Parses a strict canonical HTTPS base with an optional absolute path.
     pub fn parse(value: &str) -> Result<Self, ConfigError> {
-        let authority = value
+        let remainder = value
             .strip_prefix("https://")
             .ok_or(ConfigError::InvalidBaseUrl)?;
+        if value.len() > MAX_TEXT_BYTES {
+            return Err(ConfigError::InvalidBaseUrl);
+        }
+        let (authority, path) = remainder
+            .split_once('/')
+            .map_or((remainder, None), |(authority, path)| {
+                (authority, Some(path))
+            });
         if authority.is_empty()
-            || authority.len() > MAX_TEXT_BYTES
             || authority.bytes().any(|byte| {
                 byte.is_ascii_whitespace()
-                    || matches!(byte, b'/' | b'?' | b'#' | b'@' | b'%' | b'\\')
+                    || matches!(byte, b'?' | b'#' | b'@' | b'%' | b'\\')
                     || byte.is_ascii_uppercase()
             })
+            || !valid_path(path)
         {
             return Err(ConfigError::InvalidBaseUrl);
         }
@@ -58,6 +66,22 @@ impl BaseUrl {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+fn valid_path(path: Option<&str>) -> bool {
+    let Some(path) = path else {
+        return true;
+    };
+    !path.is_empty()
+        && !path.ends_with('/')
+        && path.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+                })
+        })
 }
 
 impl fmt::Display for BaseUrl {
@@ -298,15 +322,20 @@ mod tests {
     }
 
     #[test]
-    fn base_url_is_strict_https_root() {
+    fn base_url_is_strict_https_provisioning_base() {
         assert!(BaseUrl::parse("https://rkp.example:8443").is_ok());
+        assert!(BaseUrl::parse("https://rkp.example/v1").is_ok());
+        assert!(BaseUrl::parse("https://rkp.example/service/v1-beta").is_ok());
         for invalid in [
             "http://rkp.example",
-            "https://rkp.example/path",
             "https://rkp.example?x=1",
             "https://rkp.example#x",
             "https://RKP.example",
             "https://rkp.example/",
+            "https://rkp.example//v1",
+            "https://rkp.example/./v1",
+            "https://rkp.example/../v1",
+            "https://rkp.example/v1/",
             "https://rkp%2eexample",
         ] {
             assert!(BaseUrl::parse(invalid).is_err(), "{invalid}");

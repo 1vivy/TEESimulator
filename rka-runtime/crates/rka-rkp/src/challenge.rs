@@ -142,7 +142,7 @@ pub struct SignedCertificateResponse {
 }
 
 impl SignedCertificateResponse {
-    /// Returns the exact request identifier placed in the sign URL.
+    /// Returns the durable local request identifier bound to this upload.
     pub fn request_id(&self) -> &str {
         &self.request_id
     }
@@ -157,7 +157,7 @@ impl SignedCertificateResponse {
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[non_exhaustive]
 pub enum ClientError {
-    /// The configured base was not a canonical HTTPS root.
+    /// The configured base was not canonical HTTPS.
     #[error("invalid provisioning base URL")]
     InvalidBaseUrl,
     /// The Task-18 body crossed the fixed boundary.
@@ -294,7 +294,7 @@ impl<T: HttpTransport, S: EffectiveBaseStore, E: EntropySource, J: AttemptJourna
             return Err(ClientError::RequestIdCollision);
         }
         let url = format!(
-            "{}/:signCertificates?challenge={}&request_id={request_id}",
+            "{}/:signCertificates?challenge={}",
             self.effective_base,
             base64_url(challenge)
         );
@@ -361,7 +361,7 @@ mod tests {
             vec![
                 HttpResponse::ok(fetch_response(
                     &[0xfb; 16],
-                    Some("https://override.example"),
+                    Some("https://override.example/v2"),
                 )),
                 HttpResponse::ok(fetch_response(&[0xfb; 16], None)),
                 HttpResponse::ok(Vec::new()),
@@ -369,7 +369,7 @@ mod tests {
             Rc::clone(&order),
         );
         let mut client = ProvisioningHttpClient::new(
-            BaseUrl::parse("https://snapshot.example").unwrap(),
+            BaseUrl::parse("https://snapshot.example/v1").unwrap(),
             (
                 transport,
                 MemoryStore::default(),
@@ -391,7 +391,7 @@ mod tests {
         let [fetch_one, fetch_two, sign] = calls else {
             panic!("expected two fetches and one signing upload");
         };
-        assert_eq!(fetch_one.url, "https://snapshot.example/:fetchEekChain");
+        assert_eq!(fetch_one.url, "https://snapshot.example/v1/:fetchEekChain");
         assert_eq!(
             fetch_one.headers,
             vec![
@@ -401,13 +401,13 @@ mod tests {
         );
         assert_eq!(
             sign.url,
-            "https://override.example/:signCertificates?challenge=-_v7-_v7-_v7-_v7-_v7-w&request_id=00000000-0000-4000-8000-000000000000"
+            "https://override.example/v2/:signCertificates?challenge=-_v7-_v7-_v7-_v7-_v7-w"
         );
-        assert_eq!(fetch_two.url, "https://snapshot.example/:fetchEekChain");
+        assert_eq!(fetch_two.url, "https://snapshot.example/v1/:fetchEekChain");
         assert_eq!(sign.body, vec![1, 2, 3]);
         assert_eq!(
             client.store().loaded().unwrap().as_str(),
-            "https://override.example"
+            "https://override.example/v2"
         );
         assert_eq!(&*order.borrow(), &["journal", "upload"]);
     }
@@ -431,15 +431,24 @@ mod tests {
         );
         let challenge = [3; 16];
 
-        client.sign(&[], &challenge).unwrap();
-        client.sign(&[], &challenge).unwrap();
+        let first_id = client
+            .sign_with_request_id(&[], &challenge)
+            .unwrap()
+            .request_id()
+            .to_owned();
+        let second_id = client
+            .sign_with_request_id(&[], &challenge)
+            .unwrap()
+            .request_id()
+            .to_owned();
         let error = client.sign(&[], &challenge).unwrap_err();
 
         assert_eq!(error, ClientError::RequestIdCollision);
+        assert_ne!(first_id, second_id);
         let [first, second] = client.transport().calls() else {
             panic!("expected exactly two uploads");
         };
-        assert_ne!(first.url, second.url);
+        assert_eq!(first.url, second.url);
     }
 
     #[test]

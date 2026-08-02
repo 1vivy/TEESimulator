@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import socket
 from subprocess import CompletedProcess, run
 from tempfile import TemporaryDirectory
 from time import monotonic, sleep
@@ -268,6 +269,39 @@ class RkaSupervisorTest(unittest.TestCase):
             self.assertEqual(self.command(root, state, "stop").returncode, 0)
             self.assertFalse(identity.exists())
         finally:
+            self.clean(root, state)
+            temporary.cleanup()
+
+    def test_stop_removes_only_the_owned_runtime_socket(self) -> None:
+        temporary, root, state = self.fixture("CANDIDATE")
+        socket_directory = state / "run" / "sockets"
+        socket_directory.mkdir(parents=True)
+        os.chmod(socket_directory, 0o700)
+        socket_path = socket_directory / "broker.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            listener.bind(str(socket_path))
+            os.chmod(socket_path, 0o600)
+            self.assertEqual(self.command(root, state, "stop").returncode, 0)
+            self.assertFalse(socket_path.exists())
+        finally:
+            listener.close()
+            self.clean(root, state)
+            temporary.cleanup()
+
+    def test_stop_rejects_an_unexpected_runtime_socket_entry(self) -> None:
+        temporary, root, state = self.fixture("CANDIDATE")
+        socket_directory = state / "run" / "sockets"
+        socket_directory.mkdir(parents=True)
+        os.chmod(socket_directory, 0o700)
+        socket_path = socket_directory / "broker.sock"
+        socket_path.write_text("not a socket\n", encoding="ascii")
+        os.chmod(socket_path, 0o600)
+        try:
+            self.assertNotEqual(self.command(root, state, "stop").returncode, 0)
+            self.assertTrue(socket_path.is_file())
+        finally:
+            socket_path.unlink()
             self.clean(root, state)
             temporary.cleanup()
 

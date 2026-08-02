@@ -372,6 +372,19 @@ stop() {
         fi
         rm -f "$record" "$pids/$name.identity"
     done
+    remove_runtime_socket
+}
+
+remove_runtime_socket() {
+    socket_directory=$run/sockets
+    socket_path=$socket_directory/broker.sock
+    [ ! -e "$socket_directory" ] && [ ! -L "$socket_directory" ] && return 0
+    private_directory "$socket_directory" || return 1
+    [ ! -e "$socket_path" ] && [ ! -L "$socket_path" ] && return 0
+    [ -S "$socket_path" ] && [ ! -L "$socket_path" ] || return 1
+    [ "$(stat -c '%u:%g:%a' "$socket_path")" = "$(id -u):$(id -g):600" ] || return 1
+    rm -f "$socket_path" || return 1
+    sync -f "$socket_directory"
 }
 
 status() {

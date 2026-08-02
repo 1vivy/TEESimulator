@@ -14,4 +14,7 @@ allow ksu ksu unix_stream_socket { create bind connect listen accept read write 
 allow ksu teesimulator_rka_socket_dir dir { search open read getattr write add_name remove_name setattr }
 allow ksu teesimulator_rka_socket sock_file { create open read write getattr setattr unlink }
 allow ksu unlabeled sock_file relabelfrom
+allow ksu adb_data_file sock_file relabelfrom
 allow ksu teesimulator_rka_socket sock_file relabelto
+allow ksu adb_data_file dir relabelfrom
+allow ksu teesimulator_rka_socket_dir dir relabelto

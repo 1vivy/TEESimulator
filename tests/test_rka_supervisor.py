@@ -95,6 +95,8 @@ class RkaSupervisorTest(unittest.TestCase):
             "RKA_NATIVE_SUPERVISOR": str(root / "fake-supervisor.sh"),
             "RKA_CHILD_LOG": str(root / "children.log"),
             "RKA_BACKOFF_BASE": "0",
+            "RKA_SOCKET_DIRECTORY_CONTEXT": "?",
+            "RKA_SOCKET_CONTEXT": "?",
         }
         if environment is not None:
             child_environment = child_environment | environment
@@ -403,6 +405,41 @@ class RkaSupervisorTest(unittest.TestCase):
             self.assertFalse(socket_path.exists())
         finally:
             listener.close()
+            self.clean(root, state)
+            temporary.cleanup()
+
+    def test_stop_removes_owned_runtime_socket_tombstone(self) -> None:
+        temporary, root, state = self.fixture("DONOR")
+        socket_directory = state / "run" / "sockets"
+        socket_directory.mkdir(parents=True)
+        os.chmod(socket_directory, 0o700)
+        socket_path = socket_directory / f".broker.sock.delete-{'a' * 32}"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            listener.bind(str(socket_path))
+            os.chmod(socket_path, 0o600)
+            self.assertEqual(self.command(root, state, "stop").returncode, 0)
+            self.assertFalse(socket_path.exists())
+        finally:
+            listener.close()
+            self.clean(root, state)
+            temporary.cleanup()
+
+    def test_stop_rejects_malformed_runtime_socket_tombstone(self) -> None:
+        temporary, root, state = self.fixture("DONOR")
+        socket_directory = state / "run" / "sockets"
+        socket_directory.mkdir(parents=True)
+        os.chmod(socket_directory, 0o700)
+        socket_path = socket_directory / ".broker.sock.delete-not-a-token"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            listener.bind(str(socket_path))
+            os.chmod(socket_path, 0o600)
+            self.assertNotEqual(self.command(root, state, "stop").returncode, 0)
+            self.assertTrue(socket_path.is_socket())
+        finally:
+            listener.close()
+            socket_path.unlink()
             self.clean(root, state)
             temporary.cleanup()
 

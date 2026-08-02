@@ -55,7 +55,10 @@ class BrokerBridgeFourthFollowupTest {
         assertTrue(socketPath.contains("setFileContext(nodeAnchor, SOCKET_CONTEXT)"))
         assertFalse(socketPath.contains("restorecon"))
         assertTrue(policy.contains("allow ksu unlabeled sock_file relabelfrom\n"))
+        assertTrue(policy.contains("allow ksu adb_data_file sock_file relabelfrom\n"))
         assertTrue(policy.contains("allow ksu teesimulator_rka_socket sock_file relabelto\n"))
+        assertTrue(policy.contains("allow ksu adb_data_file dir relabelfrom\n"))
+        assertTrue(policy.contains("allow ksu teesimulator_rka_socket_dir dir relabelto\n"))
         for (domain in listOf("ksu")) {
             assertTrue(
                 policy.contains(
@@ -87,7 +90,10 @@ class BrokerBridgeFourthFollowupTest {
                 "allow ksu teesimulator_rka_socket_dir dir { search open read getattr write add_name remove_name setattr }",
                 "allow ksu teesimulator_rka_socket sock_file { create open read write getattr setattr unlink }",
                 "allow ksu unlabeled sock_file relabelfrom",
+                "allow ksu adb_data_file sock_file relabelfrom",
                 "allow ksu teesimulator_rka_socket sock_file relabelto",
+                "allow ksu adb_data_file dir relabelfrom",
+                "allow ksu teesimulator_rka_socket_dir dir relabelto",
             )
         val actual =
             policy
@@ -95,7 +101,7 @@ class BrokerBridgeFourthFollowupTest {
                     it.startsWith("allow ") &&
                         (it.contains(" unix_stream_socket ") ||
                             it.contains(" teesimulator_rka_socket") ||
-                            it.contains(" unlabeled sock_file relabelfrom"))
+                            it.contains(" relabel"))
                 }
                 .toSet()
 

@@ -82,6 +82,9 @@ case ${1-} in
     790119fc0382f4845b00c6e21562a837828d75295904d758905afa09a1f4639d) scratch_transition_probe "$1" t04 ;;
     ca99c9a626c3af17175bcd6efff7054d26bcb50ca20c69066ad3af8809da0edd) scratch_transition_probe "$1" t05 ;;
     46b25506b3da57a6690c1139d6659f603ccf27a0fe55e85b75e406e345bc388b) broker_socket_probe ;;
+    2bcaabc0e2150fd6eff30d8350159a58151bc3782b7a355215a01ab00aa0d2ed) broker_socket_probe ;;
     80ca545ea82989198347f3af97825176e9da094e9155c39903573b877ee7712c) broker_socket_probe ;;
+    f9719dfb26c6df7a5cda397cc7d00806c02bbd6f316612fa496e1b2abf361373) broker_socket_probe ;;
+    4be92fab846726df6049c7e779886e03de0bda3247477a94848729d2a52846a5) broker_socket_probe ;;
     *) exit 64 ;;
 esac

@@ -15,6 +15,8 @@ sidecar=${RKA_SIDECAR:-${0%/*}/rka-sidecar}
 native_supervisor=${RKA_NATIVE_SUPERVISOR:-${0%/*}/supervisor}
 backoff=${RKA_BACKOFF_BASE:-1}
 stable_seconds=${RKA_STABLE_SECONDS:-30}
+socket_directory_context=${RKA_SOCKET_DIRECTORY_CONTEXT:-u:object_r:teesimulator_rka_socket_dir:s0}
+socket_context=${RKA_SOCKET_CONTEXT:-u:object_r:teesimulator_rka_socket:s0}
 internal_name=
 internal_role=
 
@@ -54,6 +56,29 @@ identity_contract_required() {
 
 private_directory() {
     [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%u:%a' "$1")" = "$(id -u):700" ]
+}
+
+path_context() {
+    ls -Zd "$1" 2>/dev/null | awk '{print $1}'
+}
+
+ensure_socket_directory_context() {
+    observed_context=$(path_context "$1") || return 1
+    [ "$observed_context" = "$socket_directory_context" ] && return 0
+    [ "$observed_context" = u:object_r:adb_data_file:s0 ] || return 1
+    toybox chcon "$socket_directory_context" "$1" || return 1
+    [ "$(path_context "$1")" = "$socket_directory_context" ]
+}
+
+ensure_socket_context() {
+    observed_context=$(path_context "$1") || return 1
+    [ "$observed_context" = "$socket_context" ] && return 0
+    case $observed_context in
+        u:object_r:unlabeled:s0|u:object_r:adb_data_file:s0) ;;
+        *) return 1 ;;
+    esac
+    toybox chcon "$socket_context" "$1" || return 1
+    [ "$(path_context "$1")" = "$socket_context" ]
 }
 
 materialize_sidecar() {
@@ -327,6 +352,11 @@ start_sidecar() {
 }
 
 start() {
+    if ! record_live "$pids/legacy.pid" &&
+        ! record_live "$pids/broker.pid" &&
+        ! record_live "$pids/sidecar.pid"; then
+        remove_runtime_socket || return 1
+    fi
     role=$($control --root "$root" --state-root "$state" boot-decision) || return 1
     case $role in
         DISABLED) return 1 ;;
@@ -399,15 +429,35 @@ remove_runtime_socket() {
     socket_path=$socket_directory/broker.sock
     [ ! -e "$socket_directory" ] && [ ! -L "$socket_directory" ] && return 0
     private_directory "$socket_directory" || return 1
-    [ ! -e "$socket_path" ] && [ ! -L "$socket_path" ] && return 0
+    ensure_socket_directory_context "$socket_directory" || return 1
+    if [ -e "$socket_path" ] || [ -L "$socket_path" ]; then
+        remove_owned_runtime_socket "$socket_path" || return 1
+    fi
+    runtime_tombstones=$(find "$socket_directory" -mindepth 1 -maxdepth 1 -name '.broker.sock.delete-*' -print) || return 1
+    while IFS= read -r runtime_tombstone; do
+        [ -n "$runtime_tombstone" ] || continue
+        tombstone_name=${runtime_tombstone##*/}
+        tombstone_token=${tombstone_name#.broker.sock.delete-}
+        [ "$tombstone_name" = ".broker.sock.delete-$tombstone_token" ] || return 1
+        [ "$(printf %s "$tombstone_token" | wc -c)" -eq 32 ] || return 1
+        case $tombstone_token in *[!0-9a-f]*) return 1 ;; esac
+        remove_owned_runtime_socket "$runtime_tombstone" || return 1
+    done <<EOF
+$runtime_tombstones
+EOF
+    sync -f "$socket_directory"
+}
+
+remove_owned_runtime_socket() {
+    socket_path=$1
     [ -S "$socket_path" ] && [ ! -L "$socket_path" ] || return 1
     socket_owner=$(id -u):$(id -g)
     case $(stat -c '%u:%g:%a' "$socket_path") in
         "$socket_owner:600"|"$socket_owner:700") ;;
         *) return 1 ;;
     esac
+    ensure_socket_context "$socket_path" || return 1
     rm -f "$socket_path" || return 1
-    sync -f "$socket_directory"
 }
 
 status() {

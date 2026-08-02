@@ -878,6 +878,9 @@ deploy)
     fi
     mkdir -p "$active"
     nsenter -t 1 -m -- mount --bind "$pending" "$active"
+    nsenter -t 1 -m -- "$active/rka-supervisor.sh" stop
+    touch "$txn/runtime.sanitized"
+    sync "$txn/runtime.sanitized"
     nsenter -t 1 -m -- "$active/rka-control.sh" set-role "$role"
     nsenter -t 1 -m -- "$active/rka-control.sh" initialize
     mkdir -p "$state/secrets" "$state/trust" "$state/profiles"

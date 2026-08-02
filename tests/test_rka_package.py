@@ -32,7 +32,7 @@ class RkaPackageTest(unittest.TestCase):
         rejects = self.fake_ksu_next_apply(rules)
 
         self.assertEqual(rejects, [])
-        self.assertEqual(len(rules), 11)
+        self.assertEqual(len(rules), 14)
         self.assertFalse(any("magisk" in rule for rule in rules))
         self.assertFalse(any("tcp_socket" in rule or "udp_socket" in rule for rule in rules))
         self.assertIn(
@@ -162,6 +162,21 @@ class RkaPackageTest(unittest.TestCase):
         self.assertEqual(offsets, sorted(offsets))
         self.assertIn('set_pair_phase "POLICY_PROBE_${probe_index}_FAILED"', pair)
         self.assertEqual(pair.count("set_pair_phase COMPLETE"), 2)
+
+    def test_deploy_sanitizes_stopped_runtime_before_initialization(self) -> None:
+        source = (REPOSITORY_ROOT / "scripts" / "rka-deploy.sh").read_text(encoding="utf-8")
+        deploy = source.split("deploy)\n", 1)[1].split("\npair)", 1)[0]
+
+        mounted = deploy.index('nsenter -t 1 -m -- mount --bind "$pending" "$active"')
+        sanitized = deploy.index(
+            'nsenter -t 1 -m -- "$active/rka-supervisor.sh" stop', mounted
+        )
+        initialized = deploy.index(
+            'nsenter -t 1 -m -- "$active/rka-control.sh" initialize', sanitized
+        )
+        self.assertLess(mounted, sanitized)
+        self.assertLess(sanitized, initialized)
+        self.assertIn('touch "$txn/runtime.sanitized"', deploy)
 
     def test_sepolicy_probe_helper_executes_all_manifest_hashes(self) -> None:
         hashes = [line.split("|", 1)[0] for line in SEPOLICY_PROBES.read_text(encoding="ascii").splitlines()]

@@ -134,50 +134,63 @@ object DonorProvisioningRuntime {
         }
 
     private fun provision(request: BridgeMessage.PublicKeyRequest): BridgeMessage {
-        val challenge =
-            AttestationChallenge.parse(request.challenge.copyBytes()) as? BrokerOutcome.Success
-                ?: return failure(request.requestId)
-        activeRequestId = null
-        activeCancellation = null
-        val deadline = BrokerDeadline.at(BridgeLimits.DEADLINE_MILLIS)
-        val cancellation = BrokerCancellation.active()
-        activeCancellation = cancellation
-        val generator = DurableIrpcKeyBatchGenerator(client, journal)
-        val count =
-            RkpKeyCount.parse(request.keyCount) as? BrokerOutcome.Success
-                ?: return failure(request.requestId)
-        val generated =
-            generator.generate(count.value, deadline, cancellation) as? BrokerOutcome.Success
-                ?: return failure(request.requestId)
-        val batch = generated.value
-        val csr =
-            client.generateCertificateRequest(batch, challenge.value, deadline, cancellation)
-                as? BrokerOutcome.Success
-                ?: return failure(request.requestId).also { journal.quarantineCurrent() }
-        val record = requireNotNull(journal.recover())
-        runCatching {
-                csrJournal.record(record.batchId, csr.value.copyBytes())
-                journal.transition(record, RkpJournalState.CSR_PREPARED)
-            }
-            .getOrElse {
-                journal.quarantineCurrent()
-                return failure(request.requestId)
-            }
-        activeRequestId = request.requestId
-        return BridgeMessage.PublicKeyResponse(
-            request.requestId,
-            PublicBytes.of(csr.value.copyBytes(), BridgeLimits.MAX_FRAME_BYTES),
-            BrokerBatchId.of(record.batchId.copyBytes()),
-            Hash32.of(record.identity.hash()),
-            record.entries.map { entry ->
-                BrokerKeyMetadata(
-                    entry.order,
-                    Hash32.of(entry.handle.copyBytes()),
-                    Hash32.of(entry.copyPublicHash()),
-                    Hash32.of(entry.copySpkiHash()),
-                )
-            },
-        )
+        var stage = "CHALLENGE"
+        return try {
+            val challenge =
+                AttestationChallenge.parse(request.challenge.copyBytes()) as? BrokerOutcome.Success
+                    ?: return failure(request.requestId)
+            activeRequestId = null
+            activeCancellation = null
+            val deadline = BrokerDeadline.at(BridgeLimits.DEADLINE_MILLIS)
+            val cancellation = BrokerCancellation.active()
+            activeCancellation = cancellation
+            val generator = DurableIrpcKeyBatchGenerator(client, journal)
+            stage = "KEY_COUNT"
+            val count =
+                RkpKeyCount.parse(request.keyCount) as? BrokerOutcome.Success
+                    ?: return failure(request.requestId)
+            val generated =
+                generator.generate(count.value, deadline, cancellation) { stage = it }
+                    as? BrokerOutcome.Success ?: return failure(request.requestId)
+            val batch = generated.value
+            stage = "IRPC_CSR"
+            val csr =
+                client.generateCertificateRequest(batch, challenge.value, deadline, cancellation)
+                    as? BrokerOutcome.Success
+                    ?: return failure(request.requestId).also { journal.quarantineCurrent() }
+            stage = "JOURNAL_RECOVER"
+            val record = requireNotNull(journal.recover())
+            stage = "CSR_PERSIST"
+            runCatching {
+                    csrJournal.record(record.batchId, csr.value.copyBytes())
+                    journal.transition(record, RkpJournalState.CSR_PREPARED)
+                }
+                .getOrElse {
+                    journal.quarantineCurrent()
+                    return failure(request.requestId)
+                }
+            activeRequestId = request.requestId
+            stage = "RESPONSE"
+            BridgeMessage.PublicKeyResponse(
+                request.requestId,
+                PublicBytes.of(csr.value.copyBytes(), BridgeLimits.MAX_FRAME_BYTES),
+                BrokerBatchId.of(record.batchId.copyBytes()),
+                Hash32.of(record.identity.hash()),
+                record.entries.map { entry ->
+                    BrokerKeyMetadata(
+                        entry.order,
+                        Hash32.of(entry.handle.copyBytes()),
+                        Hash32.of(entry.copyPublicHash()),
+                        Hash32.of(entry.copySpkiHash()),
+                    )
+                },
+            )
+        } catch (error: RuntimeException) {
+            SystemLogger.warning(
+                "RKA donor provisioning failed: stage=$stage type=${error.javaClass.simpleName}"
+            )
+            failure(request.requestId)
+        }
     }
 
     private fun certify(request: BridgeMessage.CertificationRequest): BridgeMessage {

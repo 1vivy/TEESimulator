@@ -141,7 +141,7 @@ internal object AndroidBridgeSocketPathOperations : BridgeSocketPathOperations {
     private val PROTECTED_COMPONENTS = setOf("teesimulator-rka", "run")
     private const val SOCKET_DIRECTORY_NAME = "sockets"
     private const val DIRECTORY_MODE = 0x1c0
-    private const val O_DIRECTORY = 0x10000
+    private const val O_DIRECTORY = 0x4000
 }
 
 private class AndroidBridgeSocketDirectoryHandle(

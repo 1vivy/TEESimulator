@@ -8,6 +8,16 @@ import org.junit.Test
 
 class BrokerBridgeFourthFollowupTest {
     @Test
+    fun production_uses_the_arm64_directory_open_flag() {
+        for (sourceName in listOf("SecureSocketPath.kt", "TrustedSidecarIdentity.kt")) {
+            val source = productionSource(sourceName)
+
+            assertTrue(source.contains("O_DIRECTORY = 0x4000"))
+            assertFalse(source.contains("O_DIRECTORY = 0x10000"))
+        }
+    }
+
+    @Test
     fun public_factory_binds_expected_role_before_any_socket_operation() {
         val factory = productionSource("BrokerBridgeFactory.kt")
         val donorCapture =

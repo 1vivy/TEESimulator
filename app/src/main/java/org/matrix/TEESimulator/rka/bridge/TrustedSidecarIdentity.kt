@@ -367,7 +367,7 @@ private constructor(
         private const val DIRECTORY_MODE = 0x1c0
         private const val FILE_MODE = 0x180
         private const val MAX_RECORD_BYTES = 4096L
-        private const val O_DIRECTORY = 0x10000
+        private const val O_DIRECTORY = 0x4000
     }
 }
 

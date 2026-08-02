@@ -25,7 +25,7 @@ use crate::{
         BridgeMessage, BrokerCertificationMetadata, BrokerOperation, Hash32, PublicBytes,
         RequestId, RoleExecutor, SidecarRole,
     },
-    provision_activation::prepare,
+    provision_activation::{ensure_validator_key, prepare},
     provisioning_io::{FileAttemptJournal, FileBaseStore, FileStateStore, ProductionConfig},
 };
 
@@ -55,6 +55,7 @@ pub enum ProvisioningRunError {
 /// Runs one authenticated V2 CSR-to-activated-lease production transaction.
 pub fn provision_once() -> Result<(), ProvisioningRunError> {
     let config = ProductionConfig::load()?;
+    ensure_validator_key(&config.validator_key)?;
     let session = crate::trust_runtime::begin(config.epoch, &config.state_root)?;
     let mut client = ProvisioningHttpClient::new(
         config.base.clone(),

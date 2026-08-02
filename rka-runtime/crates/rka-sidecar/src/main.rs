@@ -125,6 +125,7 @@ fn execute(command: Option<&OsStr>) -> Result<(), Box<dyn Error>> {
     if command == Some(OsStr::new("provision")) {
         run(OsStr::new("donor"), &mut io::stdout().lock())?;
         provision_once()?;
+        writeln!(io::stdout().lock(), "RESULT=PROVISIONED")?;
         return Ok(());
     }
     if command == Some(OsStr::new("rotate-roots")) {

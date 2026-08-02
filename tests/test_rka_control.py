@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import socket
 from subprocess import CompletedProcess, run
 from tempfile import TemporaryDirectory
 import unittest
@@ -187,6 +188,98 @@ class RkaControlTest(unittest.TestCase):
         self.assertEqual(first_write.returncode, 0)
         self.assertNotEqual(invalid_write.returncode, 0)
         self.assertEqual(final_content, valid_content)
+
+    def test_donor_provision_command_binds_device_properties_and_fixed_paths(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            config_root = temporary_root / "tricky_store"
+            state_root = temporary_root / "teesimulator-rka"
+            self.assertEqual(
+                self.run_control(
+                    config_root,
+                    "--state-root",
+                    str(state_root),
+                    "set-role",
+                    "DONOR",
+                ).returncode,
+                0,
+            )
+            self.assertEqual(
+                self.run_control(
+                    config_root,
+                    "--state-root",
+                    str(state_root),
+                    "initialize",
+                ).returncode,
+                0,
+            )
+            direct_profile = state_root / "profiles" / "direct.conf"
+            direct_profile.write_text(
+                "version=2\n"
+                "role=DONOR\n"
+                "profile_epoch=0\n"
+                "dial_mode=DONOR_DIALS\n"
+                "dial_endpoint=100.64.0.2\n"
+                "listen_interface=192.168.1.2\n"
+                f"peer_spki_sha256={'ab' * 32}\n"
+                "transport=DIRECT\n",
+                encoding="ascii",
+            )
+            os.chmod(direct_profile, 0o600)
+            commands = temporary_root / "commands"
+            commands.mkdir()
+            getprop = commands / "getprop"
+            getprop.write_text(
+                "#!/bin/sh\n"
+                "case $1 in\n"
+                "remote_provisioning.enable_rkpd) printf '%s\\n' true ;;\n"
+                "remote_provisioning.hostname) printf '%s\\n' remoteprovisioning.googleapis.com ;;\n"
+                "ro.build.fingerprint) printf '%s\\n' brand/product/device:16/id/build:user/release-keys ;;\n"
+                "*) exit 1 ;;\n"
+                "esac\n",
+                encoding="ascii",
+            )
+            sidecar = commands / "rka-sidecar"
+            observed = temporary_root / "provision.env"
+            sidecar.write_text(
+                "#!/bin/sh\n"
+                "[ \"$1\" = provision ] || exit 2\n"
+                "printf '%s\\n' \"$RKA_PROVISIONING_BASE\" \"$RKA_DONOR_SOCKET\" \"$RKA_VALIDATOR_PKCS8\" \"$RKA_KEY_COUNT\" > \"$RKA_TEST_ENV\"\n"
+                "printf '%s\\n' 'role=donor status=READY' 'RESULT=PROVISIONED'\n",
+                encoding="ascii",
+            )
+            for executable in (getprop, sidecar):
+                os.chmod(executable, 0o700)
+            broker_socket = state_root / "run" / "sockets" / "broker.sock"
+            environment = os.environ | {
+                "RKA_GETPROP": str(getprop),
+                "RKA_SIDECAR": str(sidecar),
+                "RKA_TEST_ENV": str(observed),
+            }
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.bind(str(broker_socket))
+                os.chmod(broker_socket, 0o600)
+                result = self.run_control(
+                    config_root,
+                    "--state-root",
+                    str(state_root),
+                    "provision-rkp",
+                    environment=environment,
+                )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "role=donor status=READY\nRESULT=PROVISIONED\n")
+            self.assertEqual(
+                observed.read_text(encoding="ascii"),
+                "https://remoteprovisioning.googleapis.com/v1\n"
+                f"{broker_socket}\n"
+                f"{state_root / 'secrets' / 'validator.pk8'}\n"
+                "1\n",
+            )
+            self.assertEqual(
+                (state_root / "journal" / "provisioning.state").read_text(encoding="ascii"),
+                "version=1\nstatus=PROVISIONED\nprofile_epoch=0\nkey_count=1\n",
+            )
 
     def test_set_role_fsync_failure_preserves_last_valid_file(self) -> None:
         with TemporaryDirectory() as temporary_directory:

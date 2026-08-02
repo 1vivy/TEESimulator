@@ -113,7 +113,51 @@ role=$requested_role
 }
 
 usage() {
-    printf '%s\n' 'usage: rka-control.sh [--root PATH] [--state-root PATH] {set-role ROLE|initialize|wipe|mutation-states|status|boot-decision|recover-exact ACTION TARGET [ARGS]|webui-open|webui ACTION NONCE}' >&2
+    printf '%s\n' 'usage: rka-control.sh [--root PATH] [--state-root PATH] {set-role ROLE|initialize|provision-rkp|wipe|mutation-states|status|boot-decision|recover-exact ACTION TARGET [ARGS]|webui-open|webui ACTION NONCE}' >&2
+}
+
+provision_getprop() {
+    "${RKA_GETPROP:-getprop}" "$1"
+}
+
+provision_rkp() {
+    provision_role=$(read_role) || return 1
+    [ "$provision_role" = DONOR ] || return 1
+    rka_layout_is_valid && rka_profile_is_valid || return 1
+    provision_epoch=$(sed -n '3s/^profile_epoch=//p' "$rka_state_root/profiles/$RKA_PROFILE_NAME") || return 1
+    case $provision_epoch in ''|*[!0-9]*) return 1 ;; esac
+    provision_socket=$rka_state_root/run/sockets/broker.sock
+    [ -S "$provision_socket" ] && [ ! -L "$provision_socket" ] || return 1
+    [ "$(stat -c '%u:%g:%a' "$provision_socket")" = "$(id -u):$(id -g):600" ] || return 1
+    [ "$(provision_getprop remote_provisioning.enable_rkpd)" = true ] || return 1
+    provision_hostname=$(provision_getprop remote_provisioning.hostname) || return 1
+    case $provision_hostname in ''|.*|*..*|*.|*[!a-z0-9.-]*) return 1 ;; esac
+    [ "$(printf '%s' "$provision_hostname" | wc -c)" -le 253 ] || return 1
+    provision_fingerprint=$(provision_getprop ro.build.fingerprint) || return 1
+    case $provision_fingerprint in ''|*[!A-Za-z0-9._:/-]*) return 1 ;; esac
+    [ "$(printf '%s' "$provision_fingerprint" | wc -c)" -le 4096 ] || return 1
+    provision_output=$(
+        RKA_STATE_ROOT="$rka_state_root" \
+        RKA_PROFILE_PATH="$rka_state_root/profiles/direct.conf" \
+        RKA_PROFILE_RECEIPT_PATH="$rka_state_root/run/direct-profile.receipt" \
+        RKA_EXPECTED_PROFILE_EPOCH="$provision_epoch" \
+        RKA_DONOR_SOCKET="$provision_socket" \
+        RKA_VALIDATOR_PKCS8="$rka_state_root/secrets/validator.pk8" \
+        RKA_PROVISIONING_BASE="https://$provision_hostname/v1" \
+        RKA_BUILD_FINGERPRINT="$provision_fingerprint" \
+        RKA_PROFILE_EPOCH="$provision_epoch" \
+        RKA_KEY_COUNT=1 \
+            "${RKA_SIDECAR:-$script_directory/rka-sidecar}" provision
+    ) || return 1
+    [ "$provision_output" = "role=donor status=READY
+RESULT=PROVISIONED" ] || return 1
+    rka_atomic_replace "$rka_state_root/journal" \
+        "$rka_state_root/journal/provisioning.state" "version=1
+status=PROVISIONED
+profile_epoch=$provision_epoch
+key_count=1
+" || return 1
+    printf '%s\n' "$provision_output"
 }
 
 recovery_read_profile() {
@@ -950,6 +994,14 @@ while [ $# -gt 0 ]; do
                 exit 1
             }
             printf '%s\n' READY
+            exit 0
+            ;;
+        provision-rkp)
+            [ $# -eq 1 ] || exit 2
+            provision_rkp || {
+                print_inert
+                exit 1
+            }
             exit 0
             ;;
         wipe)

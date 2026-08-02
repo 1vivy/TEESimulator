@@ -1,6 +1,14 @@
-use std::{fs, path::Path};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::Write as _,
+    os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _},
+    path::Path,
+};
 
-use ring::signature::{Ed25519KeyPair, KeyPair};
+use ring::{
+    rand::SystemRandom,
+    signature::{Ed25519KeyPair, KeyPair},
+};
 use rka_rkp::ValidatedResponse;
 use rka_state::{
     BatchId, CertifiedLeaseMetadata, ChainHash, IrpcIdentityHash, LeaseId, PublicChainMetadata,
@@ -8,8 +16,81 @@ use rka_state::{
     ValidatedCertificationToken, ValidatedChainClaims, ValidatedChainReceipt,
     ValidatedReceiptRegistry, ValidatorPublicKey, verify_validated_chain_receipts,
 };
+use rustix::process::{getegid, geteuid};
 
 use crate::ProvisioningRunError;
+
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "sibling provisioning coordinator initializes the private validator"
+)]
+pub(super) fn ensure_validator_key(path: &Path) -> Result<(), ProvisioningRunError> {
+    let parent = path.parent().ok_or(ProvisioningRunError::Configuration)?;
+    let parent_metadata =
+        fs::symlink_metadata(parent).map_err(|_| ProvisioningRunError::Configuration)?;
+    if !parent_metadata.file_type().is_dir()
+        || parent_metadata.mode() & 0o777 != 0o700
+        || parent_metadata.uid() != geteuid().as_raw()
+        || parent_metadata.gid() != getegid().as_raw()
+    {
+        return Err(ProvisioningRunError::Configuration);
+    }
+    match validate_validator_key(path) {
+        Ok(()) => return Ok(()),
+        Err(ProvisioningRunError::Configuration)
+            if matches!(
+                fs::symlink_metadata(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            ) => {}
+        Err(error) => return Err(error),
+    }
+    let temporary = parent.join(".validator.pk8.tmp");
+    if let Ok(metadata) = fs::symlink_metadata(&temporary) {
+        if !metadata.file_type().is_file()
+            || metadata.mode() & 0o777 != 0o600
+            || metadata.uid() != geteuid().as_raw()
+            || metadata.gid() != getegid().as_raw()
+        {
+            return Err(ProvisioningRunError::Configuration);
+        }
+        fs::remove_file(&temporary).map_err(|_| ProvisioningRunError::Configuration)?;
+    }
+    let document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+        .map_err(|_| ProvisioningRunError::Configuration)?;
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(document.as_ref())?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        File::open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+        return Err(ProvisioningRunError::Configuration);
+    }
+    validate_validator_key(path)
+}
+
+fn validate_validator_key(path: &Path) -> Result<(), ProvisioningRunError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| ProvisioningRunError::Configuration)?;
+    if !metadata.file_type().is_file()
+        || metadata.len() > 4096
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.uid() != geteuid().as_raw()
+        || metadata.gid() != getegid().as_raw()
+    {
+        return Err(ProvisioningRunError::Configuration);
+    }
+    let document = fs::read(path).map_err(|_| ProvisioningRunError::Configuration)?;
+    Ed25519KeyPair::from_pkcs8(&document)
+        .map(|_| ())
+        .map_err(|_| ProvisioningRunError::Configuration)
+}
 
 #[allow(
     clippy::redundant_pub_crate,
@@ -144,4 +225,56 @@ fn first<const N: usize>(value: &[u8; 32]) -> [u8; N] {
         output.copy_from_slice(prefix);
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        os::unix::fs::{PermissionsExt as _, symlink},
+        process,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::ensure_validator_key;
+
+    #[test]
+    fn validator_key_is_generated_once_with_private_mode() {
+        let root = unique_root();
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("validator.pk8");
+
+        ensure_validator_key(&path).unwrap();
+        let first = fs::read(&path).unwrap();
+        ensure_validator_key(&path).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), first);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn validator_key_rejects_a_symlink_target() {
+        let root = unique_root();
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = root.join("target");
+        fs::write(&target, b"not a key").unwrap();
+        symlink(&target, root.join("validator.pk8")).unwrap();
+
+        assert!(ensure_validator_key(&root.join("validator.pk8")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn unique_root() -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("rka-validator-{}-{nonce}", process::id()))
+    }
 }

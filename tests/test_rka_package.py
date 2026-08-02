@@ -117,7 +117,7 @@ class RkaPackageTest(unittest.TestCase):
         self.assert_live_probe_contract(helper)
         for replacement in (
             ("toybox nc -U -w 2", "toybox stat -c"),
-            ("toybox nc -l -U \"$scratch_socket\"", "toybox stat -c"),
+            ("toybox nc -l -U -s \"$scratch_socket\"", "toybox stat -c"),
             ("scratch=$state/p/$2", "scratch=$state/policy-probes/$1"),
             ("mv \"$scratch/sockets/create\"", "toybox stat -c"),
             ("rm -f \"$scratch_socket\"", ":"),
@@ -443,7 +443,7 @@ class RkaPackageTest(unittest.TestCase):
             "scratch=$state/p/$2",
             "scratch_socket=$scratch/sockets/broker.sock",
             "[ \"${#scratch_socket}\" -le 107 ]",
-            "toybox nc -l -U \"$scratch_socket\"",
+            "toybox nc -l -U -s \"$scratch_socket\"",
             "toybox nc -U -w 2 \"$scratch_socket\"",
             "rm -f \"$scratch_socket\"",
             "mv \"$scratch/sockets/create\" \"$scratch/sockets/renamed\"",

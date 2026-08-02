@@ -48,7 +48,7 @@ scratch_transition_probe() {
     [ "${#scratch_socket}" -le 107 ] || exit 65
     mkdir -p "$scratch/sockets"
     : > "$scratch/sockets/create"
-    toybox nc -l -U "$scratch_socket" </dev/null >/dev/null 2>&1 & listener=$!
+    toybox nc -l -U -s "$scratch_socket" </dev/null >/dev/null 2>&1 & listener=$!
     wait_for_socket "$scratch_socket"
     toybox nc -U -w 2 "$scratch_socket" </dev/null >/dev/null
     stop_listener

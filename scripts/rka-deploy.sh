@@ -218,6 +218,29 @@ EOF
     ) || return 1
     printf "%s\n" "$payload" | sha256sum | awk "{print \$1}"
 }
+snapshot_tree() {
+    snapshot_source=$1
+    snapshot_destination=$2
+    [ ! -e "$snapshot_source" ] && [ ! -L "$snapshot_source" ] && return 0
+    [ -d "$snapshot_source" ] && [ ! -L "$snapshot_source" ] || return 1
+    [ ! -e "$snapshot_destination" ] && [ ! -L "$snapshot_destination" ] || return 1
+    cp -a "$snapshot_source" "$snapshot_destination" || return 1
+    snapshot_entries=$(find "$snapshot_source" -xdev -print | LC_ALL=C sort) || return 1
+    while IFS= read -r snapshot_entry; do
+        [ -n "$snapshot_entry" ] || continue
+        [ ! -L "$snapshot_entry" ] || return 1
+        snapshot_relative=${snapshot_entry#"$snapshot_source"}
+        snapshot_copy=$snapshot_destination$snapshot_relative
+        [ -e "$snapshot_copy" ] && [ ! -L "$snapshot_copy" ] || return 1
+        snapshot_label_record=$(ls -Zd "$snapshot_entry") || return 1
+        snapshot_label=${snapshot_label_record%% *}
+        case "$snapshot_label" in ""|*[!A-Za-z0-9_:,.-]*) return 1 ;; esac
+        [ "$(printf %s "$snapshot_label" | wc -c)" -le 256 ] || return 1
+        chcon "$snapshot_label" "$snapshot_copy" || return 1
+    done <<EOF
+$snapshot_entries
+EOF
+}
 set_phase() {
     value=$1
     printf "%s\n" "$value" > "$txn/phase.next"
@@ -378,7 +401,7 @@ prepare_active_view_without_update() {
     active_view_destination=$2
     [ ! -e "$active_view_source" ] && [ ! -L "$active_view_source" ] && return 0
     [ -d "$active_view_source" ] && [ ! -L "$active_view_source" ] || return 1
-    cp -a "$active_view_source" "$active_view_destination" || return 1
+    snapshot_tree "$active_view_source" "$active_view_destination" || return 1
     if [ -e "$active_view_destination/update" ] || [ -L "$active_view_destination/update" ]; then
         [ -f "$active_view_destination/update" ] && [ ! -L "$active_view_destination/update" ] || return 1
         rm -f "$active_view_destination/update" || return 1
@@ -421,7 +444,7 @@ prepare_parent_view_without_target() {
     parent_view_target=$2
     parent_view_destination=$3
     [ -d "$parent_view_source" ] && [ ! -L "$parent_view_source" ] || return 1
-    cp -a "$parent_view_source" "$parent_view_destination" || return 1
+    snapshot_tree "$parent_view_source" "$parent_view_destination" || return 1
     if [ -e "$parent_view_destination/$parent_view_target" ] || [ -L "$parent_view_destination/$parent_view_target" ]; then
         [ -d "$parent_view_destination/$parent_view_target" ] && [ ! -L "$parent_view_destination/$parent_view_target" ] || return 1
         rm -rf "$parent_view_destination/$parent_view_target" || return 1
@@ -730,7 +753,7 @@ deploy)
     chmod 600 "$txn/layout.before"
     tree_hash "$pending" > "$txn/pending.before"
     metadata_hash "$pending" > "$txn/pending.metadata.before"
-    cp -a "$pending" "$txn/pending.tree" 2>/dev/null || [ ! -e "$pending" ]
+    snapshot_tree "$pending" "$txn/pending.tree" || exit 1
     if [ -d "$txn/pending.tree" ]; then [ "$(tree_hash "$txn/pending.tree")" = "$(cat "$txn/pending.before")" ] || exit 1; fi
     prior_bind=false
     if awk -v p="$active" "\$5 == p {found=1} END {exit !found}" /proc/1/mountinfo; then prior_bind=true; fi
@@ -756,7 +779,7 @@ deploy)
     fi
     tree_hash "$active" > "$txn/active.before"
     metadata_hash "$active" > "$txn/active.metadata.before"
-    cp -a "$active" "$txn/active.tree" 2>/dev/null || [ ! -e "$active" ]
+    snapshot_tree "$active" "$txn/active.tree" || exit 1
     if [ -d "$txn/active.tree" ]; then [ "$(tree_hash "$txn/active.tree")" = "$(cat "$txn/active.before")" ] || exit 1; fi
     if [ -f "$state/manager-authorizations/$tx" ] && [ "$module_layout" = PRESENT_LAYOUT ]; then
         if [ -e "$txn/active.tree/update" ] || [ -L "$txn/active.tree/update" ]; then

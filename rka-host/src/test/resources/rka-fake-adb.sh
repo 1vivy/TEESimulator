@@ -122,6 +122,7 @@ write_shim() {
 
 write_shim id 'if [ "${1-}" = -u ]; then printf "0\n"; else /usr/bin/id "$@"; fi'
 write_shim chown 'exit 0'
+write_shim chcon 'exit 0'
 write_shim rm '
 if [ "${RKA_FAKE_NEXT_MUTATION:-}" = probe-cleanup-failure ] && [ "${2-}" != "" ]; then
   case "${@: -1}" in /data/adb/teesimulator-rka/probes/*.manager-appid) exit 0 ;; esac
@@ -486,8 +487,9 @@ case "$last" in
 esac
 exec /usr/bin/stat "$@"'
 write_shim ls '
-if [ "${1-}" = -Zd ] && [ "${2-}" = /data/adb/ksud ]; then
-  printf "u:object_r:ksu_file:s0 %s\n" "$2"
+if [ "${1-}" = -Zd ]; then
+  if [ "${2-}" = /data/adb/ksud ]; then label=u:object_r:ksu_file:s0; else label=u:object_r:system_file:s0; fi
+  printf "%s %s\n" "$label" "$2"
 else
   exec /usr/bin/ls "$@"
 fi'

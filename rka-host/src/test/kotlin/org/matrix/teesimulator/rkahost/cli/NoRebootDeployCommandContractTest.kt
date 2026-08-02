@@ -17,7 +17,7 @@ class NoRebootDeployCommandContractTest {
     fun transactionOrdersBothSnapshotsAndOldRuntimeRemovalBeforeSingleInstall() {
         val deploy = script.substringAfter("deploy)\n").substringBefore("    ;;\npair)")
         val pendingSnapshot = deploy.indexOf("tree_hash \"\$pending\" > \"\$txn/pending.before\"")
-        val pendingPreserve = deploy.indexOf("cp -a \"\$pending\" \"\$txn/pending.tree\"")
+        val pendingPreserve = deploy.indexOf("snapshot_tree \"\$pending\" \"\$txn/pending.tree\"")
         val stop = deploy.indexOf("\"\$active/rka-supervisor.sh\" stop")
         val unmount = deploy.indexOf("nsenter -t 1 -m -- umount \"\$active\"")
         val activeSnapshot = deploy.indexOf("tree_hash \"\$active\" > \"\$txn/active.before\"")
@@ -55,6 +55,17 @@ class NoRebootDeployCommandContractTest {
     }
 
     @Test
+    fun snapshotsRestoreEachSourceSelinuxContextBeforeIntegrityChecks() {
+        val snapshot =
+            script.substringAfter("snapshot_tree() {\n").substringBefore("\n}\nset_phase()")
+
+        assertTrue(snapshot.contains("find \"\$snapshot_source\" -xdev -print"))
+        assertTrue(snapshot.contains("ls -Zd \"\$snapshot_entry\""))
+        assertTrue(snapshot.contains("chcon \"\$snapshot_label\" \"\$snapshot_copy\""))
+        assertFalse(snapshot.contains("chcon -R"))
+    }
+
+    @Test
     fun rollbackQuarantinesFailedPendingAndRestoresBothPriorTrees() {
         val rollback = script.substringAfter("rollback)\n").substringBefore("*) exit 2")
 
@@ -67,9 +78,9 @@ class NoRebootDeployCommandContractTest {
     @Test
     fun liveBindSnapshotsPendingBeforeExposingAndSnapshottingHiddenActive() {
         val deploy = script.substringAfter("deploy)\n").substringBefore("    ;;\npair)")
-        val pendingSnapshot = deploy.indexOf("cp -a \"\$pending\" \"\$txn/pending.tree\"")
+        val pendingSnapshot = deploy.indexOf("snapshot_tree \"\$pending\" \"\$txn/pending.tree\"")
         val unmount = deploy.indexOf("nsenter -t 1 -m -- umount \"\$active\"")
-        val activeSnapshot = deploy.indexOf("cp -a \"\$active\" \"\$txn/active.tree\"")
+        val activeSnapshot = deploy.indexOf("snapshot_tree \"\$active\" \"\$txn/active.tree\"")
 
         assertTrue(pendingSnapshot >= 0 && unmount > pendingSnapshot && activeSnapshot > unmount)
         assertTrue(deploy.contains("active.metadata.before"))

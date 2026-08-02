@@ -1,6 +1,9 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
@@ -32,10 +35,46 @@ static void stop_owned_group(pid_t child) {
     waitpid(child, nullptr, 0);
 }
 
+static void close_inherited_descriptors() {
+    long limit = sysconf(_SC_OPEN_MAX);
+    if (limit < 0 || limit > 65536) limit = 65536;
+    for (int descriptor = 0; descriptor < limit; ++descriptor) close(descriptor);
+    const int null_descriptor = open("/dev/null", O_RDWR);
+    if (null_descriptor < 0) _exit(127);
+    if (null_descriptor != STDIN_FILENO && dup2(null_descriptor, STDIN_FILENO) < 0) _exit(127);
+    if (null_descriptor != STDOUT_FILENO && dup2(null_descriptor, STDOUT_FILENO) < 0) _exit(127);
+    if (null_descriptor != STDERR_FILENO && dup2(null_descriptor, STDERR_FILENO) < 0) _exit(127);
+    if (null_descriptor > STDERR_FILENO) close(null_descriptor);
+}
+
+static int detach_and_exec(char* const child_argv[]) {
+    const pid_t session_child = fork();
+    if (session_child < 0) return 1;
+    if (session_child == 0) {
+        if (setsid() < 0) _exit(127);
+        const pid_t detached_child = fork();
+        if (detached_child < 0) _exit(127);
+        if (detached_child > 0) _exit(0);
+        if (chdir("/") < 0) _exit(127);
+        if (setenv("RKA_INTERNAL_CHILD_LOOP", "1", 1) < 0) _exit(127);
+        close_inherited_descriptors();
+        execv(child_argv[0], child_argv);
+        _exit(127);
+    }
+
+    int status = 0;
+    if (waitpid(session_child, &status, 0) != session_child) return 1;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <daemon> [args...]\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--detach] <daemon> [args...]\n", argv[0]);
         return 1;
+    }
+    if (strcmp(argv[1], "--detach") == 0) {
+        if (argc < 3) return 1;
+        return detach_and_exec(&argv[2]);
     }
 
     signal(SIGTERM, handle_signal);

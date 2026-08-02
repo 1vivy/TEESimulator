@@ -12,8 +12,11 @@ module_directory=${0%/*}
 control=${RKA_CONTROL:-${0%/*}/rka-control.sh}
 daemon=${RKA_DAEMON:-${0%/*}/daemon}
 sidecar=${RKA_SIDECAR:-${0%/*}/rka-sidecar}
+native_supervisor=${RKA_NATIVE_SUPERVISOR:-${0%/*}/supervisor}
 backoff=${RKA_BACKOFF_BASE:-1}
 stable_seconds=${RKA_STABLE_SECONDS:-30}
+internal_name=
+internal_role=
 
 usage() { printf '%s\n' 'usage: rka-supervisor.sh [--root PATH] [--state-root PATH] {start|stop|status}' >&2; }
 
@@ -22,6 +25,14 @@ while [ $# -gt 0 ]; do
         --root) root=$2; shift 2 ;;
         --state-root) state=$2; shift 2 ;;
         start|stop|status) command=$1; shift ;;
+        __child-loop)
+            [ "$#" -ge 3 ] || { usage; exit 2; }
+            command=$1
+            internal_name=$2
+            internal_role=$3
+            shift 3
+            break
+            ;;
         *) usage; exit 2 ;;
     esac
 done
@@ -265,7 +276,9 @@ start_one() {
     shift 2
     if record_live "$pids/$name.pid"; then return 0; fi
     rm -f "$pids/$name.pid" "$pids/$name.identity"
-    child_loop "$name" "$selected_role" "$@" </dev/null >/dev/null 2>&1 &
+    [ -x "$native_supervisor" ] || return 1
+    "$native_supervisor" --detach "$module_directory/rka-supervisor.sh" \
+        --root "$root" --state-root "$state" __child-loop "$name" "$selected_role" "$@" || return 1
     attempts=0
     while [ ! -f "$pids/$name.pid" ] && [ "$attempts" -lt 5 ]; do
         sleep 1
@@ -404,4 +417,13 @@ case $command in
     start) start ;;
     stop) stop ;;
     status) status ;;
+    __child-loop)
+        [ "${RKA_INTERNAL_CHILD_LOOP:-}" = 1 ] || exit 2
+        case $internal_name:$internal_role in
+            legacy:|broker:donor|broker:candidate|sidecar:donor|sidecar:candidate) ;;
+            *) exit 2 ;;
+        esac
+        [ "$#" -gt 0 ] || exit 2
+        child_loop "$internal_name" "$internal_role" "$@"
+        ;;
 esac

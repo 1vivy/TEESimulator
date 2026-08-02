@@ -23,6 +23,7 @@ class RkaSupervisorTest(unittest.TestCase):
             "RKA_CONTROL": str(REPOSITORY_ROOT / "module" / "rka-control.sh"),
             "RKA_DAEMON": str(root / "fake-child.sh"),
             "RKA_SIDECAR": str(root / "fake-child.sh"),
+            "RKA_NATIVE_SUPERVISOR": str(root / "fake-supervisor.sh"),
             "RKA_CHILD_LOG": str(root / "children.log"),
             "RKA_BACKOFF_BASE": "0",
         }
@@ -97,6 +98,15 @@ class RkaSupervisorTest(unittest.TestCase):
             encoding="utf-8",
         )
         child.chmod(0o755)
+        detacher = root / "fake-supervisor.sh"
+        detacher.write_text(
+            "#!/bin/sh\n"
+            '[ "$1" = --detach ] || exit 64\n'
+            "shift\n"
+            "RKA_INTERNAL_CHILD_LOOP=1 sh \"$@\" </dev/null >/dev/null 2>&1 &\n",
+            encoding="utf-8",
+        )
+        detacher.chmod(0o755)
         if role is not None:
             self.write_role(root, role)
             if role not in {"LOCAL", "DISABLED"}:
@@ -182,6 +192,27 @@ class RkaSupervisorTest(unittest.TestCase):
             child_log = (root / "children.log").read_text(encoding="utf-8")
             self.assertIn("--rka-role candidate", child_log)
             self.assertIn("candidate", child_log)
+        finally:
+            self.clean(root, state)
+            temporary.cleanup()
+
+    def test_internal_child_loop_is_not_a_public_command(self) -> None:
+        temporary, root, state = self.fixture("LOCAL")
+        try:
+            result = self.command(root, state, "__child-loop", "legacy", "", "/bin/true")
+            mismatched = self.command(
+                root,
+                state,
+                "__child-loop",
+                "sidecar",
+                "",
+                "/bin/true",
+                environment={"RKA_INTERNAL_CHILD_LOOP": "1"},
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotEqual(mismatched.returncode, 0)
+            self.assertFalse((state / "run" / "pids" / "legacy.pid").exists())
         finally:
             self.clean(root, state)
             temporary.cleanup()

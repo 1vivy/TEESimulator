@@ -63,6 +63,9 @@
   let nonce = "";
   let pending = "";
   let profileRole = "";
+  let callbackSequence = 0;
+  const bridgeCallbacks = Object.create(null);
+  globalThis.__teesimulatorRkaCallbacks = bridgeCallbacks;
   const status = document.querySelector("#rka-status");
   const operation = document.querySelector("#command-state");
   const dialog = document.querySelector("#confirmation-dialog");
@@ -113,7 +116,20 @@
     if (!bridge || typeof bridge.exec !== "function") {
       return Promise.reject(new Error("KernelSU WebUI bridge unavailable"));
     }
-    return Promise.resolve(bridge.exec(command));
+    return new Promise((resolve, reject) => {
+      callbackSequence += 1;
+      const name = `request${callbackSequence}`;
+      bridgeCallbacks[name] = (errno, stdout, stderr) => {
+        delete bridgeCallbacks[name];
+        resolve({ errno, stdout, stderr });
+      };
+      try {
+        bridge.exec(command, `globalThis.__teesimulatorRkaCallbacks.${name}`);
+      } catch (error) {
+        delete bridgeCallbacks[name];
+        reject(error);
+      }
+    });
   }
 
   function checked(value) {

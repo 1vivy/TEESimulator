@@ -59,32 +59,52 @@ function bridgePreload() {
     globalThis.__hostileExecuted = false;
     globalThis.__bridge = { log: [], failNext: false, deferNext: false, resolveDeferred: null, mutationNonces: [] };
     globalThis.confirm = () => true;
-    globalThis.ksu = { exec(command) {
+    function callback(name, errno, stdout, stderr = "") {
+      const match = /^globalThis\\.__teesimulatorRkaCallbacks\\.(request[1-9][0-9]*)$/.exec(name);
+      if (match === null) throw new Error("unsafe callback expression");
+      queueMicrotask(() => globalThis.__teesimulatorRkaCallbacks[match[1]](errno, stdout, stderr));
+    }
+    globalThis.ksu = { exec(command, callbackName) {
       globalThis.__bridge.log.push(command);
-      if (location.hash === "#malformed") return { errno: "0" };
+      if (location.hash === "#malformed") {
+        callback(callbackName, "0", status());
+        return;
+      }
       if (globalThis.__bridge.deferNext) {
         globalThis.__bridge.deferNext = false;
-        return new Promise((resolve) => { globalThis.__bridge.resolveDeferred = () => resolve({ errno: 0, stdout: status() }); });
+        globalThis.__bridge.resolveDeferred = () => callback(callbackName, 0, status());
+        return;
       }
       if (globalThis.__bridge.failNext) {
         globalThis.__bridge.failNext = false;
-        return { errno: 1, stdout: "" };
+        callback(callbackName, 1, "");
+        return;
       }
-      if (command === control + " webui-open") return { errno: 0, stdout: "nonce=" + nonce + "\\n" };
+      if (command === control + " webui-open") {
+        callback(callbackName, 0, "nonce=" + nonce + "\\n");
+        return;
+      }
       const parts = command.split(" ");
-      if (parts.length !== 4 || parts[0] !== control || parts[1] !== "webui" || !/^[a-z0-9-]+$/.test(parts[2]) || !/^[0-9a-f]{32}$/.test(parts[3])) return { errno: 1, stdout: "" };
+      if (parts.length !== 4 || parts[0] !== control || parts[1] !== "webui" || !/^[a-z0-9-]+$/.test(parts[2]) || !/^[0-9a-f]{32}$/.test(parts[3])) {
+        callback(callbackName, 1, "");
+        return;
+      }
       const action = parts[2];
       const supplied = parts[3];
       if (action === "status" || action === "quarantine") {
-        return supplied === nonce ? { errno: 0, stdout: status(action === "quarantine") } : { errno: 1, stdout: "" };
+        callback(callbackName, supplied === nonce ? 0 : 1, supplied === nonce ? status(action === "quarantine") : "");
+        return;
       }
-      if (supplied !== nonce) return { errno: 1, stdout: "" };
+      if (supplied !== nonce) {
+        callback(callbackName, 1, "");
+        return;
+      }
       globalThis.__bridge.mutationNonces.push(supplied);
       if (action === "role-candidate") role = "CANDIDATE";
       if (action === "role-donor") role = "DONOR";
       counter += 1;
       nonce = counter.toString(16).padStart(32, "0");
-      return { errno: 0, stdout: status() + "next_nonce=" + nonce + "\\n" };
+      callback(callbackName, 0, status() + "next_nonce=" + nonce + "\\n");
     }};
   }`;
 }

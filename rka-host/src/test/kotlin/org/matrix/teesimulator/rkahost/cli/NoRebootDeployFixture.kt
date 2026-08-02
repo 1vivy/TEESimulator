@@ -128,6 +128,24 @@ exit 0
                 "uninstall.sh",
             )
             .forEach { Files.writeString(archiveRoot.resolve(it), "#!/bin/sh\nexit 0\n") }
+        Files.writeString(
+            archiveRoot.resolve("supervisor"),
+            """#!/bin/sh
+case "${'$'}{1-}" in
+  --exec-closed)
+    stdout=${'$'}2
+    stderr=${'$'}3
+    shift 3
+    exec "${'$'}@" </dev/null >"${'$'}stdout" 2>"${'$'}stderr"
+    ;;
+  --detach)
+    shift
+    "${'$'}@" </dev/null >/dev/null 2>&1 &
+    ;;
+  *) exit 64 ;;
+esac
+""",
+        )
         val customizeSource = projectRoot.resolve("module/rka-ksu-customize.sh")
         if (Files.isRegularFile(customizeSource)) {
             Files.copy(customizeSource, archiveRoot.resolve("customize.sh"))

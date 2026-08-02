@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import select
+import signal
 import socket
 from subprocess import CompletedProcess, run
 from tempfile import TemporaryDirectory
@@ -13,9 +15,76 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SUPERVISOR = REPOSITORY_ROOT / "module" / "rka-supervisor.sh"
 CUSTOMIZE = REPOSITORY_ROOT / "module" / "customize.sh"
 DAEMON = REPOSITORY_ROOT / "module" / "daemon"
+NATIVE_SUPERVISOR = REPOSITORY_ROOT / "app" / "src" / "main" / "cpp" / "supervisor.cpp"
 
 
 class RkaSupervisorTest(unittest.TestCase):
+    def test_native_exec_closed_drops_every_inherited_descriptor(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            runner = temporary / "supervisor"
+            compiled = run(
+                ["c++", "-std=c++17", str(NATIVE_SUPERVISOR), "-o", str(runner)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            child_pid_path = temporary / "child.pid"
+            fake_ksud = temporary / "ksud"
+            fake_ksud.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, time\n"
+                "from pathlib import Path\n"
+                "pid = os.fork()\n"
+                "if pid == 0:\n"
+                "    time.sleep(30)\n"
+                "    os._exit(0)\n"
+                "Path(os.environ['RKA_FAKE_CHILD_PID']).write_text(str(pid), encoding='ascii')\n"
+                "print('install complete')\n",
+                encoding="utf-8",
+            )
+            fake_ksud.chmod(0o755)
+            install_stdout = temporary / "install.stdout"
+            install_stderr = temporary / "install.stderr"
+            read_fd, write_fd = os.pipe()
+            child_pid: int | None = None
+            try:
+                result = run(
+                    [
+                        str(runner),
+                        "--exec-closed",
+                        str(install_stdout),
+                        str(install_stderr),
+                        str(fake_ksud),
+                        "module",
+                        "install",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    env=os.environ | {"RKA_FAKE_CHILD_PID": str(child_pid_path)},
+                    pass_fds=(write_fd,),
+                    text=True,
+                    timeout=5,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(install_stdout.read_text(encoding="utf-8"), "install complete\n")
+                child_pid = int(child_pid_path.read_text(encoding="ascii"))
+                os.close(write_fd)
+                write_fd = -1
+                readable, _, _ = select.select([read_fd], [], [], 1)
+                self.assertEqual(readable, [read_fd])
+                self.assertEqual(os.read(read_fd, 1), b"")
+            finally:
+                if write_fd >= 0:
+                    os.close(write_fd)
+                os.close(read_fd)
+                if child_pid is not None:
+                    try:
+                        os.kill(child_pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+
     def command(
         self, root: Path, state: Path, *arguments: str, environment: dict[str, str] | None = None
     ) -> CompletedProcess[str]:

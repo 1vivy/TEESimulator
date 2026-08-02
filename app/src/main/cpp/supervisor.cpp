@@ -35,16 +35,40 @@ static void stop_owned_group(pid_t child) {
     waitpid(child, nullptr, 0);
 }
 
-static void close_inherited_descriptors() {
+static void close_descriptors_from(int first_descriptor) {
     long limit = sysconf(_SC_OPEN_MAX);
     if (limit < 0 || limit > 65536) limit = 65536;
-    for (int descriptor = 0; descriptor < limit; ++descriptor) close(descriptor);
+    for (int descriptor = first_descriptor; descriptor < limit; ++descriptor) close(descriptor);
+}
+
+static void close_inherited_descriptors() {
+    close_descriptors_from(0);
     const int null_descriptor = open("/dev/null", O_RDWR);
     if (null_descriptor < 0) _exit(127);
     if (null_descriptor != STDIN_FILENO && dup2(null_descriptor, STDIN_FILENO) < 0) _exit(127);
     if (null_descriptor != STDOUT_FILENO && dup2(null_descriptor, STDOUT_FILENO) < 0) _exit(127);
     if (null_descriptor != STDERR_FILENO && dup2(null_descriptor, STDERR_FILENO) < 0) _exit(127);
     if (null_descriptor > STDERR_FILENO) close(null_descriptor);
+}
+
+static int exec_with_closed_descriptors(
+        const char* stdout_path, const char* stderr_path, char* const child_argv[]) {
+    const int null_descriptor = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (null_descriptor < 0) return 1;
+    const int stdout_descriptor =
+            open(stdout_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (stdout_descriptor < 0) return 1;
+    const int stderr_descriptor =
+            open(stderr_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (stderr_descriptor < 0) return 1;
+    if (dup2(null_descriptor, STDIN_FILENO) < 0 ||
+        dup2(stdout_descriptor, STDOUT_FILENO) < 0 ||
+        dup2(stderr_descriptor, STDERR_FILENO) < 0) {
+        return 1;
+    }
+    close_descriptors_from(3);
+    execv(child_argv[0], child_argv);
+    return 127;
 }
 
 static int detach_and_exec(char* const child_argv[]) {
@@ -69,12 +93,16 @@ static int detach_and_exec(char* const child_argv[]) {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s [--detach] <daemon> [args...]\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--detach|--exec-closed] <daemon> [args...]\n", argv[0]);
         return 1;
     }
     if (strcmp(argv[1], "--detach") == 0) {
         if (argc < 3) return 1;
         return detach_and_exec(&argv[2]);
+    }
+    if (strcmp(argv[1], "--exec-closed") == 0) {
+        if (argc < 5) return 1;
+        return exec_with_closed_descriptors(argv[2], argv[3], &argv[4]);
     }
 
     signal(SIGTERM, handle_signal);

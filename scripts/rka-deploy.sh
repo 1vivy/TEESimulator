@@ -117,6 +117,7 @@ for required_entry in \
     rka-supervisor.sh \
     sepolicy.probes \
     sepolicy.rule \
+    supervisor \
     webroot/index.html; do
     archive_entry_count=$(printf '%s\n' "$archive_listing" | awk -v entry="$required_entry" '$NF == entry { count++ } END { print count + 0 }')
     [[ "$archive_entry_count" == 1 ]] || fail ARCHIVE_INVALID
@@ -265,41 +266,34 @@ restore_prior_runtime() {
     fi
     [ -f "$txn/prior.graph" ] || return 0
     if grep -Eq "^(legacy|broker|sidecar)=RUNNING$" "$txn/prior.graph"; then
-        nsenter -t 1 -m -- "$active/rka-supervisor.sh" start || return 1
+        start_restored_runtime "$txn/recovered.graph" || return 1
     else
         nsenter -t 1 -m -- "$active/rka-supervisor.sh" stop || return 1
+        nsenter -t 1 -m -- "$active/rka-supervisor.sh" status > "$txn/recovered.graph" || return 1
+        cmp -s "$txn/prior.graph" "$txn/recovered.graph" || return 1
     fi
-    nsenter -t 1 -m -- "$active/rka-supervisor.sh" status > "$txn/recovered.graph" || return 1
-    cmp -s "$txn/prior.graph" "$txn/recovered.graph"
 }
-run_ksud_module_install() {
-    install_stdout=$1
-    install_stderr=$2
-    install_archive=$3
-    ksud_binary=$(command -v ksud) || return 1
-    [ -x "$ksud_binary" ] || return 1
-    sh -c '
-        install_stdout=$1
-        install_stderr=$2
-        ksud_binary=$3
-        install_archive=$4
-        exec </dev/null >"$install_stdout" 2>"$install_stderr"
-        for descriptor_path in /proc/self/fd/*; do
-            descriptor=${descriptor_path##*/}
-            case "$descriptor" in
-                0|1|2) ;;
-                ""|*[!0-9]*) exit 126 ;;
-                *) eval "exec ${descriptor}>&-" ;;
-            esac
-        done
-        exec "$ksud_binary" module install "$install_archive"
-    ' rka-ksu-install "$install_stdout" "$install_stderr" "$ksud_binary" "$install_archive"
+start_restored_runtime() {
+    restored_graph=$1
+    install_runner=$txn/install-runner
+    [ -x "$install_runner" ] && [ ! -L "$install_runner" ] || return 1
+    nsenter -t 1 -m -- "$install_runner" --detach "$active/rka-supervisor.sh" start || return 1
+    restored_attempt=0
+    while [ "$restored_attempt" -lt 100 ]; do
+        if nsenter -t 1 -m -- "$active/rka-supervisor.sh" status > "$restored_graph" 2>/dev/null &&
+            cmp -s "$txn/prior.graph" "$restored_graph"; then
+            return 0
+        fi
+        restored_attempt=$((restored_attempt + 1))
+        sleep 0.1
+    done
+    return 1
 }
 validate_metadata_manifest() {
     metadata_file=$1
     metadata_kind=$2
     metadata_expected_source=$3
-    metadata_seen="$txn/metadata/$metadata_kind.seen"
+    metadata_seen="$metadata_file.seen"
     : > "$metadata_seen"
     chmod 600 "$metadata_seen"
     metadata_first=true
@@ -357,6 +351,27 @@ prepare_ksu_metadata() {
     done
     validate_metadata_manifest "$txn/metadata/rka-artifacts.sha256" artifact "$expected_source_sha" || return 1
     validate_metadata_manifest "$txn/metadata/rka-source.sha256" source "$expected_source_sha"
+}
+prepare_install_runner() {
+    runner_manifest=$txn/install-runner.manifest
+    runner_next=$txn/install-runner.next
+    runner=$txn/install-runner
+    [ ! -e "$runner_manifest" ] && [ ! -L "$runner_manifest" ] || return 1
+    [ ! -e "$runner_next" ] && [ ! -L "$runner_next" ] || return 1
+    [ ! -e "$runner" ] && [ ! -L "$runner" ] || return 1
+    unzip -p "$archive" META-INF/rka-artifacts.sha256 > "$runner_manifest" || return 1
+    validate_metadata_manifest "$runner_manifest" artifact "$expected_source_sha" || return 1
+    runner_digest=$(awk '$2 == "supervisor" {print $1}' "$runner_manifest") || return 1
+    [ -n "$runner_digest" ] && [ "$(printf '%s\n' "$runner_digest" | wc -l)" -eq 1 ] || return 1
+    unzip -p "$archive" supervisor > "$runner_next" || return 1
+    [ -f "$runner_next" ] && [ ! -L "$runner_next" ] || return 1
+    runner_bytes=$(stat -c %s "$runner_next") || return 1
+    [ "$runner_bytes" -gt 0 ] && [ "$runner_bytes" -le 1048576 ] || return 1
+    [ "$(sha256sum "$runner_next" | awk '{print $1}')" = "$runner_digest" ] || return 1
+    chown 0:0 "$runner_next" || return 1
+    chmod 700 "$runner_next" || return 1
+    mv "$runner_next" "$runner" || return 1
+    [ -x "$runner" ] && [ ! -L "$runner" ]
 }
 reinject_ksu_metadata() {
     [ -d "$pending" ] && [ ! -L "$pending" ] || return 1
@@ -742,6 +757,7 @@ deploy)
     source_receipt=$archive.source-sha
     [ -f "$source_receipt" ] && [ ! -L "$source_receipt" ] || exit 1
     [ "$(cat "$source_receipt")" = "$expected_source_sha" ] || exit 1
+    prepare_install_runner || exit 1
     installed_ksud_version=$(ksud --version 2>/dev/null | head -n 1) || exit 1
     if [ "$installed_ksud_version" = "$next_version" ]; then
         metadata_bridge=true
@@ -803,7 +819,9 @@ deploy)
     set_phase SNAPSHOTS_READY
     if [ "$metadata_bridge" = true ]; then prepare_ksu_metadata || exit 1; fi
     if [ -e "$pending" ]; then rm -rf "$pending"; fi
-    if ! run_ksud_module_install "$txn/ksu-install.stdout" "$txn/ksu-install.stderr" "$archive"; then exit 1; fi
+    ksud_binary=$(command -v ksud) || exit 1
+    [ -x "$ksud_binary" ] || exit 1
+    if ! "$txn/install-runner" --exec-closed "$txn/ksu-install.stdout" "$txn/ksu-install.stderr" "$ksud_binary" module install "$archive"; then exit 1; fi
     [ -d "$pending" ] && [ ! -L "$pending" ] || exit 1
     if [ -f "$state/manager-authorizations/$tx" ]; then
         for path in /data/adb/modules /data/adb/modules_update "$active" "$pending"; do
@@ -1182,9 +1200,7 @@ rollback)
         [ "$(nsenter -t 1 -m -- stat -c %d:%i "$active/module.prop")" = "$(stat -c %d:%i "$pending/module.prop")" ] || exit 1
     fi
     if grep -Eq "^(legacy|broker|sidecar)=RUNNING$" "$txn/prior.graph" 2>/dev/null; then
-        nsenter -t 1 -m -- "$active/rka-supervisor.sh" start
-        nsenter -t 1 -m -- "$active/rka-supervisor.sh" status > "$txn/restored.graph"
-        cmp -s "$txn/prior.graph" "$txn/restored.graph" || exit 1
+        start_restored_runtime "$txn/restored.graph" || exit 1
     fi
     touch "$txn/rollback.complete"
     sync "$txn/rollback.complete"

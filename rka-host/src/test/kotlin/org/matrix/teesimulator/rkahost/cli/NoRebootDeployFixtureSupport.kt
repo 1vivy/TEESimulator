@@ -98,6 +98,7 @@ internal enum class FixtureMutation {
     ROLLBACK_BUSY_BIND_LIVE,
     ROLLBACK_BUSY_BIND_AMBIGUOUS,
     ROLLBACK_VERIFY_ONCE,
+    DEPLOY_BUSY_BIND_SAFE,
     AFTER_STOP,
     AFTER_UNMOUNT,
     ACTIVE_HASH,
@@ -239,6 +240,7 @@ internal fun applyFixtureMutation(
             environment["RKA_FAKE_PROBE_STATUS"] = "unavailable"
             environment["RKA_FAKE_ROLLBACK_VERIFY_ONCE"] = "true"
         }
+        FixtureMutation.DEPLOY_BUSY_BIND_SAFE -> environment["RKA_FAKE_BUSY_UMOUNT"] = "safe"
         FixtureMutation.AFTER_STOP -> environment["RKA_FAKE_FAULT"] = "after-stop"
         FixtureMutation.AFTER_UNMOUNT -> environment["RKA_FAKE_FAULT"] = "after-unmount"
         FixtureMutation.ACTIVE_HASH -> environment["RKA_FAKE_FAULT"] = "active-hash"

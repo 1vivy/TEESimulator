@@ -8,6 +8,21 @@ import org.junit.Test
 
 class NoRebootDeployFailureTest {
     @Test
+    fun safeBusyBindUsesLazyDetachDuringHotUpgrade() {
+        Fixture().use { fixture ->
+            assertEquals(0, fixture.run().exitCode)
+
+            val result = fixture.runWithMutation(FixtureMutation.DEPLOY_BUSY_BIND_SAFE)
+
+            assertEquals(result.stderr, 0, result.exitCode)
+            assertTrue(fixture.donorNormalUnmountAttempted())
+            assertTrue(fixture.donorLazyUnmountAttempted())
+            assertTrue(fixture.donorBindPresent())
+            assertTrue(fixture.donorRuntimeRunning())
+        }
+    }
+
+    @Test
     fun exactBusyBindUsesLazyDetachOnlyAfterStoppedUnambiguousMount() {
         Fixture(FixtureMutation.ROLLBACK_BUSY_BIND_SAFE).use { fixture ->
             assertEquals(4, fixture.run().exitCode)

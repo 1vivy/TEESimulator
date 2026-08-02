@@ -368,6 +368,12 @@ stop() {
             if record_live "$record"; then
                 IFS=' ' read -r pid pgid start < "$record"
                 kill -KILL "$pid" 2>/dev/null
+                attempts=0
+                while record_live "$record" && [ "$attempts" -lt 3 ]; do
+                    sleep 1
+                    attempts=$((attempts + 1))
+                done
+                record_live "$record" && return 1
             fi
         fi
         rm -f "$record" "$pids/$name.identity"

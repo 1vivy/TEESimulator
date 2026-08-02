@@ -93,7 +93,7 @@ class RkaSupervisorTest(unittest.TestCase):
         root.mkdir()
         child = root / "fake-child.sh"
         child.write_text(
-            "#!/bin/sh\nprintf '%s %s RKA_PROFILE_PATH=%s RKA_EXPECTED_PROFILE_EPOCH=%s RKA_PROFILE_RECEIPT_PATH=%s\\n' \"$0\" \"$*\" \"${RKA_PROFILE_PATH-}\" \"${RKA_EXPECTED_PROFILE_EPOCH-}\" \"${RKA_PROFILE_RECEIPT_PATH-}\" >> \"$RKA_CHILD_LOG\"\nif [ -n \"${RKA_PROFILE_RECEIPT_PATH-}\" ]; then profile_hash=$(sha256sum \"$RKA_PROFILE_PATH\" | awk '{print $1}'); printf 'version=1\\nprofile_sha256=%s\\nprofile_epoch=%s\\npeer_pin_sha256=%064d\\ndial_mode=DONOR_DIALS\\ntransport=DIRECT\\n' \"$profile_hash\" \"$RKA_EXPECTED_PROFILE_EPOCH\" 0 > \"$RKA_PROFILE_RECEIPT_PATH\"; chmod 600 \"$RKA_PROFILE_RECEIPT_PATH\"; fi\n[ \"${RKA_CHILD_MODE:-hold}\" = crash ] && exit 7\nif [ \"${RKA_CHILD_MODE:-hold}\" = crash-once ] && [ ! -e \"$RKA_CRASH_ONCE_FILE\" ]; then : > \"$RKA_CRASH_ONCE_FILE\"; sleep 1; exit 7; fi\ntrap 'printf term\\n >> \"$RKA_CHILD_LOG\"; exit 0' TERM INT\nwhile :; do sleep 1; done\n",
+            "#!/bin/sh\nprintf '%s %s RKA_PROFILE_PATH=%s RKA_EXPECTED_PROFILE_EPOCH=%s RKA_PROFILE_RECEIPT_PATH=%s\\n' \"$0\" \"$*\" \"${RKA_PROFILE_PATH-}\" \"${RKA_EXPECTED_PROFILE_EPOCH-}\" \"${RKA_PROFILE_RECEIPT_PATH-}\" >> \"$RKA_CHILD_LOG\"\nif [ -n \"${RKA_PROFILE_RECEIPT_PATH-}\" ]; then profile_hash=$(sha256sum \"$RKA_PROFILE_PATH\" | awk '{print $1}'); printf 'version=1\\nprofile_sha256=%s\\nprofile_epoch=%s\\npeer_pin_sha256=%064d\\ndial_mode=DONOR_DIALS\\ntransport=DIRECT\\n' \"$profile_hash\" \"$RKA_EXPECTED_PROFILE_EPOCH\" 0 > \"$RKA_PROFILE_RECEIPT_PATH\"; chmod 600 \"$RKA_PROFILE_RECEIPT_PATH\"; fi\n[ \"${RKA_CHILD_MODE:-hold}\" = crash ] && exit 7\nif [ \"${RKA_CHILD_MODE:-hold}\" = crash-once ] && [ ! -e \"$RKA_CRASH_ONCE_FILE\" ]; then : > \"$RKA_CRASH_ONCE_FILE\"; sleep 1; exit 7; fi\nif [ \"${RKA_CHILD_MODE:-hold}\" = ignore-term ]; then trap '' TERM INT; else trap 'printf term\\n >> \"$RKA_CHILD_LOG\"; exit 0' TERM INT; fi\nwhile :; do sleep 1; done\n",
             encoding="utf-8",
         )
         child.chmod(0o755)
@@ -319,6 +319,35 @@ class RkaSupervisorTest(unittest.TestCase):
             self.assertEqual(self.command(root, state, "stop").returncode, 0)
             self.assertIn("legacy=STOPPED", self.command(root, state, "status").stdout)
             self.assertIn("term", (root / "children.log").read_text(encoding="utf-8"))
+        finally:
+            self.clean(root, state)
+            temporary.cleanup()
+
+    def test_stop_waits_for_sigkill_quiescence_before_removing_record(self) -> None:
+        temporary, root, state = self.fixture("LOCAL")
+        try:
+            self.assertEqual(
+                self.command(
+                    root,
+                    state,
+                    "start",
+                    environment={"RKA_CHILD_MODE": "ignore-term"},
+                ).returncode,
+                0,
+            )
+            record = state / "run" / "pids" / "legacy.pid"
+            child_pid = int(record.read_text(encoding="utf-8").split()[0])
+
+            result = self.command(root, state, "stop")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(record.exists())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child_pid, 0)
+            source = SUPERVISOR.read_text(encoding="utf-8")
+            sigkill = source.index('kill -KILL "$pid"')
+            self.assertIn('while record_live "$record"', source[sigkill:])
+            self.assertIn('record_live "$record" && return 1', source[sigkill:])
         finally:
             self.clean(root, state)
             temporary.cleanup()

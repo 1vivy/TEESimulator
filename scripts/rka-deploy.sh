@@ -752,7 +752,20 @@ deploy)
     fi
     if [ "$prior_bind" = true ]; then
         set_phase UNMOUNT_INTENT
-        nsenter -t 1 -m -- umount "$active"
+        if ! nsenter -t 1 -m -- umount "$active"; then
+            exact_mounts=$(awk -v p="$active" "\$5 == p {count++} END {print count+0}" /proc/1/mountinfo) || exit 1
+            nested_mounts=$(awk -v p="$active/" "index(\$5,p) == 1 {count++} END {print count+0}" /proc/1/mountinfo) || exit 1
+            if [ "$exact_mounts" != 1 ] || [ "$nested_mounts" != 0 ] ||
+                [ ! -f "$txn/stopped.graph" ] ||
+                grep -Eq "^(legacy|broker|sidecar)=RUNNING$" "$txn/stopped.graph"; then
+                printf "RESULT=DEPLOY_BUSY_BIND_UNSAFE role=%s\n" "$role" >&2
+                exit 1
+            fi
+            nsenter -t 1 -m -- umount -l -- "$active" || {
+                printf "RESULT=DEPLOY_LAZY_DETACH_FAILED role=%s\n" "$role" >&2
+                exit 1
+            }
+        fi
         set_phase UNMOUNTED
         ! awk -v p="$active" "\$5 == p {found=1} END {exit !found}" /proc/1/mountinfo
     fi

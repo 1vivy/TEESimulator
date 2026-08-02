@@ -81,6 +81,31 @@ ensure_socket_context() {
     [ "$(path_context "$1")" = "$socket_context" ]
 }
 
+prepare_candidate_child_socket() {
+    [ "$1:$2" = sidecar:candidate ] || return 0
+    identity_contract_required || return 0
+    remove_runtime_socket
+}
+
+secure_candidate_child_socket() {
+    [ "$1:$2" = sidecar:candidate ] || return 0
+    identity_contract_required || return 0
+    child=$3
+    candidate_socket=$run/sockets/broker.sock
+    attempts=0
+    while [ "$attempts" -lt 5 ]; do
+        proc_stamp "$child" >/dev/null || return 1
+        if [ -S "$candidate_socket" ] && [ ! -L "$candidate_socket" ] &&
+            [ "$(stat -c '%u:%g:%a' "$candidate_socket")" = "$(id -u):$(id -g):600" ] &&
+            ensure_socket_context "$candidate_socket"; then
+            return 0
+        fi
+        sleep 1
+        attempts=$((attempts + 1))
+    done
+    return 1
+}
+
 materialize_sidecar() {
     [ -f "$sidecar" ] && [ ! -L "$sidecar" ] || return 1
     if record_live "$pids/broker.pid" || record_live "$pids/sidecar.pid"; then
@@ -250,10 +275,16 @@ child_loop() {
     shift 2
     crashes=0
     while :; do
+        prepare_candidate_child_socket "$name" "$selected_role" || {
+            printf '%s\n' FAILED_CRASH_CAP > "$state_file"
+            rm -f "$pids/$name.pid" "$pids/$name.identity"
+            exit 1
+        }
         started=$(date +%s)
         setsid "$@" &
         child=$!
-        if ! publish_identity "$name" "$selected_role" "$child"; then
+        if ! publish_identity "$name" "$selected_role" "$child" ||
+            ! secure_candidate_child_socket "$name" "$selected_role" "$child"; then
             kill -TERM "$child" 2>/dev/null
             wait "$child" 2>/dev/null
             rm -f "$pids/$name.pid" "$pids/$name.identity"

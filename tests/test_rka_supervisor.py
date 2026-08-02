@@ -267,6 +267,37 @@ class RkaSupervisorTest(unittest.TestCase):
             self.clean(root, state)
             temporary.cleanup()
 
+    def test_candidate_sidecar_secures_every_bound_socket_before_pid_publication(self) -> None:
+        source = SUPERVISOR.read_text(encoding="utf-8")
+        child_loop = source[source.index("child_loop() {") : source.index("restart_blocked() {")]
+
+        prepare = child_loop.index('prepare_candidate_child_socket "$name" "$selected_role"')
+        launch = child_loop.index('setsid "$@" &')
+        publish = child_loop.index('publish_identity "$name" "$selected_role" "$child"')
+        secure = child_loop.index(
+            'secure_candidate_child_socket "$name" "$selected_role" "$child"'
+        )
+        record = child_loop.index('write_record "$name" "$child"')
+
+        self.assertLess(prepare, launch)
+        self.assertLess(launch, publish)
+        self.assertLess(publish, secure)
+        self.assertLess(secure, record)
+        self.assertIn('[ "$1:$2" = sidecar:candidate ] || return 0', source)
+        candidate_lifecycle = source[
+            source.index("prepare_candidate_child_socket() {") : source.index(
+                "materialize_sidecar() {"
+            )
+        ]
+        self.assertEqual(candidate_lifecycle.count("identity_contract_required || return 0"), 2)
+        preparation = source[
+            source.index("prepare_candidate_child_socket() {") : source.index(
+                "secure_candidate_child_socket() {"
+            )
+        ]
+        self.assertIn("remove_runtime_socket", preparation)
+        self.assertIn('ensure_socket_context "$candidate_socket"', source)
+
     def test_internal_child_loop_is_not_a_public_command(self) -> None:
         temporary, root, state = self.fixture("LOCAL")
         try:

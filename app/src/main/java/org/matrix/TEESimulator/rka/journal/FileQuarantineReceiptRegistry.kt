@@ -121,6 +121,6 @@ internal constructor(private val directory: Path, private val ownerUid: Int = 0)
         private val fileMode = PosixFilePermissions.asFileAttribute(PRIVATE_FILE_PERMISSIONS)
 
         fun production(root: Path): FileQuarantineReceiptRegistry =
-            FileQuarantineReceiptRegistry(root.resolve("rka/journal/quarantine-receipts"))
+            FileQuarantineReceiptRegistry(root.resolve("journal/quarantine-receipts"))
     }
 }

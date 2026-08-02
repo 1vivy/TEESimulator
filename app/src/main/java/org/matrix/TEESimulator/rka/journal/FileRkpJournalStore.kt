@@ -57,7 +57,7 @@ internal constructor(private val path: Path, private val ops: JournalSyncOps = R
         private const val MAX_BYTES = 131_072
 
         fun production(root: Path): FileRkpJournalStore =
-            FileRkpJournalStore(root.resolve("rka/journal/rkp.journal"))
+            FileRkpJournalStore(root.resolve("journal/rkp.journal"))
     }
 }
 

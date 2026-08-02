@@ -21,7 +21,7 @@ class FileHalCsrJournal(private val root: Path) {
                 .putInt(csr.size)
                 .put(csr)
                 .array()
-        val directory = root.resolve("rka/journal")
+        val directory = root.resolve("journal")
         require(Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS))
         require(Files.getAttribute(directory, "unix:uid", LinkOption.NOFOLLOW_LINKS) == 0)
         require(

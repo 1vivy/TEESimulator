@@ -7,6 +7,7 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import org.matrix.TEESimulator.logging.SystemLogger
 
 interface BridgeExecution {
     fun <T> run(
@@ -67,10 +68,12 @@ internal class BoundedBridgeExecution(private val executor: ThreadPoolExecutor =
             abort()
             executor.purge()
             BridgeResult.Failure(BridgeError.Cancelled)
-        } catch (_: ExecutionException) {
+        } catch (error: ExecutionException) {
             future.cancel(true)
             abort()
             executor.purge()
+            val failure = error.cause ?: error
+            SystemLogger.warning("RKA bridge worker failed: ${failure.javaClass.simpleName}")
             BridgeResult.Failure(BridgeError.Io)
         }
     }

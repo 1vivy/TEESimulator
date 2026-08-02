@@ -27,7 +27,7 @@ object CandidateRuntimeRegistry {
                     identityHash,
                     BridgeRemoteCandidateBackend(),
                     FileRemoteCandidateStore(
-                        Path.of("/data/adb/teesimulator-rka/state/candidate-keystore")
+                        Path.of("/data/adb/teesimulator-rka/candidate-keystore")
                     ),
                     target.aaidDer,
                 )

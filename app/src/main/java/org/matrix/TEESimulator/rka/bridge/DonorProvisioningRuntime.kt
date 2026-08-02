@@ -28,7 +28,7 @@ import org.matrix.TEESimulator.rka.journal.RkpJournalState
 
 object DonorProvisioningRuntime {
     private val started = AtomicBoolean()
-    private val root = Path.of("/data/adb/teesimulator-rka/state")
+    private val root = Path.of("/data/adb/teesimulator-rka")
     private val client by lazy(IrpcClient::android)
     private val journal by lazy { RkpJournal(FileRkpJournalStore.production(root)) }
     private val csrJournal by lazy { FileHalCsrJournal(root) }

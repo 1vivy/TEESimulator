@@ -121,6 +121,7 @@ rka_layout_directories() {
         "$rka_state_root/secrets" \
         "$rka_state_root/trust" \
         "$rka_state_root/journal" \
+        "$rka_state_root/candidate-keystore" \
         "$rka_state_root/sidecar" \
         "$rka_state_root/sidecar/sessions" \
         "$rka_state_root/sidecar/replay" \
@@ -166,6 +167,7 @@ EOF
         "$rka_state_root/secrets" \
         "$rka_state_root/trust" \
         "$rka_state_root/journal" \
+        "$rka_state_root/candidate-keystore" \
         "$rka_state_root/sidecar" \
         "$rka_state_root/staging" \
         "$rka_state_root/quarantine" \

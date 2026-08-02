@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 audit="$repo_root/scripts/rka-audit.sh"
-base="6d241e56d6e8146cd67ed4ac3dadc9c632969549"
+base=HEAD
 test_root="$(mktemp -d)"
 trap 'find "$test_root" -depth -delete' EXIT
 chmod 700 "$test_root"

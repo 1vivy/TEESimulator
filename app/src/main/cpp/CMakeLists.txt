@@ -6,6 +6,12 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -DNDEBUG")
+add_compile_options(
+    "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=."
+    "-fdebug-prefix-map=${CMAKE_SOURCE_DIR}=."
+    "-ffile-prefix-map=${CMAKE_BINARY_DIR}=."
+    "-fdebug-prefix-map=${CMAKE_BINARY_DIR}=."
+)
 
 # LSPlt configuration
 OPTION(LSPLT_BUILD_SHARED OFF)
@@ -29,4 +35,3 @@ target_link_libraries(libsupervisor.so PRIVATE log)
 add_library(${CMAKE_PROJECT_NAME} SHARED binder_interceptor.cpp)
 target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC external/linux-kernel/include include)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE binder lsplt_static utils)
-

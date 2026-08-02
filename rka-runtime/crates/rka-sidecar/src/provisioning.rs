@@ -41,9 +41,9 @@ pub enum ProvisioningRunError {
     /// The authenticated JVM broker exchange failed.
     #[error("provisioning broker failed")]
     Broker,
-    /// Fetch or signing HTTPS failed.
-    #[error("provisioning HTTP failed")]
-    Http,
+    /// Fetch or signing HTTPS failed with a redacted client category.
+    #[error("provisioning HTTP failed: {0}")]
+    Http(ClientError),
     /// Returned status or certificate validation failed.
     #[error("provisioning validation failed")]
     Validation,
@@ -60,7 +60,7 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
     let mut client = ProvisioningHttpClient::new(
         config.base.clone(),
         (
-            BoundedHttpsTransport::new().map_err(|_| ProvisioningRunError::Http)?,
+            BoundedHttpsTransport::new().map_err(ProvisioningRunError::Http)?,
             FileBaseStore::new(&config.state_root),
             OsEntropy::new(),
             FileAttemptJournal::new(&config.state_root),
@@ -68,7 +68,7 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
     );
     let fetched = client
         .fetch(&config.info)
-        .map_err(|_| ProvisioningRunError::Http)?;
+        .map_err(ProvisioningRunError::Http)?;
     let executor = RoleExecutor::new(SidecarRole::Donor);
     let request_id = REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let request = BridgeMessage::PublicKeyRequest(
@@ -133,7 +133,7 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
             session.roots(),
         )
     })();
-    if result.is_err() && result != Err(ProvisioningRunError::Http) {
+    if result.is_err() && !matches!(result, Err(ProvisioningRunError::Http(_))) {
         let cancel = BridgeMessage::Cancel(
             RequestId::new(request_id),
             broker_handles
@@ -190,7 +190,7 @@ where
     {
         if previous == *identity {
             quarantine(config, executor, &previous)?;
-            return Err(ProvisioningRunError::Http);
+            return Err(ProvisioningRunError::Http(ClientError::PostAmbiguous));
         }
         validate_fresh_attempt(&previous, identity)
             .map_err(|_| ProvisioningRunError::Activation)?;
@@ -203,18 +203,22 @@ where
     posting
         .record(identity)
         .map_err(|_| ProvisioningRunError::Activation)?;
-    if let Ok(signed) = post() {
-        let durable = encode_durable_response(signed.request_id(), signed.response().body())?;
-        responses
-            .record_validated(identity, &durable)
-            .map_err(|_| ProvisioningRunError::Activation)?;
-        return Ok((
-            signed.request_id().to_owned(),
-            signed.response().body().to_vec(),
-        ));
+    match post() {
+        Ok(signed) => {
+            let durable = encode_durable_response(signed.request_id(), signed.response().body())?;
+            responses
+                .record_validated(identity, &durable)
+                .map_err(|_| ProvisioningRunError::Activation)?;
+            Ok((
+                signed.request_id().to_owned(),
+                signed.response().body().to_vec(),
+            ))
+        }
+        Err(error) => {
+            quarantine(config, executor, identity)?;
+            Err(ProvisioningRunError::Http(error))
+        }
     }
-    quarantine(config, executor, identity)?;
-    Err(ProvisioningRunError::Http)
 }
 
 fn encode_durable_response(
@@ -348,7 +352,7 @@ fn complete(
     let serials =
         returned_serials(response, expected.len()).map_err(|_| ProvisioningRunError::Validation)?;
     let mut status = AttestationStatusClient::new(
-        BoundedHttpsTransport::new().map_err(|_| ProvisioningRunError::Http)?,
+        BoundedHttpsTransport::new().map_err(ProvisioningRunError::Http)?,
     );
     let snapshot = status
         .snapshot_for(now, serials.iter().map(String::as_str))

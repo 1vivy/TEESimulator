@@ -120,6 +120,28 @@ provision_getprop() {
     "${RKA_GETPROP:-getprop}" "$1"
 }
 
+provision_pm() {
+    "${RKA_PM:-pm}" "$@"
+}
+
+provision_rkpd_metadata() {
+    provision_preferences=${RKA_RKPD_PREFERENCES:-/data/user_de/0/com.android.rkpdapp/shared_prefs/com.android.rkpdapp.utils.preferences.xml}
+    [ -f "$provision_preferences" ] && [ ! -L "$provision_preferences" ] || return 1
+    provision_preferences_size=$(stat -c '%s' "$provision_preferences") || return 1
+    case $provision_preferences_size in ''|*[!0-9]*) return 1 ;; esac
+    [ "$provision_preferences_size" -le 65536 ] || return 1
+    provision_id_line=$(sed -n '/name="settings_id"/p' "$provision_preferences") || return 1
+    [ "$(printf '%s\n' "$provision_id_line" | wc -l)" -eq 1 ] || return 1
+    provision_id=$(printf '%s\n' "$provision_id_line" | sed -n 's#^[[:space:]]*<int name="settings_id" value="\([0-9][0-9]*\)"[[:space:]]*/>[[:space:]]*$#\1#p') || return 1
+    case $provision_id in ''|*[!0-9]*) return 1 ;; esac
+    [ "$provision_id" -lt 1000000 ] || return 1
+    provision_package=$(provision_pm list packages --show-versioncode com.android.rkpdapp) || return 1
+    provision_version=${provision_package#package:com.android.rkpdapp versionCode:}
+    [ "$provision_version" != "$provision_package" ] || return 1
+    case $provision_version in ''|*[!0-9]*) return 1 ;; esac
+    [ "$provision_version" -gt 0 ] || return 1
+}
+
 provision_rkp_inputs() {
     provision_role=$(read_role) || return 1
     [ "$provision_role" = DONOR ] || return 1
@@ -136,6 +158,7 @@ provision_rkp_inputs() {
     provision_fingerprint=$(provision_getprop ro.build.fingerprint) || return 1
     case $provision_fingerprint in ''|*[!A-Za-z0-9._:/-]*) return 1 ;; esac
     [ "$(printf '%s' "$provision_fingerprint" | wc -c)" -le 4096 ] || return 1
+    provision_rkpd_metadata || return 1
 }
 
 provision_rkp() {
@@ -149,6 +172,8 @@ provision_rkp() {
         RKA_VALIDATOR_PKCS8="$rka_state_root/secrets/validator.pk8" \
         RKA_PROVISIONING_BASE="https://$provision_hostname/v1" \
         RKA_BUILD_FINGERPRINT="$provision_fingerprint" \
+        RKA_PROVISIONING_ID="$provision_id" \
+        RKA_PROVISIONING_VERSION="$provision_version" \
         RKA_PROFILE_EPOCH="$provision_epoch" \
         RKA_KEY_COUNT=1 \
             "${RKA_SIDECAR:-$script_directory/rka-sidecar}" provision

@@ -49,8 +49,12 @@ impl ProductionConfig {
             .ok()
             .filter(|count| (1..=20).contains(count))
             .ok_or(crate::ProvisioningRunError::Configuration)?;
-        let info = ProvisioningInfo::new(&fingerprint, epoch, 3)
-            .map_err(|_| crate::ProvisioningRunError::Configuration)?;
+        let info = ProvisioningInfo::new(
+            &fingerprint,
+            parse_u64("RKA_PROVISIONING_ID")?,
+            parse_u64("RKA_PROVISIONING_VERSION")?,
+        )
+        .map_err(|_| crate::ProvisioningRunError::Configuration)?;
         Ok(Self {
             socket,
             state_root,

@@ -1,6 +1,7 @@
 use std::{
     io::{self, Read},
     net::{TcpStream, ToSocketAddrs},
+    sync::Arc,
     time::Duration,
 };
 
@@ -24,10 +25,23 @@ pub struct BoundedHttpsTransport {
 }
 
 impl BoundedHttpsTransport {
-    /// Builds the production TLS client with native Android/Linux trust verification.
+    /// Builds the standalone production TLS client with the Mozilla root program.
     pub fn new() -> Result<Self, ClientError> {
+        // Android's platform verifier requires a hosting JVM and Context. The sidecar is a
+        // standalone root executable, so use the same bounded WebPKI root set on every device.
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let roots = webpki_roots::TLS_SERVER_ROOTS
+            .iter()
+            .cloned()
+            .collect::<rustls::RootCertStore>();
+        let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|_| ClientError::Transport)?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        tls.alpn_protocols = vec![b"http/1.1".to_vec()];
         let client = Client::builder()
-            .tls_backend_rustls()
+            .tls_backend_preconfigured(tls)
             .https_only(true)
             .redirect(Policy::none())
             .connect_timeout(NETWORK_TIMEOUT)

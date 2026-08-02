@@ -239,20 +239,37 @@ class RkaControlTest(unittest.TestCase):
                 "esac\n",
                 encoding="ascii",
             )
+            rkpd_preferences = temporary_root / "com.android.rkpdapp.utils.preferences.xml"
+            rkpd_preferences.write_text(
+                '<?xml version="1.0" encoding="utf-8" standalone="yes" ?>\n'
+                "<map>\n"
+                '    <int name="settings_id" value="4242" />\n'
+                "</map>\n",
+                encoding="ascii",
+            )
+            pm = commands / "pm"
+            pm.write_text(
+                "#!/bin/sh\n"
+                '[ "$*" = "list packages --show-versioncode com.android.rkpdapp" ] || exit 2\n'
+                "printf '%s\\n' 'package:com.android.rkpdapp versionCode:42'\n",
+                encoding="ascii",
+            )
             sidecar = commands / "rka-sidecar"
             observed = temporary_root / "provision.env"
             sidecar.write_text(
                 "#!/bin/sh\n"
                 "[ \"$1\" = provision ] || exit 2\n"
-                "printf '%s\\n' \"$RKA_PROVISIONING_BASE\" \"$RKA_DONOR_SOCKET\" \"$RKA_VALIDATOR_PKCS8\" \"$RKA_KEY_COUNT\" > \"$RKA_TEST_ENV\"\n"
+                "printf '%s\\n' \"$RKA_PROVISIONING_BASE\" \"$RKA_DONOR_SOCKET\" \"$RKA_VALIDATOR_PKCS8\" \"$RKA_KEY_COUNT\" \"$RKA_PROVISIONING_ID\" \"$RKA_PROVISIONING_VERSION\" > \"$RKA_TEST_ENV\"\n"
                 "printf '%s\\n' 'role=donor status=READY' 'RESULT=PROVISIONED'\n",
                 encoding="ascii",
             )
-            for executable in (getprop, sidecar):
+            for executable in (getprop, pm, sidecar):
                 os.chmod(executable, 0o700)
             broker_socket = state_root / "run" / "sockets" / "broker.sock"
             environment = os.environ | {
                 "RKA_GETPROP": str(getprop),
+                "RKA_PM": str(pm),
+                "RKA_RKPD_PREFERENCES": str(rkpd_preferences),
                 "RKA_SIDECAR": str(sidecar),
                 "RKA_TEST_ENV": str(observed),
             }
@@ -274,7 +291,9 @@ class RkaControlTest(unittest.TestCase):
                 "https://remoteprovisioning.googleapis.com/v1\n"
                 f"{broker_socket}\n"
                 f"{state_root / 'secrets' / 'validator.pk8'}\n"
-                "1\n",
+                "1\n"
+                "4242\n"
+                "42\n",
             )
             self.assertEqual(
                 (state_root / "journal" / "provisioning.state").read_text(encoding="ascii"),

@@ -208,7 +208,7 @@ pub(crate) fn parse_fetch_response(body: &[u8]) -> Result<(Vec<u8>, Option<BaseU
                 | "bad_cert_end" => {
                     cursor.unsigned()?;
                 }
-                _ => return Err(ConfigError::InvalidResponse),
+                _ => cursor.skip_item(0)?,
             }
         }
     }
@@ -254,8 +254,61 @@ impl<'a> CborCursor<'a> {
             }
             self.unsigned()?;
             for _ in 0..self.array_len()? {
-                self.bytes()?;
+                self.skip_item(0)?;
             }
+        }
+        Ok(())
+    }
+    fn skip_item(&mut self, depth: usize) -> Result<(), ConfigError> {
+        if depth >= 32 {
+            return Err(ConfigError::InvalidResponse);
+        }
+        let head = *self.take(1)?.first().ok_or(ConfigError::InvalidResponse)?;
+        let major = head >> 5;
+        let additional = head & 0x1f;
+        let next_depth = depth.checked_add(1).ok_or(ConfigError::InvalidResponse)?;
+        match major {
+            0 | 1 => {
+                self.additional_value(additional)?;
+            }
+            2 | 3 => {
+                let length = self.additional_value(additional)?;
+                self.take(length)?;
+            }
+            4 => {
+                let length = self.additional_value(additional)?;
+                for _ in 0..length {
+                    self.skip_item(next_depth)?;
+                }
+            }
+            5 => {
+                let length = self.additional_value(additional)?;
+                for _ in 0..length {
+                    self.skip_item(next_depth)?;
+                    self.skip_item(next_depth)?;
+                }
+            }
+            6 => {
+                self.additional_value(additional)?;
+                self.skip_item(next_depth)?;
+            }
+            7 => match additional {
+                0..=23 => {}
+                24 => {
+                    self.take(1)?;
+                }
+                25 => {
+                    self.take(2)?;
+                }
+                26 => {
+                    self.take(4)?;
+                }
+                27 => {
+                    self.take(8)?;
+                }
+                _ => return Err(ConfigError::InvalidResponse),
+            },
+            _ => return Err(ConfigError::InvalidResponse),
         }
         Ok(())
     }
@@ -264,7 +317,10 @@ impl<'a> CborCursor<'a> {
         if head >> 5 != major {
             return Err(ConfigError::InvalidResponse);
         }
-        match head & 0x1f {
+        self.additional_value(head & 0x1f)
+    }
+    fn additional_value(&mut self, additional: u8) -> Result<usize, ConfigError> {
+        match additional {
             value @ 0..=23 => Ok(usize::from(value)),
             24 => Ok(usize::from(
                 *self.take(1)?.first().ok_or(ConfigError::InvalidResponse)?,
@@ -275,6 +331,20 @@ impl<'a> CborCursor<'a> {
                     .try_into()
                     .map_err(|_| ConfigError::InvalidResponse)?;
                 Ok(usize::from(u16::from_be_bytes(bytes)))
+            }
+            26 => {
+                let bytes: [u8; 4] = self
+                    .take(4)?
+                    .try_into()
+                    .map_err(|_| ConfigError::InvalidResponse)?;
+                usize::try_from(u32::from_be_bytes(bytes)).map_err(|_| ConfigError::InvalidResponse)
+            }
+            27 => {
+                let bytes: [u8; 8] = self
+                    .take(8)?
+                    .try_into()
+                    .map_err(|_| ConfigError::InvalidResponse)?;
+                usize::try_from(u64::from_be_bytes(bytes)).map_err(|_| ConfigError::InvalidResponse)
             }
             _ => Err(ConfigError::InvalidResponse),
         }
@@ -298,7 +368,7 @@ impl<'a> CborCursor<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BaseUrl, ProvisioningInfo};
+    use super::{BaseUrl, ProvisioningInfo, parse_fetch_response};
 
     #[test]
     fn provisioning_info_golden() {
@@ -341,6 +411,26 @@ mod tests {
             assert!(BaseUrl::parse(invalid).is_err(), "{invalid}");
         }
         assert!(BaseUrl::parse(&["https://user", "@rkp.example"].concat()).is_err());
+    }
+
+    #[test]
+    fn fetch_response_accepts_opaque_eek_entries_and_future_config() {
+        let mut response = hex("83818201818440a1012641aa40");
+        response.push(0x50);
+        response.extend_from_slice(&[0x5a; 16]);
+        response.extend_from_slice(&hex("a16a6675747572655f6b65798201f5"));
+
+        let (challenge, override_url) = parse_fetch_response(&response).unwrap();
+
+        assert_eq!(challenge, [0x5a; 16]);
+        assert_eq!(override_url, None);
+    }
+
+    #[test]
+    fn fetch_response_rejects_truncated_opaque_eek_entry() {
+        let response = hex("82818201818440a1012641aa");
+
+        assert!(parse_fetch_response(&response).is_err());
     }
 
     fn hex(input: &str) -> Vec<u8> {

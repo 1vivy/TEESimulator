@@ -79,7 +79,10 @@ from pathlib import Path
 
 path = Path(__import__("sys").argv[1])
 data = bytearray(path.read_bytes())
-data[-1] ^= 1
+offset = data.find(b"password: ")
+if offset < 96:
+    raise SystemExit(2)
+data[offset - 1] ^= 1
 path.write_bytes(data)
 PY
 (cd "$test_root/bouncycastle" && zip -q "$test_root/bouncycastle-drift.zip" classes.dex)

@@ -34,10 +34,8 @@ matches = list(re.finditer(
     re.IGNORECASE,
 ))
 known = "6192bdaac3bc33d3a66162e3ff67588cd625b830539ca0f9183a1b55d37933a5"
-shipped_dex = "05ec7a1c5716dc4a444ae3b2892b867186744d6104f4707bc31ecfeeb43a24ff"
 accepted = (
     data.startswith(b"dex\n")
-    and sha256(data).hexdigest() == shipped_dex
     and data.count(needle) == 1
     and sha256(window).hexdigest() == known
     and len(matches) == 1

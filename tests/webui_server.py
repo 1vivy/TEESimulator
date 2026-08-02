@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import socket
 import subprocess
 from typing import Final
 
@@ -63,6 +64,7 @@ class WebUiServer(ThreadingHTTPServer):
     module_root: Path
     state_root: Path
     runtime_environment: dict[str, str]
+    broker_socket: socket.socket
 
 
 def private(path: Path, contents: str) -> None:
@@ -86,12 +88,57 @@ def initialize(root: Path) -> tuple[Path, Path, dict[str, str]]:
         state_root / "trust" / "transport-trust.pem",
         "-----BEGIN CERTIFICATE-----\nQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\n-----END CERTIFICATE-----\n",
     )
-    runtime = root / "fake-runtime.sh"
-    runtime.write_text("#!/bin/sh\nwhile :; do sleep 60; done\n", encoding="utf-8")
-    runtime.chmod(0o700)
+    private(
+        state_root / "trust" / "transport-identity.commit",
+        f"version=1\nspki_sha256={'cd' * 32}\n",
+    )
+    private(
+        state_root / "profiles" / "direct.conf",
+        "version=2\n"
+        "role=DONOR\n"
+        "profile_epoch=0\n"
+        "dial_mode=DONOR_DIALS\n"
+        "dial_endpoint=100.64.0.2\n"
+        "listen_interface=192.168.1.2\n"
+        f"peer_spki_sha256={'ab' * 32}\n"
+        "transport=DIRECT\n",
+    )
+    daemon = root / "fake-daemon.sh"
+    daemon.write_text("#!/bin/sh\nwhile :; do sleep 60; done\n", encoding="utf-8")
+    daemon.chmod(0o700)
+    sidecar = root / "fake-sidecar.sh"
+    sidecar.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = provision ]; then\n"
+        "  printf '%s\\n' 'role=donor status=READY' 'RESULT=PROVISIONED'\n"
+        "  exit 0\n"
+        "fi\n"
+        "[ \"$1\" = --role ] || exit 2\n"
+        "profile_sha=$(sha256sum \"$RKA_PROFILE_PATH\" | awk '{print $1}') || exit 1\n"
+        "pin=$(sed -n '7s/^peer_spki_sha256=//p' \"$RKA_PROFILE_PATH\") || exit 1\n"
+        "pin_sha=$(printf %s \"$pin\" | xxd -r -p | sha256sum | awk '{print $1}') || exit 1\n"
+        "printf 'version=1\\nprofile_sha256=%s\\nprofile_epoch=%s\\npeer_pin_sha256=%s\\ndial_mode=DONOR_DIALS\\ntransport=DIRECT\\n' \"$profile_sha\" \"$RKA_EXPECTED_PROFILE_EPOCH\" \"$pin_sha\" > \"$RKA_PROFILE_RECEIPT_PATH\"\n"
+        "chmod 600 \"$RKA_PROFILE_RECEIPT_PATH\"\n"
+        "while :; do sleep 60; done\n",
+        encoding="utf-8",
+    )
+    sidecar.chmod(0o700)
+    getprop = root / "fake-getprop.sh"
+    getprop.write_text(
+        "#!/bin/sh\n"
+        "case $1 in\n"
+        "remote_provisioning.enable_rkpd) printf '%s\\n' true ;;\n"
+        "remote_provisioning.hostname) printf '%s\\n' remoteprovisioning.googleapis.com ;;\n"
+        "ro.build.fingerprint) printf '%s\\n' brand/product/device:16/id/build:user/release-keys ;;\n"
+        "*) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    getprop.chmod(0o700)
     return module_root, state_root, {
-        "RKA_DAEMON": str(runtime),
-        "RKA_SIDECAR": str(runtime),
+        "RKA_DAEMON": str(daemon),
+        "RKA_GETPROP": str(getprop),
+        "RKA_SIDECAR": str(sidecar),
         "RKA_STABLE_SECONDS": "60",
     }
 
@@ -110,6 +157,10 @@ def main() -> None:
     server.module_root = module_root
     server.state_root = state_root
     server.runtime_environment = environment
+    server.broker_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    broker_path = state_root / "run" / "sockets" / "broker.sock"
+    server.broker_socket.bind(str(broker_path))
+    broker_path.chmod(0o600)
     arguments.nonce_file.parent.mkdir(parents=True, exist_ok=True)
     arguments.nonce_file.write_text(str(os.getpid()), encoding="utf-8")
     server.serve_forever()

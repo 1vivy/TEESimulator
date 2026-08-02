@@ -120,7 +120,7 @@ provision_getprop() {
     "${RKA_GETPROP:-getprop}" "$1"
 }
 
-provision_rkp() {
+provision_rkp_inputs() {
     provision_role=$(read_role) || return 1
     [ "$provision_role" = DONOR ] || return 1
     rka_layout_is_valid && rka_profile_is_valid || return 1
@@ -136,6 +136,10 @@ provision_rkp() {
     provision_fingerprint=$(provision_getprop ro.build.fingerprint) || return 1
     case $provision_fingerprint in ''|*[!A-Za-z0-9._:/-]*) return 1 ;; esac
     [ "$(printf '%s' "$provision_fingerprint" | wc -c)" -le 4096 ] || return 1
+}
+
+provision_rkp() {
+    provision_rkp_inputs || return 1
     provision_output=$(
         RKA_STATE_ROOT="$rka_state_root" \
         RKA_PROFILE_PATH="$rka_state_root/profiles/direct.conf" \
@@ -592,6 +596,7 @@ webui_status() {
     webui_runtime_state || return 1
     webui_sentinel_status
     webui_status_state || return 1
+    webui_rkp_provisioning_status || return 1
     printf 'role=%s\n' "$webui_role"
     printf 'phone_role=%s\n' "$(webui_phone_role "$webui_role")"
     printf 'profile_epoch=%s\n' "$webui_profile_epoch"
@@ -601,7 +606,24 @@ webui_status() {
     printf 'diagnostic=%s\n' "$webui_diagnostic"
     printf 'runtime=%s\n' "$webui_runtime"
     printf 'sentinel=%s\n' "$webui_sentinel"
+    printf 'rkp_provisioning=%s\n' "$webui_rkp_provisioning"
     printf 'quarantine_count=%s\n' "$(webui_quarantine_count)"
+}
+
+webui_rkp_provisioning_status() {
+    webui_rkp_provisioning=NOT_APPLICABLE
+    [ "$webui_role" = DONOR ] || return 0
+    webui_rkp_provisioning=NOT_READY
+    webui_provisioning_path=$rka_state_root/journal/provisioning.state
+    if [ ! -e "$webui_provisioning_path" ] && [ ! -L "$webui_provisioning_path" ]; then
+        return 0
+    fi
+    rka_private_file_is_valid "$webui_provisioning_path" || return 1
+    [ "$(cat "$webui_provisioning_path")" = "version=1
+status=PROVISIONED
+profile_epoch=$webui_profile_epoch
+key_count=1" ] || return 1
+    webui_rkp_provisioning=PROVISIONED
 }
 
 webui_record_request() {
@@ -661,7 +683,7 @@ webui_export_redacted() {
     webui_export_kind=$1
     case $webui_export_kind in audit|evidence) ;; *) return 1 ;; esac
     webui_export_snapshot=$(webui_status) || return 1
-    [ "$(printf '%s' "$webui_export_snapshot" | wc -c)" -le 448 ] || return 1
+    [ "$(printf '%s' "$webui_export_snapshot" | wc -c)" -le 512 ] || return 1
     webui_export_path=$rka_state_root/sidecar/audit/$webui_export_kind-export.txt
     rka_atomic_replace "$rka_state_root/sidecar/audit" "$webui_export_path" "version=1
 kind=$webui_export_kind
@@ -865,7 +887,7 @@ profile_epoch=$webui_next_epoch
 
 webui_action_is_valid() {
     case $1 in
-        status|role-donor|role-candidate|profile-validate-donor|profile-validate-candidate|profile-apply-donor|profile-apply-candidate|pair-direct|rotate-pairing|rotate-attestation-roots|start|stop|recover-keystore2|recover-rkpd|export-audit|export-evidence|cleanup|quarantine) return 0 ;;
+        status|role-donor|role-candidate|profile-validate-donor|profile-validate-candidate|profile-apply-donor|profile-apply-candidate|pair-direct|rotate-pairing|provision-rkp|rotate-attestation-roots|start|stop|recover-keystore2|recover-rkpd|export-audit|export-evidence|cleanup|quarantine) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -895,13 +917,16 @@ action=ROTATE_PAIRING
         profile-validate-candidate) webui_validate_profile CANDIDATE && printf '%s\n' profile_validation=VALID && webui_request_ok=true ;;
         profile-apply-donor) webui_apply_profile DONOR && printf '%s\n' profile_apply=VALIDATED && webui_request_ok=true ;;
         profile-apply-candidate) webui_apply_profile CANDIDATE && printf '%s\n' profile_apply=VALIDATED && webui_request_ok=true ;;
-        recover-keystore2|recover-rkpd|cleanup|rotate-attestation-roots)
+        recover-keystore2|recover-rkpd|provision-rkp|cleanup|rotate-attestation-roots)
             if [ -z "$webui_confirmation" ]; then
                 webui_confirmation_ready=true
                 case $webui_action in
                     recover-keystore2|recover-rkpd|rotate-attestation-roots)
                         webui_sentinel_status
                         [ "$webui_sentinel" = LIVE ] || webui_confirmation_ready=false
+                        ;;
+                    provision-rkp)
+                        provision_rkp_inputs || webui_confirmation_ready=false
                         ;;
                 esac
                 if [ "$webui_action" = rotate-attestation-roots ] &&
@@ -926,6 +951,11 @@ action=ROTATE_PAIRING
                     recover-rkpd)
                         webui_recovery_request rkpd &&
                             printf '%s\n' recovery_target=RKPD &&
+                            webui_request_ok=true
+                        ;;
+                    provision-rkp)
+                        provision_rkp &&
+                            printf '%s\n' rkp_provisioning=PROVISIONED &&
                             webui_request_ok=true
                         ;;
                     cleanup) rka_wipe_runtime && webui_request_ok=true ;;

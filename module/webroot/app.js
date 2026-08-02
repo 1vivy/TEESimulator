@@ -10,6 +10,7 @@
     "profile-apply": "profile-apply",
     "pair-direct": "pair-direct",
     "rotate-pairing": "rotate-pairing",
+    "provision-rkp": "provision-rkp",
     "rotate-attestation-roots": "rotate-attestation-roots",
     start: "start",
     stop: "stop",
@@ -30,6 +31,7 @@
     "diagnostic",
     "runtime",
     "sentinel",
+    "rkp_provisioning",
     "quarantine_count",
   ]);
   const labels = Object.freeze({
@@ -44,11 +46,13 @@
     LOCAL: "Local",
     LOCAL_LEGACY: "Local · legacy",
     NOT_READY: "Not ready",
+    NOT_APPLICABLE: "Not applicable",
     PAIRED: "Paired",
     PENDING: "Pending",
     PHONE_A_DONOR: "Phone A · donor",
     PHONE_B_CANDIDATE: "Phone B · candidate",
     QUARANTINED_AMBIGUOUS_MUTATION: "Quarantined · ambiguous mutation",
+    PROVISIONED: "Provisioned",
     READY: "Ready",
     RUNNING: "Running",
     STOPPED: "Stopped",
@@ -66,6 +70,8 @@
   const token = document.querySelector("#confirmation-token");
   const input = document.querySelector("#confirmation-input");
   const submit = document.querySelector("#confirmation-submit");
+  const provision = document.querySelector('button[data-action="provision-rkp"]');
+  let currentRole = "";
 
   function parse(stdout) {
     const values = new Map();
@@ -81,6 +87,8 @@
   }
 
   function render(values) {
+    currentRole = values.get("role") ?? "";
+    provision.disabled = currentRole !== "DONOR";
     status.replaceChildren();
     for (const name of displayed) {
       const box = document.createElement("div");
@@ -160,7 +168,7 @@
     } catch (error) {
       operation.textContent = error instanceof Error ? error.message : "WebUI request failed";
     } finally {
-      button.disabled = false;
+      button.disabled = button === provision && currentRole !== "DONOR";
     }
   }
 

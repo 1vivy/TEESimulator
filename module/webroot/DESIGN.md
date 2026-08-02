@@ -11,7 +11,7 @@ A compact dark operations console. Its signature is a double-ring panel surface 
 
 ## 2. Color
 
-`--surface-void #07080a`, `--surface-panel #101111`, `--surface-raised #1b1c1e`, `--text-primary #f9f9f9`, `--text-secondary #cecece`, `--text-muted #9c9c9d`, `--border-default #252829`, `--accent-info #55b3ff`, and `--status-danger #ff6363` are the complete palette.
+`--surface-void #07080a`, `--surface-panel #101111`, `--surface-raised #1b1c1e`, `--text-primary #f9f9f9`, `--text-secondary #cecece`, `--text-muted #9c9c9d`, `--border-default #252829`, `--accent-info #55b3ff`, `--status-danger #ff6363`, and `--status-success #6bd69a` are the complete semantic palette. White and black alpha variants provide only borders, inset light, shadow, and backdrop depth.
 
 ## 3. Typography
 
@@ -19,7 +19,7 @@ Inter, system-ui, sans-serif is primary; ui-monospace is for values. Display is 
 
 ## 4. Spacing & Layout
 
-The 4px scale uses 8px, 12px, 16px, 24px, and 32px steps. The 1120px centered document shell owns scrolling; intrinsic cards collapse to one readable column below 640px.
+The 4px layout scale uses 8px, 12px, 16px, 24px, and 32px steps. Component measurements additionally use 1px borders, a 3px focus ring, a 44px minimum control height, and intrinsic content widths. The 1120px centered document shell owns scrolling; intrinsic cards collapse to one readable column below 640px.
 
 ## 5. Components
 
@@ -37,6 +37,7 @@ The 4px scale uses 8px, 12px, 16px, 24px, and 32px steps. The 1120px centered do
 - **Structure**: native modal dialog, one-time token output, labelled input, fixed confirm button.
 - **States**: closed, awaiting exact token, mismatch, busy, accepted, refused.
 - **Accessibility**: native focus trapping, explicit heading and label, live operation result.
+- **Protected operations**: subsystem recovery, trust rotation, cleanup, and donor RKP provisioning use this confirmation cycle.
 
 ## 6. Motion & Interaction
 

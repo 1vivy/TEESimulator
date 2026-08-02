@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import socket
 from subprocess import CompletedProcess, run
 from tempfile import TemporaryDirectory
 import unittest
@@ -115,6 +116,75 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
             replay = self.control(root, state, "webui", "pair-direct", nonce)
         self.assertEqual(first.returncode, 0)
         self.assertNotEqual(replay.returncode, 0)
+
+    def test_donor_rkp_provisioning_requires_confirmation_and_updates_status(self) -> None:
+        with TemporaryDirectory() as directory:
+            base = Path(directory)
+            root, state = base / "module", base / "state"
+            self.assertEqual(self.control(root, state, "set-role", "DONOR").returncode, 0)
+            self.assertEqual(self.control(root, state, "initialize").returncode, 0)
+            (state / "profiles" / "direct.conf").write_text(
+                "version=2\n"
+                "role=DONOR\n"
+                "profile_epoch=0\n"
+                "dial_mode=DONOR_DIALS\n"
+                "dial_endpoint=100.64.0.2\n"
+                "listen_interface=192.168.1.2\n"
+                f"peer_spki_sha256={'ab' * 32}\n"
+                "transport=DIRECT\n",
+                encoding="ascii",
+            )
+            (state / "profiles" / "direct.conf").chmod(0o600)
+            commands = base / "commands"
+            commands.mkdir()
+            getprop = commands / "getprop"
+            getprop.write_text(
+                "#!/bin/sh\n"
+                "case $1 in\n"
+                "remote_provisioning.enable_rkpd) printf '%s\\n' true ;;\n"
+                "remote_provisioning.hostname) printf '%s\\n' remoteprovisioning.googleapis.com ;;\n"
+                "ro.build.fingerprint) printf '%s\\n' brand/product/device:16/id/build:user/release-keys ;;\n"
+                "*) exit 1 ;;\n"
+                "esac\n",
+                encoding="ascii",
+            )
+            sidecar = commands / "rka-sidecar"
+            sidecar.write_text(
+                "#!/bin/sh\n"
+                "[ \"$1\" = provision ] || exit 2\n"
+                "printf '%s\\n' 'role=donor status=READY' 'RESULT=PROVISIONED'\n",
+                encoding="ascii",
+            )
+            getprop.chmod(0o700)
+            sidecar.chmod(0o700)
+            environment = {"RKA_GETPROP": str(getprop), "RKA_SIDECAR": str(sidecar)}
+            broker_socket = state / "run" / "sockets" / "broker.sock"
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.bind(str(broker_socket))
+                broker_socket.chmod(0o600)
+                nonce = self.control(
+                    root, state, "webui-open", environment=environment,
+                ).stdout.split("=", 1)[1].strip()
+                prepared = self.control(
+                    root, state, "webui", "provision-rkp", nonce, environment=environment,
+                )
+                values = dict(
+                    line.split("=", 1) for line in prepared.stdout.splitlines() if "=" in line
+                )
+                applied = self.control(
+                    root,
+                    state,
+                    "webui",
+                    "provision-rkp",
+                    values["next_nonce"],
+                    values["confirmation_token"],
+                    environment=environment,
+                )
+
+        self.assertEqual(prepared.returncode, 0, prepared.stdout)
+        self.assertEqual(values["confirmation_action"], "provision-rkp")
+        self.assertEqual(applied.returncode, 0, applied.stdout)
+        self.assertIn("rkp_provisioning=PROVISIONED", applied.stdout)
 
     def test_root_rotation_overlap_and_signed_no_overlap(self) -> None:
         cases = (

@@ -24,15 +24,8 @@ test("live fixed controls expose stable accessible state", async ({ page }) => {
     };
   });
   await page.goto("/");
+  await mkdir(evidence, { recursive: true });
   await expect(page.getByLabel("rka-role-value")).toHaveText("Donor");
-  await page.locator("#profile-file").setInputFiles(
-    resolve(import.meta.dirname, "../../tests/fixtures/profile-candidate.json"),
-  );
-  await expect(page.getByLabel("rka-last-operation")).toHaveText("Profile loaded, not applied");
-  await page.getByRole("button", { name: "Validate profile" }).click();
-  await expect(page.getByLabel("rka-last-operation")).toHaveText("Request accepted");
-  await page.getByRole("button", { name: "Apply validated profile" }).click();
-  await expect(page.getByLabel("rka-role-value")).toHaveText("Candidate");
   await Promise.all([
     page.waitForResponse((response) => response.url().endsWith("/api/exec")),
     page.getByRole("button", { name: "Request direct pairing" }).click(),
@@ -44,18 +37,69 @@ test("live fixed controls expose stable accessible state", async ({ page }) => {
   ]);
   await expect(page.getByLabel("rka-last-operation")).toHaveText("Request accepted");
   await expect(page.getByLabel("rka-connection-value")).toHaveText("Ready");
+
+  const provision = page.getByRole("button", { name: "Provision donor lease" });
+  await provision.click();
+  const provisionDialog = page.getByRole("dialog");
+  await expect(provisionDialog).toBeVisible();
+  await expect(page.locator("#confirmation-state")).toHaveText("Awaiting one-time token");
+  await page.screenshot({ path: `${evidence}/task-26-provision-awaiting.png` });
+  const provisionToken = await page.locator("#confirmation-token").textContent();
+  if (provisionToken === null) throw new Error("provision confirmation token was absent");
+  await page.locator("#confirmation-input").fill(provisionToken);
+  await page.route("/api/exec", async (route) => {
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 400));
+    await route.continue();
+  }, { times: 1 });
+  const provisionResponse = page.waitForResponse((response) => response.url().endsWith("/api/exec"));
+  await page.getByRole("button", { name: "Confirm action" }).click();
+  await expect(page.locator("#confirmation-state")).toHaveText("Applying protected action");
+  await page.screenshot({ path: `${evidence}/task-26-provision-busy.png` });
+  await provisionResponse;
+  await expect(page.locator("#confirmation-state")).toHaveText("Protected action accepted");
+  await expect(page.getByText("Provisioned", { exact: true })).toBeVisible();
+  await page.screenshot({ path: `${evidence}/task-26-provision-accepted.png` });
+  await page.getByRole("button", { name: "Close" }).click();
+  await expect(page.getByLabel("rka-role-value")).toHaveText("Donor");
+  await expect(page.getByText("Provisioned", { exact: true })).toBeVisible();
+  await page.screenshot({ path: `${evidence}/task-26-provisioned-donor.png`, fullPage: true });
+  await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith("/api/exec")),
+    page.getByLabel("rka-stop").click(),
+  ]);
+  await expect(page.getByLabel("rka-last-operation")).toHaveText("Request accepted");
+
+  await page.locator("#profile-file").setInputFiles(
+    resolve(import.meta.dirname, "../../tests/fixtures/profile-candidate.json"),
+  );
+  await expect(page.getByLabel("rka-last-operation")).toHaveText("Profile loaded, not applied");
+  await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith("/api/exec")),
+    page.getByRole("button", { name: "Validate profile" }).click(),
+  ]);
+  await expect(page.getByLabel("rka-last-operation")).toHaveText("Request accepted");
+  await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith("/api/exec")),
+    page.getByRole("button", { name: "Apply validated profile" }).click(),
+  ]);
+  await expect(page.getByLabel("rka-last-operation")).toHaveText("Request accepted");
+  await expect(page.getByLabel("rka-role-value")).toHaveText("Candidate");
   await expect(page.getByLabel("rka-start")).toBeVisible();
   await expect(page.getByLabel("rka-stop")).toBeVisible();
-  await expect(page.getByLabel("rka-last-operation")).toHaveText("Request accepted");
+  await expect(provision).toBeDisabled();
   const profileTarget = await page.locator("#profile-file").boundingBox();
   if (profileTarget === null || profileTarget.height < 44) {
     throw new Error("profile file target is smaller than 44px");
   }
-  await mkdir(evidence, { recursive: true });
   for (const [width, height] of [[375, 812], [768, 1024], [1280, 900]] as const) {
     await page.setViewportSize({ width, height });
     await expect(page.getByLabel("rka-start")).toBeEnabled();
     await expect(page.getByLabel("rka-stop")).toBeEnabled();
+    await expect(provision).toBeDisabled();
+    const provisionTarget = await provision.boundingBox();
+    if (provisionTarget === null || provisionTarget.height < 44) {
+      throw new Error("provision control is smaller than 44px");
+    }
     await page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
     await page.screenshot({ path: `${evidence}/task-26-webui-${width}.png`, fullPage: true });
   }

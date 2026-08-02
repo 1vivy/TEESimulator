@@ -105,6 +105,7 @@ rka_layout_directories() {
         "$rka_state_root/sidecar/sessions" \
         "$rka_state_root/sidecar/replay" \
         "$rka_state_root/sidecar/audit" \
+        "$rka_state_root/bin" \
         "$rka_state_root/run" \
         "$rka_state_root/run/sockets" \
         "$rka_state_root/run/pids" \

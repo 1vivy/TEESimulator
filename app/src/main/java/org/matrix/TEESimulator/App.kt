@@ -16,8 +16,8 @@ import org.matrix.TEESimulator.interception.keystore.KeystoreInterceptor
 import org.matrix.TEESimulator.interception.soter.SoterProcessSupervisor
 import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.pki.NativeCertGen
-import org.matrix.TEESimulator.rka.candidate.CandidateRuntimeRegistry
 import org.matrix.TEESimulator.rka.bridge.DonorProvisioningRuntime
+import org.matrix.TEESimulator.rka.candidate.CandidateRuntimeRegistry
 import org.matrix.TEESimulator.util.AndroidDeviceUtils
 
 /**
@@ -31,10 +31,11 @@ object App {
     /**
      * The main entry point of the TEESimulator application.
      *
-     * @param args Command line arguments (not used).
+     * @param args Runtime-role arguments supplied by the module supervisor.
      */
     @JvmStatic
     fun main(args: Array<String>) {
+        val launchPlan = AppLaunchPlan.parse(args)
         SystemLogger.info("Welcome to TEESimulator!")
 
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
@@ -44,32 +45,12 @@ object App {
         try {
             val systemContext = prepareEnvironment()
 
-            // Spoof boot-state props before any hook attaches, so keystore2's
-            // cached snapshot reflects the spoofed values.
-            BootStateManager.apply()
-
-            // Load the package configuration.
-            ConfigurationManager.initialize()
-            CandidateRuntimeRegistry.initializeLifecycle()
-            DonorProvisioningRuntime.initializeLifecycle()
-
-            // Initialize and start the appropriate keystore interceptors.
-            initializeInterceptors()
-
-            // Set up the device's boot key and hash, which are crucial for attestation.
-            AndroidDeviceUtils.setupBootKeyAndHash()
-
-            // Android ships with a stripped-down Bouncy Castle provider under the name "BC".
-            // We must remove the system provider first to ensure the full Bouncy Castle library
-            // (packaged with the app) is used.
-            Security.removeProvider(BouncyCastleProvider.PROVIDER_NAME)
-            Security.addProvider(BouncyCastleProvider())
-
-            NativeCertGen.initialize("/data/adb/modules/tricky_store/libcertgen.so")
-
-            // Mount the SOTER forge on the on-demand soterserver process. The supervisor
-            // binds and (re)injects on its own thread, returning at once so it never blocks the loop.
-            SoterProcessSupervisor.start(systemContext)
+            if (launchPlan.startsKeystoreInterception) {
+                initializeKeystoreRuntime(systemContext, launchPlan.startsCandidateRuntime)
+            }
+            if (launchPlan.startsDonorProvisioning) {
+                DonorProvisioningRuntime.initializeLifecycle()
+            }
 
             // This starts the message queue processing. It blocks here indefinitely
             // processing messages until Looper.myLooper().quit() is called.
@@ -78,6 +59,27 @@ object App {
             SystemLogger.error("A fatal error occurred in the main application thread.", e)
             throw e
         }
+    }
+
+    private fun initializeKeystoreRuntime(systemContext: Context, startsCandidateRuntime: Boolean) {
+        BootStateManager.apply()
+
+        ConfigurationManager.initialize()
+        if (startsCandidateRuntime) {
+            CandidateRuntimeRegistry.initializeLifecycle()
+        }
+
+        initializeInterceptors()
+
+        // Set up the device's boot key and hash, which are crucial for attestation.
+        AndroidDeviceUtils.setupBootKeyAndHash()
+
+        Security.removeProvider(BouncyCastleProvider.PROVIDER_NAME)
+        Security.addProvider(BouncyCastleProvider())
+
+        NativeCertGen.initialize("/data/adb/modules/tricky_store/libcertgen.so")
+
+        SoterProcessSupervisor.start(systemContext)
     }
 
     /** Initializes the necessary Android framework internals to satisfy KeyStore requirements. */

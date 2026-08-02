@@ -1,5 +1,7 @@
 #!/system/bin/sh
 
+[ "$#" -ge 1 ] || exit 2
+
 MODDIR=$1
 shift
 
@@ -11,6 +13,18 @@ elif [ -f "$MODDIR/service.apk" ]; then
 else
     echo "Error: Neither classes.dex nor service.apk found in $MODDIR"
     exit 1
+fi
+
+cd "$MODDIR" || exit 1
+
+if [ "$1" = --rka-role ]; then
+    [ "$#" -eq 2 ] || exit 2
+    case $2 in
+        donor|candidate) ;;
+        *) exit 2 ;;
+    esac
+    CLASSPATH="$CLASSPATH" exec /system/bin/app_process64 /system/bin \
+        org.matrix.TEESimulator.App --rka-role "$2"
 fi
 
 exec /system/bin/app_process -Djava.class.path="$CLASSPATH" "$MODDIR" --nice-name=TEESimulator org.matrix.TEESimulator.App "$@"

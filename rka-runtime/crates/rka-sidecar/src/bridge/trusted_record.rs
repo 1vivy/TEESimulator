@@ -1,4 +1,7 @@
+use std::os::fd::AsFd;
+
 use rustix::{
+    fd::OwnedFd,
     fs::{CWD, Mode, OFlags, fstat, openat},
     io::dup,
 };
@@ -11,11 +14,75 @@ use super::{
     record_authorization::{OpenRecord, RecordPath},
 };
 
-const RECORD_COMPONENTS: [&str; 5] = ["data", "adb", "teesimulator-rka", "run", "pids"];
 const RECORD_NAME: &str = "broker.identity";
 pub(super) const MAX_RECORD_BYTES: usize = 4096;
 const DIRECTORY_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
+
+#[derive(Clone, Copy)]
+struct DirectoryPolicy {
+    uid: u32,
+    gid: u32,
+    mode: u32,
+}
+
+#[derive(Clone, Copy)]
+struct DirectoryProperties {
+    uid: u32,
+    gid: u32,
+    mode: u32,
+}
+
+impl DirectoryPolicy {
+    const ANDROID_DATA: Self = Self {
+        uid: 1000,
+        gid: 1000,
+        mode: 0o771,
+    };
+
+    const ROOT_PRIVATE: Self = Self {
+        uid: 0,
+        gid: 0,
+        mode: DIRECTORY_MODE,
+    };
+
+    const fn accepts(self, properties: DirectoryProperties) -> bool {
+        self.uid == properties.uid && self.gid == properties.gid && self.mode == properties.mode
+    }
+}
+
+const fn directory_properties(uid: u32, gid: u32, mode: u32) -> DirectoryProperties {
+    DirectoryProperties { uid, gid, mode }
+}
+
+#[derive(Clone, Copy)]
+struct RecordComponent {
+    name: &'static str,
+    policy: DirectoryPolicy,
+}
+
+const RECORD_COMPONENTS: [RecordComponent; 5] = [
+    RecordComponent {
+        name: "data",
+        policy: DirectoryPolicy::ANDROID_DATA,
+    },
+    RecordComponent {
+        name: "adb",
+        policy: DirectoryPolicy::ROOT_PRIVATE,
+    },
+    RecordComponent {
+        name: "teesimulator-rka",
+        policy: DirectoryPolicy::ROOT_PRIVATE,
+    },
+    RecordComponent {
+        name: "run",
+        policy: DirectoryPolicy::ROOT_PRIVATE,
+    },
+    RecordComponent {
+        name: "pids",
+        policy: DirectoryPolicy::ROOT_PRIVATE,
+    },
+];
 
 pub(super) fn open_identity_record(deadline: &Deadline) -> Result<OpenRecord, BridgeError> {
     deadline.remaining()?;
@@ -29,14 +96,9 @@ pub(super) fn open_identity_record(deadline: &Deadline) -> Result<OpenRecord, Br
         .map_err(|_| BridgeError::Allocation)?;
     for component in RECORD_COMPONENTS {
         deadline.remaining()?;
-        let descriptor = openat(&parent, component, directory_flags(), Mode::empty())
-            .map_err(|_| BridgeError::TrustedState)?;
-        let stat = fstat(&descriptor).map_err(|_| BridgeError::TrustedState)?;
-        if stat.st_uid != 0 || stat.st_gid != 0 || stat.st_mode & 0o777 != DIRECTORY_MODE {
-            return Err(BridgeError::TrustedState);
-        }
+        let descriptor = open_trusted_directory(&parent, component)?;
         components.push((
-            component.to_owned(),
+            component.name.to_owned(),
             dup(&descriptor).map_err(|_| BridgeError::TrustedState)?,
         ));
         parent = descriptor;
@@ -67,6 +129,24 @@ pub(super) fn open_identity_record(deadline: &Deadline) -> Result<OpenRecord, Br
         #[cfg(test)]
         restore_after_read: None,
     })
+}
+
+fn open_trusted_directory(
+    parent: &impl AsFd,
+    component: RecordComponent,
+) -> Result<OwnedFd, BridgeError> {
+    let descriptor = openat(parent, component.name, directory_flags(), Mode::empty())
+        .map_err(|_| BridgeError::TrustedState)?;
+    let stat = fstat(&descriptor).map_err(|_| BridgeError::TrustedState)?;
+    if component.policy.accepts(directory_properties(
+        stat.st_uid,
+        stat.st_gid,
+        stat.st_mode & 0o777,
+    )) {
+        Ok(descriptor)
+    } else {
+        Err(BridgeError::TrustedState)
+    }
 }
 
 const fn directory_flags() -> OFlags {
@@ -150,79 +230,5 @@ fn parse_root(value: &str) -> Result<u32, BridgeError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn record(role: &str) -> Vec<u8> {
-        format!(
-            "version=1\ngeneration=7\nlaunch_nonce={}\nuid=0\ngid=0\npid=42\nstart_time_ticks=99\nexecutable_inode=123\nexecutable_path={BROKER_EXECUTABLE}\nrole={role}\n",
-            "01".repeat(32)
-        )
-        .into_bytes()
-    }
-
-    #[test]
-    fn bridge_identity_record_accepts_exact_closed_schema() {
-        let parsed = parse_record(&record("DONOR"), BrokerRole::Donor);
-        assert!(parsed.is_ok_and(|identity| {
-            identity.generation == 7
-                && identity.pid == 42
-                && identity.start_time_ticks == 99
-                && identity.executable_inode == 123
-        }));
-    }
-
-    #[test]
-    fn bridge_identity_record_rejects_role_and_pid_reuse_fields() {
-        assert_eq!(
-            parse_record(&record("CANDIDATE"), BrokerRole::Donor),
-            Err(BridgeError::TrustedState)
-        );
-        let invalid_pid = String::from_utf8_lossy(&record("DONOR")).replace("pid=42", "pid=0");
-        assert_eq!(
-            parse_record(invalid_pid.as_bytes(), BrokerRole::Donor),
-            Err(BridgeError::TrustedState)
-        );
-    }
-
-    #[test]
-    fn bridge_identity_record_rejects_nonce_executable_and_trailing_fields() {
-        let uppercase = String::from_utf8_lossy(&record("DONOR")).replace("01", "AB");
-        assert_eq!(
-            parse_record(uppercase.as_bytes(), BrokerRole::Donor),
-            Err(BridgeError::TrustedState)
-        );
-        let executable =
-            String::from_utf8_lossy(&record("DONOR")).replace(BROKER_EXECUTABLE, "/system/bin/sh");
-        assert_eq!(
-            parse_record(executable.as_bytes(), BrokerRole::Donor),
-            Err(BridgeError::TrustedState)
-        );
-        let mut trailing = record("DONOR");
-        trailing.extend_from_slice(b"extra=1\n");
-        assert_eq!(
-            parse_record(&trailing, BrokerRole::Donor),
-            Err(BridgeError::TrustedState)
-        );
-    }
-
-    #[test]
-    fn bridge_identity_record_rejects_partial_oversize_and_invalid_utf8() {
-        let mut partial = record("DONOR");
-        partial.truncate(32);
-        assert_eq!(
-            parse_record(&partial, BrokerRole::Donor),
-            Err(BridgeError::TrustedState)
-        );
-        let mut oversized = record("DONOR");
-        oversized.resize(MAX_RECORD_BYTES + 1, b'x');
-        assert_eq!(
-            parse_record(&oversized, BrokerRole::Donor),
-            Err(BridgeError::TrustedState)
-        );
-        assert_eq!(
-            parse_record(&[0xff, b'\n'], BrokerRole::Donor),
-            Err(BridgeError::TrustedState)
-        );
-    }
-}
+#[path = "trusted_record_tests.rs"]
+mod tests;

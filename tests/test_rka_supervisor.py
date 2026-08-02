@@ -11,6 +11,7 @@ import unittest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SUPERVISOR = REPOSITORY_ROOT / "module" / "rka-supervisor.sh"
 CUSTOMIZE = REPOSITORY_ROOT / "module" / "customize.sh"
+DAEMON = REPOSITORY_ROOT / "module" / "daemon"
 
 
 class RkaSupervisorTest(unittest.TestCase):
@@ -126,8 +127,49 @@ class RkaSupervisorTest(unittest.TestCase):
             child_log = (root / "children.log").read_text(encoding="utf-8")
             self.assertIn("broker=RUNNING", status.stdout)
             self.assertIn("sidecar=RUNNING", status.stdout)
+            self.assertIn(f"{state / 'bin' / 'rka-sidecar'} --role donor", child_log)
+            self.assertEqual(
+                os.stat(state / "bin" / "rka-sidecar").st_mode & 0o777,
+                0o700,
+            )
             self.assertNotIn("--rka-candidate", child_log)
             self.assertNotIn("legacy=RUNNING", status.stdout)
+        finally:
+            self.clean(root, state)
+            temporary.cleanup()
+
+    def test_broker_launches_daemon_with_module_directory(self) -> None:
+        temporary, root, state = self.fixture("DONOR")
+        broker = root / "daemon-contract.sh"
+        ready = root / "broker-ready"
+        broker.write_text(
+            "#!/bin/sh\n"
+            '[ "$#" -eq 3 ] || exit 64\n'
+            '[ "$1" = "$RKA_EXPECTED_MODULE_DIRECTORY" ] || exit 64\n'
+            '[ "$2" = --rka-role ] || exit 64\n'
+            '[ "$3" = donor ] || exit 64\n'
+            'printf "%s\\n%s\\n%s\\n" "$1" "$2" "$3" > "$RKA_BROKER_READY"\n'
+            'exec "$RKA_CHILD_EXECUTABLE" "$@"\n',
+            encoding="utf-8",
+        )
+        broker.chmod(0o755)
+        try:
+            result = self.command(
+                root,
+                state,
+                "start",
+                environment={
+                    "RKA_DAEMON": str(broker),
+                    "RKA_CHILD_EXECUTABLE": str(root / "fake-child.sh"),
+                    "RKA_EXPECTED_MODULE_DIRECTORY": str(SUPERVISOR.parent),
+                    "RKA_BROKER_READY": str(ready),
+                },
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(
+                ready.read_text(encoding="utf-8"),
+                f"{SUPERVISOR.parent}\n--rka-role\ndonor\n",
+            )
         finally:
             self.clean(root, state)
             temporary.cleanup()
@@ -137,7 +179,7 @@ class RkaSupervisorTest(unittest.TestCase):
         try:
             self.assertEqual(self.command(root, state, "start").returncode, 0)
             child_log = (root / "children.log").read_text(encoding="utf-8")
-            self.assertIn("--rka-role CANDIDATE", child_log)
+            self.assertIn("--rka-role candidate", child_log)
             self.assertIn("candidate", child_log)
         finally:
             self.clean(root, state)
@@ -192,6 +234,18 @@ class RkaSupervisorTest(unittest.TestCase):
             self.clean(root, state)
             temporary.cleanup()
 
+    def test_duplicate_role_start_preserves_fixed_sidecar_inode(self) -> None:
+        temporary, root, state = self.fixture("DONOR")
+        try:
+            self.assertEqual(self.command(root, state, "start").returncode, 0)
+            runtime_sidecar = state / "bin" / "rka-sidecar"
+            before = os.stat(runtime_sidecar).st_ino
+            self.assertEqual(self.command(root, state, "start").returncode, 0)
+            self.assertEqual(os.stat(runtime_sidecar).st_ino, before)
+        finally:
+            self.clean(root, state)
+            temporary.cleanup()
+
     def test_stale_or_reused_pid_record_is_removed_without_signal(self) -> None:
         temporary, root, state = self.fixture("LOCAL")
         try:
@@ -200,6 +254,19 @@ class RkaSupervisorTest(unittest.TestCase):
             record.write_text("1 1 1\n", encoding="utf-8")
             self.assertEqual(self.command(root, state, "stop").returncode, 0)
             self.assertFalse(record.exists())
+        finally:
+            self.clean(root, state)
+            temporary.cleanup()
+
+    def test_stop_removes_identity_record_without_pid_record(self) -> None:
+        temporary, root, state = self.fixture("DONOR")
+        try:
+            identity = state / "run" / "pids" / "broker.identity"
+            identity.parent.mkdir(parents=True)
+            identity.write_text("stale\n", encoding="utf-8")
+            os.chmod(identity, 0o600)
+            self.assertEqual(self.command(root, state, "stop").returncode, 0)
+            self.assertFalse(identity.exists())
         finally:
             self.clean(root, state)
             temporary.cleanup()
@@ -290,6 +357,34 @@ class RkaSupervisorTest(unittest.TestCase):
         source = SUPERVISOR.read_text(encoding="utf-8")
         for forbidden in ("killall", "pkill", "reboot", "keystore2", "rkpd", "classpath"):
             self.assertNotIn(forbidden, source.lower())
+
+    def test_rka_daemon_uses_fixed_broker_process_contract(self) -> None:
+        source = DAEMON.read_text(encoding="utf-8")
+        self.assertIn('CLASSPATH="$CLASSPATH" exec /system/bin/app_process64 /system/bin', source)
+        self.assertIn('org.matrix.TEESimulator.App --rka-role "$2"', source)
+        self.assertIn('donor|candidate', source)
+        self.assertNotIn('--nice-name=TEESimulator org.matrix.TEESimulator.App --rka-role', source)
+
+    def test_daemon_changes_to_module_directory_before_app_process(self) -> None:
+        source = DAEMON.read_text(encoding="utf-8")
+        module_directory_change = source.index('cd "$MODDIR"')
+        rka_launch = source.index('if [ "$1" = --rka-role ]; then')
+        legacy_launch = source.rindex('exec /system/bin/app_process')
+        self.assertLess(module_directory_change, rka_launch)
+        self.assertLess(module_directory_change, legacy_launch)
+
+    def test_role_start_publishes_sidecar_before_broker_identity(self) -> None:
+        source = SUPERVISOR.read_text(encoding="utf-8")
+        self.assertIn('"$runtime_sidecar" --role "$selected_role"', source)
+        self.assertIn('"$pids/$name.identity"', source)
+        self.assertIn('rm -f "$record" "$pids/$name.identity"', source)
+        self.assertIn('while ! process_identity_matches', source)
+        donor_sidecar = source.index('start_sidecar donor "$active_epoch"')
+        donor_broker = source.index('start_one broker donor')
+        candidate_sidecar = source.index('start_sidecar candidate "$active_epoch"')
+        candidate_broker = source.index('start_one broker candidate')
+        self.assertLess(donor_sidecar, donor_broker)
+        self.assertLess(candidate_sidecar, candidate_broker)
 
     def test_module_installer_ships_supervisor(self) -> None:
         source = CUSTOMIZE.read_text(encoding="utf-8")

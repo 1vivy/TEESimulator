@@ -47,6 +47,7 @@ fn donor_and_candidate_remain_live_after_ready() -> Result<(), Box<dyn std::erro
     for role in ["donor", "candidate"] {
         let (root, profile) = runtime_context(&role.to_uppercase())?;
         let mut child = Command::new(env!("CARGO_BIN_EXE_rka-sidecar"))
+            .arg("--role")
             .arg(role)
             .env("RKA_STATE_ROOT", &root)
             .env("RKA_PROFILE_PATH", &profile)
@@ -95,6 +96,7 @@ fn direct_profile_is_consumed_before_readiness() -> Result<(), Box<dyn std::erro
     let receipt = root.join("run/direct-profile.receipt");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_rka-sidecar"))
+        .arg("--role")
         .arg("donor")
         .env("RKA_STATE_ROOT", &root)
         .env("RKA_PROFILE_PATH", &profile)
@@ -138,6 +140,7 @@ fn partial_and_stale_direct_profiles_fail_before_readiness()
         fs::write(&profile, profile_text)?;
 
         let output = Command::new(env!("CARGO_BIN_EXE_rka-sidecar"))
+            .arg("--role")
             .arg("donor")
             .env("RKA_STATE_ROOT", &root)
             .env("RKA_PROFILE_PATH", &profile)
@@ -168,6 +171,7 @@ fn cross_role_and_malformed_profiles_are_rejected() -> Result<(), Box<dyn std::e
         let (root, profile) = runtime_context("DONOR")?;
         fs::write(&profile, profile_text)?;
         let status = Command::new(env!("CARGO_BIN_EXE_rka-sidecar"))
+            .arg("--role")
             .arg(role)
             .env("RKA_STATE_ROOT", &root)
             .env("RKA_PROFILE_PATH", &profile)
@@ -189,6 +193,7 @@ fn oversized_nonregular_and_symlink_profiles_are_rejected() -> Result<(), Box<dy
     let (root, profile) = runtime_context("DONOR")?;
     fs::write(&profile, "x".repeat(4097))?;
     let oversized = Command::new(env!("CARGO_BIN_EXE_rka-sidecar"))
+        .arg("--role")
         .arg("donor")
         .env("RKA_STATE_ROOT", &root)
         .env("RKA_PROFILE_PATH", &profile)
@@ -202,6 +207,7 @@ fn oversized_nonregular_and_symlink_profiles_are_rejected() -> Result<(), Box<dy
     fs::remove_file(&profile)?;
     fs::create_dir(&profile)?;
     let directory = Command::new(env!("CARGO_BIN_EXE_rka-sidecar"))
+        .arg("--role")
         .arg("donor")
         .env("RKA_STATE_ROOT", &root)
         .env("RKA_PROFILE_PATH", &profile)
@@ -217,6 +223,7 @@ fn oversized_nonregular_and_symlink_profiles_are_rejected() -> Result<(), Box<dy
     fs::write(&target, "version=1\nrole=DONOR\nprofile_epoch=0\n")?;
     std::os::unix::fs::symlink(&target, &profile)?;
     let linked = Command::new(env!("CARGO_BIN_EXE_rka-sidecar"))
+        .arg("--role")
         .arg("donor")
         .env("RKA_STATE_ROOT", &root)
         .env("RKA_PROFILE_PATH", &profile)
@@ -239,5 +246,24 @@ fn unsupported_command_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("UnsupportedCommand"));
+    Ok(())
+}
+
+#[test]
+fn role_argv_contract_rejects_missing_invalid_extra_and_positional_roles()
+-> Result<(), Box<dyn std::error::Error>> {
+    for args in [
+        vec!["--role"],
+        vec!["--role", "invalid"],
+        vec!["--role", "donor", "extra"],
+        vec!["donor"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rka-sidecar"))
+            .args(&args)
+            .output()?;
+
+        assert!(!output.status.success(), "argv={args:?}");
+        assert!(output.stdout.is_empty(), "argv={args:?}");
+    }
     Ok(())
 }

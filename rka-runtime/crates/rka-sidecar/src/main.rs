@@ -3,7 +3,7 @@
 use std::{
     env,
     error::Error,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs,
     io::{self, Write as _},
     path::PathBuf,
@@ -31,8 +31,9 @@ fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    let command = env::args_os().nth(1);
-    if command.as_deref() == Some(OsStr::new("manager-appid")) {
+    let args = env::args_os().skip(1).collect::<Vec<_>>();
+    let command = args.first().map(OsString::as_os_str);
+    if command == Some(OsStr::new("manager-appid")) {
         return match rka_ksu_manager::probe_manager_appid() {
             Ok(appid) => {
                 if writeln!(io::stdout().lock(), "{appid}").is_ok() {
@@ -52,7 +53,7 @@ fn main() -> ExitCode {
             }
         };
     }
-    if command.as_deref() == Some(OsStr::new("direct-probe")) {
+    if command == Some(OsStr::new("direct-probe")) {
         return match rka_sidecar::direct_profile::probe() {
             Ok(receipt) => {
                 if write!(io::stdout().lock(), "{receipt}").is_ok() {
@@ -67,7 +68,7 @@ fn main() -> ExitCode {
             }
         };
     }
-    if command.as_deref() == Some(OsStr::new("direct-identity")) {
+    if command == Some(OsStr::new("direct-identity")) {
         return match rka_sidecar::direct_identity::initialize() {
             Ok(receipt) => {
                 if write!(io::stdout().lock(), "{receipt}").is_ok() {
@@ -82,13 +83,42 @@ fn main() -> ExitCode {
             }
         };
     }
-    match execute(command.as_deref()) {
+    let command = match parse_command(&args) {
+        Ok(command) => command,
+        Err(error) => {
+            report_error(&*error);
+            return ExitCode::FAILURE;
+        }
+    };
+    match execute(command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             report_error(&*error);
             ExitCode::FAILURE
         }
     }
+}
+
+fn parse_command(args: &[std::ffi::OsString]) -> Result<Option<&OsStr>, Box<dyn Error>> {
+    let Some(command) = args.first().map(OsString::as_os_str) else {
+        return Ok(None);
+    };
+    if command == OsStr::new("--role") {
+        if args.len() != 2 {
+            return Err("--role requires exactly one role value".into());
+        }
+        let Some(role) = args.get(1).map(OsString::as_os_str) else {
+            return Err("--role requires exactly one role value".into());
+        };
+        if role != OsStr::new("donor") && role != OsStr::new("candidate") {
+            return Err("--role accepts only donor or candidate".into());
+        }
+        return Ok(Some(role));
+    }
+    if command == OsStr::new("donor") || command == OsStr::new("candidate") {
+        return Err("positional roles are not supported; use --role".into());
+    }
+    Ok(Some(command))
 }
 
 fn execute(command: Option<&OsStr>) -> Result<(), Box<dyn Error>> {

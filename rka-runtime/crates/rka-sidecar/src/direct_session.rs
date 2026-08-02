@@ -29,6 +29,7 @@ const PORT: u16 = 37_373;
 const BUDGET: Duration = Duration::from_secs(8);
 const MAX_FRAME_BYTES: usize = 1_048_576;
 const PRE_DISPATCH_ATTEMPTS: usize = 3;
+const LOCAL_BRIDGE_SOCKET: &str = "broker.sock";
 
 #[derive(Debug, Error)]
 #[doc(hidden)]
@@ -297,7 +298,7 @@ fn bind_local(state: &Path) -> Result<UnixListener, DirectSessionError> {
     fs::create_dir_all(&directory).map_err(|_| DirectSessionError::Io)?;
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
         .map_err(|_| DirectSessionError::Io)?;
-    let path = directory.join("candidate-rka.sock");
+    let path = directory.join(LOCAL_BRIDGE_SOCKET);
     match fs::remove_file(&path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -305,7 +306,7 @@ fn bind_local(state: &Path) -> Result<UnixListener, DirectSessionError> {
     }
     let listener = UnixListener::bind(path).map_err(|_| DirectSessionError::Io)?;
     fs::set_permissions(
-        directory.join("candidate-rka.sock"),
+        directory.join(LOCAL_BRIDGE_SOCKET),
         fs::Permissions::from_mode(0o600),
     )
     .map_err(|_| DirectSessionError::Io)?;

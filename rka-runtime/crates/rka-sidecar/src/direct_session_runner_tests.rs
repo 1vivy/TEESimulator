@@ -1,7 +1,10 @@
 use std::{
-    io,
+    fs, io,
     net::{SocketAddr, SocketAddrV4, TcpListener},
-    os::unix::net::{UnixListener, UnixStream},
+    os::unix::{
+        fs::{FileTypeExt, PermissionsExt},
+        net::{UnixListener, UnixStream},
+    },
     path::PathBuf,
 };
 
@@ -73,8 +76,34 @@ impl RunnerFixture {
     }
 
     fn candidate_socket(&self) -> PathBuf {
-        self.candidate.0.join("run/sockets/candidate-rka.sock")
+        self.candidate.0.join("run/sockets/broker.sock")
     }
+}
+
+#[test]
+fn candidate_local_bridge_reclaims_the_production_broker_socket()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let state = TempState::new("candidate-local-bridge")?;
+    let directory = state.0.join("run/sockets");
+    fs::create_dir_all(&directory)?;
+    let socket = directory.join("broker.sock");
+    drop(UnixListener::bind(&socket)?);
+
+    // When
+    let _listener = bind_local(&state.0)?;
+
+    // Then
+    let metadata = fs::metadata(&socket)?;
+    assert!(metadata.file_type().is_socket());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        fs::metadata(&directory)?.permissions().mode() & 0o777,
+        0o700
+    );
+    assert!(UnixStream::connect(&socket).is_ok());
+    assert!(!directory.join("candidate-rka.sock").exists());
+    Ok(())
 }
 
 #[test]

@@ -48,6 +48,7 @@ class RkaPathsTest(unittest.TestCase):
                 state_root / "sidecar" / "sessions",
                 state_root / "sidecar" / "replay",
                 state_root / "sidecar" / "audit",
+                state_root / "bin",
                 state_root / "run" / "sockets",
                 state_root / "run" / "pids",
                 state_root / "staging",

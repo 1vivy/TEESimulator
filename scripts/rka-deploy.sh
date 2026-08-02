@@ -1284,8 +1284,8 @@ split_certificate() {
 mapfile -t donor_certificate_arguments < <(split_certificate "$donor_certificate")
 mapfile -t candidate_certificate_arguments < <(split_certificate "$candidate_certificate")
 complete_pair() {
-    donor_pair_result="$(remote "$donor_serial" pair "$transaction_id" DONOR "$candidate_pin" "$candidate_endpoint" "$donor_endpoint" "${candidate_certificate_arguments[@]}")" || return 1
     candidate_pair_result="$(remote "$candidate_serial" pair "$transaction_id" CANDIDATE "$donor_pin" "$candidate_endpoint" "$candidate_endpoint" "${donor_certificate_arguments[@]}")" || return 1
+    donor_pair_result="$(remote "$donor_serial" pair "$transaction_id" DONOR "$candidate_pin" "$candidate_endpoint" "$donor_endpoint" "${candidate_certificate_arguments[@]}")" || return 1
     remote "$donor_serial" direct-probe "$transaction_id" DONOR >/dev/null || return 1
     remote "$candidate_serial" direct-probe "$transaction_id" CANDIDATE >/dev/null || return 1
     remote "$donor_serial" verify "$transaction_id" "$donor_boot" >/dev/null || return 1

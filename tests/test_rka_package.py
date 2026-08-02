@@ -114,6 +114,15 @@ class RkaPackageTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.assert_probe_dispatch_contract(helper.replace(" t02 ;;", " t01 ;;", 1), rule_by_digest)
 
+    def test_direct_pair_starts_candidate_listener_before_donor_dialer(self) -> None:
+        source = (REPOSITORY_ROOT / "scripts" / "rka-deploy.sh").read_text(encoding="utf-8")
+        complete_pair = source.split("complete_pair() {", 1)[1].split("\n}", 1)[0]
+
+        self.assertLess(
+            complete_pair.index('remote "$candidate_serial" pair'),
+            complete_pair.index('remote "$donor_serial" pair'),
+        )
+
     def test_sepolicy_probe_helper_executes_all_manifest_hashes(self) -> None:
         hashes = [line.split("|", 1)[0] for line in SEPOLICY_PROBES.read_text(encoding="ascii").splitlines()]
         with TemporaryDirectory() as temporary_directory:

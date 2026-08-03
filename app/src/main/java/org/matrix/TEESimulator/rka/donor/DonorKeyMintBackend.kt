@@ -12,6 +12,7 @@ import org.bouncycastle.asn1.ASN1Sequence
 import org.bouncycastle.asn1.ASN1TaggedObject
 import org.matrix.TEESimulator.attestation.ATTESTATION_OID
 import org.matrix.TEESimulator.attestation.AttestationConstants
+import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.rka.journal.RkpJournal
 import org.matrix.TEESimulator.rka.journal.RkpJournalRecord
 import org.matrix.TEESimulator.rka.journal.RkpJournalState
@@ -102,15 +103,20 @@ internal constructor(
     fun generate(request: DonorGenerateRequest): DonorResult<DonorPublicKey> {
         val certified = journal.recover() ?: return failure(DonorError.STALE_HANDLE)
         if (certified.state != RkpJournalState.RKP_CERTIFIED) {
+            generateFailure("JOURNAL_NOT_CERTIFIED")
             return failure(DonorError.QUARANTINED)
         }
         if (keys.containsKey(request.aliasHandle.key())) return failure(DonorError.STALE_HANDLE)
         val rkpCertificate =
             validateCertifiedChain(certified, request)
-                ?: return quarantine(certified, DonorError.INVALID_REQUEST)
+                ?: run {
+                    generateFailure("VALIDATE_CERTIFIED_CHAIN")
+                    return quarantine(certified, DonorError.INVALID_REQUEST)
+                }
         val generating =
             runCatching { journal.transition(certified, RkpJournalState.APP_KEY_GENERATING) }
                 .getOrElse {
+                    generateFailure("JOURNAL_GENERATING")
                     return failure(DonorError.QUARANTINED)
                 }
         var creation: DonorKeyCreation? = null
@@ -126,14 +132,21 @@ internal constructor(
                             ),
                         )
                 }
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                generateFailure("DEVICE_GENERATE", error)
                 return quarantine(generating, DonorError.QUARANTINED)
             }
-        if (!resolved || creation == null) return quarantine(generating, DonorError.STALE_HANDLE)
+        if (!resolved || creation == null) {
+            generateFailure("CERTIFIED_BLOB")
+            return quarantine(generating, DonorError.STALE_HANDLE)
+        }
         val generated = requireNotNull(creation)
         val leaf =
             validateCreation(generated, rkpCertificate, request)
-                ?: return deleteAndQuarantine(generating, generated.keyBlob)
+                ?: run {
+                    generateFailure("VALIDATE_CREATION")
+                    return deleteAndQuarantine(generating, generated.keyBlob)
+                }
         val retained =
             RetainedApplicationKey(
                 request.aliasHandle,
@@ -147,6 +160,7 @@ internal constructor(
         val recorded =
             runCatching { journal.transition(generating, RkpJournalState.APP_KEY_RECORDED) }
                 .getOrElse {
+                    generateFailure("JOURNAL_RECORDED")
                     keys.remove(request.aliasHandle.key())
                     runCatching { device.delete(retained.keyBlob) }
                     return quarantine(generating, DonorError.QUARANTINED)
@@ -154,6 +168,7 @@ internal constructor(
         val transcriptSignature =
             signAndVerify(retained, request.transcript)
                 ?: run {
+                    generateFailure("TRANSCRIPT_SIGN")
                     keys.remove(request.aliasHandle.key())
                     runCatching { device.delete(retained.keyBlob) }
                     journal.quarantineCurrent()
@@ -171,12 +186,18 @@ internal constructor(
         keys[request.aliasHandle.key()] = exposedKey
         runCatching { journal.transition(recorded, RkpJournalState.EXPOSED) }
             .getOrElse {
+                generateFailure("JOURNAL_EXPOSED")
                 keys.remove(request.aliasHandle.key())
                 runCatching { device.delete(retained.keyBlob) }
                 journal.quarantineCurrent()
                 return failure(DonorError.QUARANTINED)
             }
         return DonorResult.Success(exposedKey.publicResult())
+    }
+
+    private fun generateFailure(stage: String, error: Exception? = null) {
+        val type = error?.javaClass?.simpleName ?: "NONE"
+        SystemLogger.warning("RKA donor generate failed: stage=$stage type=$type")
     }
 
     @Synchronized

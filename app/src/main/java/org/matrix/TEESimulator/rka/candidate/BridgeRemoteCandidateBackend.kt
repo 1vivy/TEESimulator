@@ -165,7 +165,20 @@ internal class BridgeRemoteCandidateBackend(
 
     private fun category(error: BridgeError): String =
         when (error) {
+            BridgeError.BadMagic -> "BAD_MAGIC"
+            BridgeError.UnsupportedVersion -> "UNSUPPORTED_VERSION"
+            BridgeError.WrongDirection -> "WRONG_DIRECTION"
+            BridgeError.UnexpectedTag -> "UNEXPECTED_TAG"
+            BridgeError.UnknownTag -> "UNKNOWN_TAG"
+            BridgeError.ReservedBits -> "RESERVED_BITS"
+            BridgeError.EmptyFrame -> "EMPTY_FRAME"
+            BridgeError.FrameTooLarge -> "FRAME_TOO_LARGE"
+            BridgeError.Truncated -> "TRUNCATED"
+            BridgeError.NonCanonical -> "NON_CANONICAL"
+            BridgeError.DuplicateCorrelation -> "DUPLICATE_CORRELATION"
+            BridgeError.UnknownCorrelation -> "UNKNOWN_CORRELATION"
             BridgeError.DeadlineExceeded -> "DEADLINE"
+            BridgeError.Cancelled -> "CANCELLED"
             BridgeError.PeerDied -> "PEER_DIED"
             BridgeError.PeerIdentityMismatch -> "PEER_IDENTITY"
             BridgeError.PeerIdentityChanged -> "PEER_IDENTITY_CHANGED"
@@ -181,7 +194,8 @@ internal class BridgeRemoteCandidateBackend(
             BridgeError.SocketPathChanged -> "SOCKET_PATH_CHANGED"
             BridgeError.SelinuxDenied -> "SELINUX"
             BridgeError.Io -> "IO"
-            else -> "PROTOCOL"
+            BridgeError.Capacity -> "CAPACITY"
+            BridgeError.QueueSaturated -> "QUEUE_SATURATED"
         }
 }
 

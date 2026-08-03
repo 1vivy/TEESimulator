@@ -225,8 +225,16 @@ fn exchange_candidate_request(
     request: &[u8],
 ) -> Result<CandidateExchange, CandidateIterationError> {
     let (network, state, profile) = context;
-    let candidate =
-        candidate_server(state, profile).map_err(|error| candidate_failure(error, 0))?;
+    let candidate = candidate_server(state, profile).map_err(|error| {
+        let status = match &error {
+            DirectSessionError::State => "candidate_setup_state",
+            DirectSessionError::Io => "candidate_setup_io",
+            DirectSessionError::Tls => "candidate_setup_tls",
+            DirectSessionError::Ambiguous => "candidate_setup_ambiguous",
+        };
+        diagnostic(state, status.to_owned());
+        candidate_failure(error, 0)
+    })?;
     for attempt in 0..PRE_DISPATCH_ATTEMPTS {
         let accepted_connections = attempt.saturating_add(1);
         let (socket, _) = network
@@ -329,12 +337,15 @@ fn candidate_server(
     state: &Path,
     profile: &DirectProfile,
 ) -> Result<PinnedTlsCandidateServer, DirectSessionError> {
-    PinnedTlsCandidateServer::new(
+    let result = PinnedTlsCandidateServer::new(
         identity(state)?,
         &ServerPeer::new(peer_trust(state)?, profile.peer_pin),
         admission(state, profile)?,
-    )
-    .map_err(|_| DirectSessionError::Tls)
+    );
+    if let Err(error) = &result {
+        diagnostic(state, tls_status(*error, "candidate_setup"));
+    }
+    result.map_err(|_| DirectSessionError::Tls)
 }
 
 fn admission(state: &Path, profile: &DirectProfile) -> Result<TlsAdmission, DirectSessionError> {

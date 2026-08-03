@@ -22,8 +22,8 @@ use thiserror::Error;
 
 use crate::{
     bridge::{
-        BridgeMessage, BrokerBatchId, BrokerCertificationMetadata, BrokerOperation, Hash32,
-        PublicBytes, RequestId, RoleExecutor, SidecarRole,
+        BridgeError, BridgeMessage, BrokerBatchId, BrokerCertificationMetadata, BrokerOperation,
+        Hash32, PublicBytes, RequestId, RoleExecutor, SidecarRole,
     },
     provision_activation::{ensure_validator_key, prepare},
     provisioning_io::{FileAttemptJournal, FileBaseStore, FileStateStore, ProductionConfig},
@@ -41,6 +41,9 @@ pub enum ProvisioningRunError {
     /// The authenticated JVM broker exchange failed.
     #[error("provisioning broker failed")]
     Broker,
+    /// The authenticated broker transport failed with a redacted bridge category.
+    #[error("provisioning broker bridge failed: {0}")]
+    BrokerBridge(BridgeError),
     /// Fetch or signing HTTPS failed with a redacted client category.
     #[error("provisioning HTTP failed: {0}")]
     Http(ClientError),
@@ -82,7 +85,7 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
             socket_path: &config.socket,
             request: &request,
         })
-        .map_err(|_| ProvisioningRunError::Broker)?;
+        .map_err(ProvisioningRunError::BrokerBridge)?;
     let mut broker_handles = Vec::new();
     let mut broker_batch_id = None;
     let result = (|| {
@@ -175,7 +178,7 @@ fn cancel_generated_batch(
             socket_path: socket,
             request: &cancel,
         })
-        .map_err(|_| ProvisioningRunError::Broker)?;
+        .map_err(ProvisioningRunError::BrokerBridge)?;
     match response {
         BridgeMessage::Cancel(id, handles, None)
             if id == RequestId::new(request_id) && handles.is_empty() =>
@@ -460,7 +463,7 @@ fn complete(
             socket_path: &config.socket,
             request: &certification,
         })
-        .map_err(|_| ProvisioningRunError::Broker)?;
+        .map_err(ProvisioningRunError::BrokerBridge)?;
     let BridgeMessage::CertificationAck(_, acknowledged_batch, acknowledged_binding) =
         acknowledgement
     else {
@@ -528,9 +531,20 @@ mod tests {
     };
 
     use super::{
-        FileStateStore, ProductionConfig, RoleExecutor, SidecarRole, attempt_identity,
-        encode_durable_response, post_with_recovery,
+        FileStateStore, ProductionConfig, ProvisioningRunError, RoleExecutor, SidecarRole,
+        attempt_identity, encode_durable_response, post_with_recovery,
     };
+
+    #[test]
+    fn broker_bridge_failure_preserves_only_the_redacted_category() {
+        let error = ProvisioningRunError::BrokerBridge(crate::bridge::BridgeError::PeerIdentity);
+
+        assert_eq!(format!("{error:?}"), "BrokerBridge(PeerIdentity)");
+        assert_eq!(
+            error.to_string(),
+            "provisioning broker bridge failed: bridge peer identity rejected"
+        );
+    }
 
     #[test]
     fn production_post_path_replays_exact_durable_response_without_http() {

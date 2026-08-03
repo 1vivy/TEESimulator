@@ -539,7 +539,10 @@ fn rejects_count_spki_der_signature_validity_type_root_epoch_and_status_failures
         Err(ValidationError::StatusStale)
     );
 
-    for (leaf_is_ca, digital_signature) in [(false, true), (true, false)] {
+    for (leaf_is_ca, digital_signature, expected_error) in [
+        (false, true, ValidationError::AttestationBasicConstraints),
+        (true, false, ValidationError::AttestationKeyUsage),
+    ] {
         let (bad_root, bad_shared, bad_leaves) =
             certificate_fixture_with_leaf_policy(leaf_is_ca, digital_signature);
         let bad_expected = bad_leaves
@@ -573,7 +576,7 @@ fn rejects_count_spki_der_signature_validity_type_root_epoch_and_status_failures
                 &bad_status,
                 &mut |_| {},
             ),
-            Err(ValidationError::CertificateType)
+            Err(expected_error)
         );
     }
 
@@ -607,6 +610,6 @@ fn rejects_count_spki_der_signature_validity_type_root_epoch_and_status_failures
             &bad_status,
             &mut |_| {},
         ),
-        Err(ValidationError::CertificateType)
+        Err(ValidationError::AttestationExtendedKeyUsage)
     );
 }

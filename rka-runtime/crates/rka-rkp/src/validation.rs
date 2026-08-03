@@ -172,9 +172,24 @@ pub enum ValidationError {
     /// A certificate was outside its validity interval.
     #[error("certificate is outside its validity window")]
     Validity,
-    /// `BasicConstraints`, `KeyUsage`, or extended usage did not match the attestation-key role.
-    #[error("certificate usage or type is invalid")]
-    CertificateType,
+    /// The issued attestation-signing certificate was not a certificate authority.
+    #[error("attestation certificate basic constraints are invalid")]
+    AttestationBasicConstraints,
+    /// The issued attestation-signing certificate lacked its required signing usages.
+    #[error("attestation certificate key usage is invalid")]
+    AttestationKeyUsage,
+    /// The issued attestation-signing certificate declared an extended usage.
+    #[error("attestation certificate extended key usage is invalid")]
+    AttestationExtendedKeyUsage,
+    /// An intermediate or root certificate was not a certificate authority.
+    #[error("authority certificate basic constraints are invalid")]
+    AuthorityBasicConstraints,
+    /// An intermediate or root certificate lacked certificate-signing usage.
+    #[error("authority certificate key usage is invalid")]
+    AuthorityKeyUsage,
+    /// An intermediate or root certificate declared an extended usage.
+    #[error("authority certificate extended key usage is invalid")]
+    AuthorityExtendedKeyUsage,
     /// The terminal root was not pinned.
     #[error("untrusted attestation root")]
     Root,

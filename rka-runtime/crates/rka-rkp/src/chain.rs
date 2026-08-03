@@ -47,20 +47,29 @@ pub(crate) fn validate_chain(
         }
         status.require_good(now, &canonical_serial(certificate)?)?;
         let is_leaf = index == 0;
+        let basic_constraints_error = if is_leaf {
+            ValidationError::AttestationBasicConstraints
+        } else {
+            ValidationError::AuthorityBasicConstraints
+        };
+        let key_usage_error = if is_leaf {
+            ValidationError::AttestationKeyUsage
+        } else {
+            ValidationError::AuthorityKeyUsage
+        };
+        let extended_key_usage_error = if is_leaf {
+            ValidationError::AttestationExtendedKeyUsage
+        } else {
+            ValidationError::AuthorityExtendedKeyUsage
+        };
         let ca = certificate
             .basic_constraints()
-            .map_err(|_| ValidationError::CertificateType)?
+            .map_err(|_| basic_constraints_error)?
             .is_some_and(|extension| extension.value.ca);
-        let usage = certificate
-            .key_usage()
-            .map_err(|_| ValidationError::CertificateType)?;
-        if certificate
-            .extended_key_usage()
-            .map_err(|_| ValidationError::CertificateType)?
-            .is_some()
-        {
-            return Err(ValidationError::CertificateType);
+        if !ca {
+            return Err(basic_constraints_error);
         }
+        let usage = certificate.key_usage().map_err(|_| key_usage_error)?;
         let valid_usage = usage.as_ref().is_some_and(|extension| {
             if is_leaf {
                 extension.value.digital_signature() && extension.value.key_cert_sign()
@@ -68,8 +77,15 @@ pub(crate) fn validate_chain(
                 extension.value.key_cert_sign()
             }
         });
-        if !ca || !valid_usage {
-            return Err(ValidationError::CertificateType);
+        if !valid_usage {
+            return Err(key_usage_error);
+        }
+        if certificate
+            .extended_key_usage()
+            .map_err(|_| extended_key_usage_error)?
+            .is_some()
+        {
+            return Err(extended_key_usage_error);
         }
         if let Some(issuer) = certificates.get(index.saturating_add(1)) {
             certificate

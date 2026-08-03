@@ -70,7 +70,10 @@ android {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
     }
-    buildFeatures { buildConfig = true }
+    buildFeatures {
+        aidl = true
+        buildConfig = true
+    }
     testOptions { unitTests.isReturnDefaultValues = true }
     externalNativeBuild {
         cmake {

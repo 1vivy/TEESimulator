@@ -105,6 +105,24 @@ fn blocked_read_wakes_on_deadline_and_close() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn read_drains_complete_frame_before_peer_hangup() -> Result<(), Box<dyn std::error::Error>> {
+    let (reader, mut writer) = UnixStream::pair()?;
+    let message = BridgeMessage::Cancel(RequestId::new(9), Vec::new(), None);
+    let frame = encode_frame(&message, ExchangeRole::DonorResponse)?;
+    std::io::Write::write_all(&mut writer, frame.as_slice())?;
+    drop(writer);
+
+    let decoded = read_message(
+        &reader,
+        ExchangeRole::DonorResponse,
+        &deadline(Duration::from_secs(1))?,
+    )?;
+
+    assert!(matches!(decoded, BridgeMessage::Cancel(id, ..) if id == RequestId::new(9)));
+    Ok(())
+}
+
+#[test]
 fn blocked_write_returns_and_wipes_frame() -> Result<(), Box<dyn std::error::Error>> {
     let (writer, _reader) = UnixStream::pair()?;
     writer.set_nonblocking(true)?;

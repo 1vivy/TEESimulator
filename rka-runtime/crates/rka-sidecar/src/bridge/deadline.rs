@@ -138,14 +138,13 @@ impl Deadline {
             return Err(self.control.error());
         }
         let observed = descriptors[0].revents();
+        if observed.intersects(events) {
+            return Ok(());
+        }
         if observed.intersects(PollFlags::ERR | PollFlags::HUP | PollFlags::NVAL) {
             return Err(BridgeError::PeerDied);
         }
-        if observed.intersects(events) {
-            Ok(())
-        } else {
-            Err(BridgeError::Io)
-        }
+        Err(BridgeError::Io)
     }
 
     #[cfg(any(target_os = "linux", test))]

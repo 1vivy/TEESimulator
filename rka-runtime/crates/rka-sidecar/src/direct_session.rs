@@ -1,6 +1,6 @@
 use std::{
     cell::Cell,
-    fs,
+    fs::{self, OpenOptions},
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
     os::unix::{fs::PermissionsExt, net::UnixListener},
@@ -11,7 +11,7 @@ use std::{
 use rka_state::PairedActivationRecord;
 use rka_transport::{
     AdmissionBinding, CandidateExchangeError, ClientPeer, PinnedTlsCandidateServer,
-    PinnedTlsDonorClient, ServerPeer, TlsAdmission, TlsCredentials,
+    PinnedTlsDonorClient, ServerPeer, TlsAdmission, TlsCredentials, TlsError,
 };
 use rustix::{net::sockopt::socket_peercred, process::geteuid};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
@@ -123,8 +123,14 @@ pub fn run_donor_bridge() -> Result<(), DirectSessionError> {
         });
         match (result, dispatched.get()) {
             (Ok(()), _) => {}
-            (Err(_), true) => return Err(DirectSessionError::Ambiguous),
-            (Err(_), false) => std::thread::sleep(Duration::from_secs(1)),
+            (Err(error), true) => {
+                diagnostic(&state, tls_status(error, "donor_ambiguous"));
+                return Err(DirectSessionError::Ambiguous);
+            }
+            (Err(error), false) => {
+                diagnostic(&state, tls_status(error, "donor_pre_dispatch"));
+                std::thread::sleep(Duration::from_secs(1));
+            }
         }
     }
 }
@@ -233,15 +239,27 @@ fn exchange_candidate_request(
                     accepted_connections,
                 });
             }
-            Err(CandidateExchangeError::PreDispatch(_))
-                if attempt < PRE_DISPATCH_ATTEMPTS.saturating_sub(1) => {}
-            Err(CandidateExchangeError::Ambiguous(_)) => {
+            Err(CandidateExchangeError::PreDispatch(error))
+                if attempt < PRE_DISPATCH_ATTEMPTS.saturating_sub(1) =>
+            {
+                diagnostic(state, tls_status(error, "candidate_pre_dispatch"));
+            }
+            Err(CandidateExchangeError::Ambiguous(error)) => {
+                diagnostic(state, tls_status(error, "candidate_ambiguous"));
                 return Err(candidate_failure(
                     DirectSessionError::Ambiguous,
                     accepted_connections,
                 ));
             }
+            Err(CandidateExchangeError::PreDispatch(error)) => {
+                diagnostic(state, tls_status(error, "candidate_pre_dispatch"));
+                return Err(candidate_failure(
+                    DirectSessionError::Tls,
+                    accepted_connections,
+                ));
+            }
             Err(_) => {
+                diagnostic(state, "candidate_pre_dispatch_unknown".to_owned());
                 return Err(candidate_failure(
                     DirectSessionError::Tls,
                     accepted_connections,
@@ -253,6 +271,31 @@ fn exchange_candidate_request(
         DirectSessionError::Tls,
         PRE_DISPATCH_ATTEMPTS,
     ))
+}
+
+fn tls_status(error: TlsError, phase: &str) -> String {
+    let category = match error {
+        TlsError::Configuration => "configuration",
+        TlsError::Certificate => "certificate",
+        TlsError::Version => "version",
+        TlsError::Pin => "pin",
+        TlsError::Admission => "admission",
+        TlsError::Frame => "frame",
+        TlsError::Deadline => "deadline",
+        TlsError::Io => "io",
+        _ => "unknown",
+    };
+    format!("{phase}_{category}")
+}
+
+fn diagnostic(state: &Path, status: String) {
+    let path = state.join("run/direct-session.diagnostic");
+    if fs::symlink_metadata(&path).is_ok_and(|metadata| !metadata.file_type().is_file()) {
+        return;
+    }
+    if let Ok(mut output) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(output, "{status}");
+    }
 }
 
 const fn candidate_failure(

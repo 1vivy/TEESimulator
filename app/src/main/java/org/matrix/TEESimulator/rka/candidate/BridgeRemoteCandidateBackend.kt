@@ -6,6 +6,7 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.EOFException
 import java.util.concurrent.atomic.AtomicLong
+import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.rka.bridge.BridgeError
 import org.matrix.TEESimulator.rka.bridge.BridgeErrorCode
 import org.matrix.TEESimulator.rka.bridge.BridgeLimits
@@ -102,7 +103,12 @@ internal class BridgeRemoteCandidateBackend(
             )
         payload.fill(0)
         return when (val result = exchange(request)) {
-            is BridgeResult.Failure -> CandidateResult.Failure(map(result.error))
+            is BridgeResult.Failure -> {
+                SystemLogger.warning(
+                    "RKA candidate bridge unavailable: category=${category(result.error)}"
+                )
+                CandidateResult.Failure(map(result.error))
+            }
             is BridgeResult.Success -> {
                 val response = result.value
                 try {
@@ -155,6 +161,27 @@ internal class BridgeRemoteCandidateBackend(
             BridgeErrorCode.POLICY_REJECTED -> CandidateError.POLICY_REJECTED
             BridgeErrorCode.CAPACITY -> CandidateError.CAPACITY
             else -> CandidateError.TRANSPORT
+        }
+
+    private fun category(error: BridgeError): String =
+        when (error) {
+            BridgeError.DeadlineExceeded -> "DEADLINE"
+            BridgeError.PeerDied -> "PEER_DIED"
+            BridgeError.PeerIdentityMismatch -> "PEER_IDENTITY"
+            BridgeError.PeerIdentityChanged -> "PEER_IDENTITY_CHANGED"
+            BridgeError.TrustedStateMissing -> "TRUSTED_STATE_MISSING"
+            BridgeError.TrustedStateInvalid -> "TRUSTED_STATE_INVALID"
+            BridgeError.TrustedStateChanged -> "TRUSTED_STATE_CHANGED"
+            BridgeError.SocketPolicy -> "SOCKET_POLICY"
+            BridgeError.SocketCreateDenied -> "SOCKET_CREATE"
+            BridgeError.SocketChownDenied -> "SOCKET_CHOWN"
+            BridgeError.SocketChmodDenied -> "SOCKET_CHMOD"
+            BridgeError.SocketLabelDenied -> "SOCKET_LABEL"
+            BridgeError.SocketBindDenied -> "SOCKET_CONNECT"
+            BridgeError.SocketPathChanged -> "SOCKET_PATH_CHANGED"
+            BridgeError.SelinuxDenied -> "SELINUX"
+            BridgeError.Io -> "IO"
+            else -> "PROTOCOL"
         }
 }
 

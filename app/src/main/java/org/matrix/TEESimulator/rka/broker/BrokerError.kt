@@ -7,6 +7,7 @@ import java.util.concurrent.CancellationException
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeoutException
+import org.matrix.TEESimulator.logging.SystemLogger
 
 enum class BrokerServiceKind {
     IRPC,
@@ -130,6 +131,7 @@ sealed class BrokerOutcome<out T> {
 internal object BrokerFailureMapper {
     fun map(service: BrokerServiceKind, throwable: Throwable): BrokerOutcome.Failure {
         val error = if (throwable is ExecutionException) throwable.cause ?: throwable else throwable
+        if (!isTyped(error)) reportUnexpected(service, error)
         return BrokerOutcome.Failure(
             when (error) {
                 is UnsupportedIrpcVersionException ->
@@ -147,6 +149,33 @@ internal object BrokerFailureMapper {
                 else -> BrokerError.OemFailure(service)
             }
         )
+    }
+
+    private fun isTyped(error: Throwable): Boolean =
+        error is UnsupportedIrpcVersionException ||
+            error is SecurityException ||
+            error is NoSuchElementException ||
+            error is DeadObjectException ||
+            error is RemoteException ||
+            error is ServiceSpecificException ||
+            error is InterruptedException ||
+            error is CancellationException ||
+            error is RejectedExecutionException ||
+            error is TimeoutException
+
+    private fun reportUnexpected(service: BrokerServiceKind, error: Throwable) {
+        val frames =
+            error.stackTrace
+                .take(4)
+                .joinToString(separator = ",") { frame ->
+                    "${frame.className}:${frame.methodName}:${frame.lineNumber}"
+                }
+        runCatching {
+            SystemLogger.warning(
+                "RKA broker unexpected failure: service=$service " +
+                    "type=${error.javaClass.name} frames=$frames"
+            )
+        }
     }
 
     private fun mapServiceCode(service: BrokerServiceKind, code: Int): BrokerServiceFailure =

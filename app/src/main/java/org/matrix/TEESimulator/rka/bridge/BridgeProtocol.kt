@@ -16,6 +16,8 @@ object BridgeLimits {
     const val MAX_IN_FLIGHT = 4
     const val MAX_QUEUED = 4
     const val DEADLINE_MILLIS = 5_000L
+    const val DONOR_DEADLINE_MILLIS = 30_000L
+    const val MAX_DEADLINE_MILLIS = DONOR_DEADLINE_MILLIS
     const val MAX_PUBLIC_KEYS = 20
     const val MAX_CHAIN_CERTIFICATES = 20
     const val MAX_CERTIFICATE_BYTES = 65_536

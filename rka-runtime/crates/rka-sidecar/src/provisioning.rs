@@ -29,6 +29,8 @@ use crate::{
     provisioning_io::{FileAttemptJournal, FileBaseStore, FileStateStore, ProductionConfig},
 };
 
+const PROVISIONING_BROKER_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Secret-free activation checkpoints suitable for production diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -199,10 +201,13 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
         config.key_count,
     );
     let response = executor
-        .dispatch(BrokerOperation::Donor {
-            socket_path: &config.socket,
-            request: &request,
-        })
+        .dispatch_with_budget(
+            BrokerOperation::Donor {
+                socket_path: &config.socket,
+                request: &request,
+            },
+            PROVISIONING_BROKER_BUDGET,
+        )
         .map_err(ProvisioningRunError::BrokerBridge)?;
     let mut broker_handles = Vec::new();
     let mut broker_batch_id = None;

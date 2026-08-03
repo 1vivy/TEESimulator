@@ -35,15 +35,11 @@ private constructor(
     internal fun hasExpired(): Boolean = remainingNanos() == 0L
 
     companion object {
-        const val MAX_MILLIS = 5_000L
+        const val MAX_MILLIS = 30_000L
 
-        fun at(timeoutMillis: Long): BrokerDeadline =
-            at(timeoutMillis, SystemBrokerMonotonicClock)
+        fun at(timeoutMillis: Long): BrokerDeadline = at(timeoutMillis, SystemBrokerMonotonicClock)
 
-        internal fun at(
-            timeoutMillis: Long,
-            clock: BrokerMonotonicClock,
-        ): BrokerDeadline {
+        internal fun at(timeoutMillis: Long, clock: BrokerMonotonicClock): BrokerDeadline {
             require(timeoutMillis in 0L..MAX_MILLIS)
             val startedAtNanos = clock.nowNanos()
             val timeoutNanos = TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
@@ -108,7 +104,9 @@ internal class ExecutorBrokerCallRunner(
         cancellation: BrokerCancellation,
         call: () -> T,
     ): BrokerOutcome<T> {
-        brokerTerminalFailure(deadline, cancellation)?.let { return it }
+        brokerTerminalFailure(deadline, cancellation)?.let {
+            return it
+        }
         val future =
             try {
                 executor.submit<T>(call)

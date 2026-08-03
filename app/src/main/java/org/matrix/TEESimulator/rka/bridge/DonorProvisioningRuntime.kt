@@ -159,7 +159,7 @@ object DonorProvisioningRuntime {
             if (!journal.prepareForProvisioning()) return failure(request.requestId)
             activeRequestId = null
             activeCancellation = null
-            val deadline = BrokerDeadline.at(BridgeLimits.DEADLINE_MILLIS)
+            val deadline = BrokerDeadline.at(BridgeLimits.DONOR_DEADLINE_MILLIS)
             val cancellation = BrokerCancellation.active()
             activeCancellation = cancellation
             val generator = DurableIrpcKeyBatchGenerator(client, journal)

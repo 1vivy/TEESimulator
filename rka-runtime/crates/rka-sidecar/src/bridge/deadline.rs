@@ -19,7 +19,7 @@ use super::BridgeError;
 const RUNNING: u8 = 0;
 const EXPIRED: u8 = 1;
 const CLOSED: u8 = 2;
-const MAX_BUDGET: Duration = Duration::from_secs(5);
+const MAX_BUDGET: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub(super) struct Control {

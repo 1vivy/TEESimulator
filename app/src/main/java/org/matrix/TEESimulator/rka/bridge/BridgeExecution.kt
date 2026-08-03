@@ -32,7 +32,7 @@ internal class BoundedBridgeExecution(private val executor: ThreadPoolExecutor =
         abort: () -> Unit,
         operation: () -> BridgeResult<T>,
     ): BridgeResult<T> {
-        require(timeoutMillis in 1..BridgeLimits.DEADLINE_MILLIS)
+        require(timeoutMillis in 1..BridgeLimits.MAX_DEADLINE_MILLIS)
         val started = System.nanoTime()
         val budget = TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
         val future =

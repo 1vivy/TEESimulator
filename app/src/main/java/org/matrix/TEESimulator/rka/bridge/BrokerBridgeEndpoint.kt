@@ -210,5 +210,5 @@ internal fun createProductionBrokerEndpoint(
         socketMetadata,
         transport,
         execution,
-        BridgeLimits.DEADLINE_MILLIS,
+        BridgeLimits.DONOR_DEADLINE_MILLIS,
     )

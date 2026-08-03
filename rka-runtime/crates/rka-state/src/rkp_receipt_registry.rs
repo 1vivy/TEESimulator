@@ -9,7 +9,8 @@ use std::{fs::File, io::Write, os::fd::OwnedFd};
 use std::path::Path;
 
 const RECEIPT_ROOT: &str = "/data/adb/teesimulator-rka/journal/validated-receipts";
-const PARENT_COMPONENTS: [&str; 4] = ["data", "adb", "teesimulator-rka", "journal"];
+const SYSTEM_DATA_COMPONENT: &str = "data";
+const PRIVATE_COMPONENTS: [&str; 3] = ["adb", "teesimulator-rka", "journal"];
 const LEAF: &str = "validated-receipts";
 const DIRECTORY_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
@@ -35,7 +36,12 @@ impl ValidatedReceiptRegistry {
     /// non-symlink directory. Only the final registry directory may be created.
     pub fn open() -> Result<Self, StateError> {
         debug_assert_eq!(
-            format!("/{}/{}", PARENT_COMPONENTS.join("/"), LEAF),
+            format!(
+                "/{}/{}/{}",
+                SYSTEM_DATA_COMPONENT,
+                PRIVATE_COMPONENTS.join("/"),
+                LEAF
+            ),
             RECEIPT_ROOT
         );
         let anchor = openat(CWD, "/", directory_flags(), Mode::empty()).map_err(storage_error)?;
@@ -57,7 +63,14 @@ impl ValidatedReceiptRegistry {
     }
 
     fn open_beneath(mut parent: OwnedFd, owner: Ownership) -> Result<Self, StateError> {
-        for component in PARENT_COMPONENTS {
+        parent = openat(
+            &parent,
+            SYSTEM_DATA_COMPONENT,
+            directory_flags(),
+            Mode::empty(),
+        )
+        .map_err(storage_error)?;
+        for component in PRIVATE_COMPONENTS {
             let directory = openat(&parent, component, directory_flags(), Mode::empty())
                 .map_err(storage_error)?;
             validate_directory(&directory, owner)?;

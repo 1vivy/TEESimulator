@@ -23,11 +23,23 @@ fn anchor() -> PathBuf {
 
 fn create_parents(anchor: &Path) {
     let mut current = anchor.to_path_buf();
-    for component in PARENT_COMPONENTS {
+    for component in std::iter::once(SYSTEM_DATA_COMPONENT).chain(PRIVATE_COMPONENTS) {
         current.push(component);
         std::fs::create_dir(&current).unwrap();
         std::fs::set_permissions(&current, Permissions::from_mode(DIRECTORY_MODE)).unwrap();
     }
+}
+
+#[test]
+fn android_data_ancestor_may_use_the_platform_traversal_mode() {
+    let anchor = anchor();
+    create_parents(&anchor);
+    std::fs::set_permissions(anchor.join("data"), Permissions::from_mode(0o771)).unwrap();
+
+    let registry = ValidatedReceiptRegistry::for_test(&anchor).unwrap();
+
+    drop(registry);
+    std::fs::remove_dir_all(anchor).unwrap();
 }
 
 #[test]

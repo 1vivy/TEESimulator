@@ -94,6 +94,12 @@ fn main() -> ExitCode {
     if command == Some(OsStr::new("synthetic-lease-issue")) {
         return synthetic_lease_issue();
     }
+    if command == Some(OsStr::new("synthetic-lease-renew")) {
+        return synthetic_lease_renew();
+    }
+    if command == Some(OsStr::new("synthetic-lease-status")) {
+        return synthetic_lease_status();
+    }
     let command = match parse_command(&args) {
         Ok(command) => command,
         Err(error) => {
@@ -121,6 +127,38 @@ fn synthetic_lease_issue() -> ExitCode {
         }
         Err(status) => {
             let _ = writeln!(io::stderr().lock(), "synthetic_lease_issue_status={status}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn synthetic_lease_renew() -> ExitCode {
+    match rka_sidecar::synthetic_lease_issue::renew() {
+        Ok(receipt) => {
+            if writeln!(io::stdout().lock(), "{receipt}").is_ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(2)
+            }
+        }
+        Err(status) => {
+            let _ = writeln!(io::stderr().lock(), "synthetic_lease_renew_status={status}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn synthetic_lease_status() -> ExitCode {
+    match rka_sidecar::synthetic_lease_issue::status() {
+        Ok(receipt) => {
+            if writeln!(io::stdout().lock(), "{receipt}").is_ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(2)
+            }
+        }
+        Err(status) => {
+            let _ = writeln!(io::stderr().lock(), "synthetic_lease_status={status}");
             ExitCode::from(2)
         }
     }

@@ -3,7 +3,10 @@
 use std::{
     fs::{self, File},
     io::{Read, Write},
-    os::unix::{fs::PermissionsExt, net::UnixStream},
+    os::unix::{
+        fs::{MetadataExt, PermissionsExt},
+        net::UnixStream,
+    },
     path::Path,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -17,7 +20,7 @@ use rka_state::{
     MAX_SYNTHETIC_LEASE_STATE_BYTES, PairedActivationRecord, SyntheticLeaseBundle,
     SyntheticLeaseInstall, SyntheticLeaseState,
 };
-use rustix::process::geteuid;
+use rustix::process::{getegid, geteuid};
 use x509_parser::parse_x509_certificate;
 use zeroize::Zeroizing;
 
@@ -48,6 +51,27 @@ pub struct SyntheticLeaseIssueReceipt {
     valid_until_millis: u64,
 }
 
+/// Secret-free candidate lease state for the module control surface.
+#[derive(Debug, Eq, PartialEq)]
+pub struct SyntheticLeaseStatusReceipt {
+    current: Option<SyntheticLeaseMetadata>,
+    next_epoch: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SyntheticLeaseMetadata {
+    epoch: u64,
+    certificate_count: usize,
+    valid_until_millis: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SyntheticLeaseInstallation {
+    slot: SyntheticLeaseInstall,
+    lease_id: [u8; 32],
+    metadata: SyntheticLeaseMetadata,
+}
+
 impl std::fmt::Display for SyntheticLeaseIssueReceipt {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let slot = match self.slot {
@@ -63,6 +87,24 @@ impl std::fmt::Display for SyntheticLeaseIssueReceipt {
             hex(&self.record_hash),
             self.certificate_count,
             self.valid_until_millis,
+        )
+    }
+}
+
+impl std::fmt::Display for SyntheticLeaseStatusReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Some(current) = self.current else {
+            return formatter.write_str(
+                "synthetic_lease_status=NOT_READY\nlease_epoch=NOT_APPLICABLE\nlease_next=EMPTY\nlease_valid_until_millis=NOT_APPLICABLE\nlease_certificate_count=NOT_APPLICABLE",
+            );
+        };
+        let next = self
+            .next_epoch
+            .map_or_else(|| "EMPTY".to_owned(), |epoch| format!("STAGED_{epoch}"));
+        write!(
+            formatter,
+            "synthetic_lease_status=ACTIVE\nlease_epoch={}\nlease_next={next}\nlease_valid_until_millis={}\nlease_certificate_count={}",
+            current.epoch, current.valid_until_millis, current.certificate_count,
         )
     }
 }
@@ -100,6 +142,59 @@ impl std::fmt::Display for SyntheticLeaseIssueStatus {
 
 /// Issues and atomically stores one current or next candidate lease.
 pub fn issue() -> Result<SyntheticLeaseIssueReceipt, SyntheticLeaseIssueStatus> {
+    issue_with_activation(false)
+}
+
+/// Issues a fresh lease and atomically makes it current, or finishes a previously staged renewal.
+pub fn renew() -> Result<SyntheticLeaseIssueReceipt, SyntheticLeaseIssueStatus> {
+    issue_with_activation(true)
+}
+
+/// Reads and validates only public lease metadata for status presentation.
+pub fn status() -> Result<SyntheticLeaseStatusReceipt, SyntheticLeaseIssueStatus> {
+    if !geteuid().is_root() {
+        return Err(SyntheticLeaseIssueStatus::InvalidContext);
+    }
+    let (state_root, profile, _) = crate::direct_profile::load(LifecycleRole::Candidate)
+        .map_err(|_| SyntheticLeaseIssueStatus::InvalidContext)?;
+    let activation = PairedActivationRecord::load(&FileStateStore::new(&state_root))
+        .map_err(|_| SyntheticLeaseIssueStatus::StateUnavailable)?;
+    if activation.profile_epoch != profile.epoch || activation.peer_spki_hash != profile.peer_pin {
+        return Err(SyntheticLeaseIssueStatus::StateUnavailable);
+    }
+    let now = now_millis()?;
+    let state_path = state_root.join("synthetic-leases/state.bin");
+    if !state_path
+        .try_exists()
+        .map_err(|_| SyntheticLeaseIssueStatus::StateUnavailable)?
+    {
+        return Ok(SyntheticLeaseStatusReceipt {
+            current: None,
+            next_epoch: None,
+        });
+    }
+    let state = load_state(&state_path, now)?;
+    let current = state
+        .current()
+        .ok_or(SyntheticLeaseIssueStatus::StateUnavailable)?;
+    if current.profile_id_hash() != &activation.profile_id_hash
+        || current.peer_spki_hash() != &activation.peer_spki_hash
+        || state.next().is_some_and(|next| {
+            next.profile_id_hash() != &activation.profile_id_hash
+                || next.peer_spki_hash() != &activation.peer_spki_hash
+        })
+    {
+        return Err(SyntheticLeaseIssueStatus::StateUnavailable);
+    }
+    Ok(SyntheticLeaseStatusReceipt {
+        current: Some(metadata(current)),
+        next_epoch: state.next().map(SyntheticLeaseBundle::epoch),
+    })
+}
+
+fn issue_with_activation(
+    activate: bool,
+) -> Result<SyntheticLeaseIssueReceipt, SyntheticLeaseIssueStatus> {
     if !geteuid().is_root() {
         return Err(SyntheticLeaseIssueStatus::InvalidContext);
     }
@@ -113,6 +208,10 @@ pub fn issue() -> Result<SyntheticLeaseIssueReceipt, SyntheticLeaseIssueStatus> 
     let now = now_millis()?;
     let state_path = state_root.join("synthetic-leases/state.bin");
     let mut state = load_state(&state_path, now)?;
+    if activate && state.next().is_some() {
+        let installation = promote_staged(&mut state)?;
+        return persist_receipt(&state_path, &state, installation);
+    }
     let requested_epoch = state
         .next_epoch()
         .map_err(|_| SyntheticLeaseIssueStatus::StateUnavailable)?;
@@ -169,36 +268,100 @@ pub fn issue() -> Result<SyntheticLeaseIssueReceipt, SyntheticLeaseIssueStatus> 
         now,
     )
     .map_err(|_| SyntheticLeaseIssueStatus::ResponseRejected)?;
+    let installation = install_bundle(&mut state, bundle, activate)?;
+    persist_receipt(&state_path, &state, installation)
+}
+
+fn promote_staged(
+    state: &mut SyntheticLeaseState,
+) -> Result<SyntheticLeaseInstallation, SyntheticLeaseIssueStatus> {
+    let next = state
+        .next()
+        .ok_or(SyntheticLeaseIssueStatus::StateUnavailable)?;
+    let installation = SyntheticLeaseInstallation {
+        slot: SyntheticLeaseInstall::Current,
+        lease_id: *next.lease_id(),
+        metadata: metadata(next),
+    };
+    state
+        .promote()
+        .map_err(|_| SyntheticLeaseIssueStatus::StateUnavailable)?;
+    Ok(installation)
+}
+
+fn install_bundle(
+    state: &mut SyntheticLeaseState,
+    bundle: SyntheticLeaseBundle,
+    activate: bool,
+) -> Result<SyntheticLeaseInstallation, SyntheticLeaseIssueStatus> {
     let lease_id = *bundle.lease_id();
-    let certificate_count = bundle.certificate_chain().len();
-    let slot = state
+    let bundle_metadata = metadata(&bundle);
+    let mut slot = state
         .install(bundle)
         .map_err(|_| SyntheticLeaseIssueStatus::StateUnavailable)?;
+    if activate && slot == SyntheticLeaseInstall::Next {
+        state
+            .promote()
+            .map_err(|_| SyntheticLeaseIssueStatus::StateUnavailable)?;
+        slot = SyntheticLeaseInstall::Current;
+    }
+    Ok(SyntheticLeaseInstallation {
+        slot,
+        lease_id,
+        metadata: bundle_metadata,
+    })
+}
+
+fn persist_receipt(
+    state_path: &Path,
+    state: &SyntheticLeaseState,
+    installation: SyntheticLeaseInstallation,
+) -> Result<SyntheticLeaseIssueReceipt, SyntheticLeaseIssueStatus> {
     let encoded = Zeroizing::new(
         state
             .encode()
             .map_err(|_| SyntheticLeaseIssueStatus::PersistenceFailed)?,
     );
-    persist_state(&state_path, encoded.as_slice())?;
+    persist_state(state_path, encoded.as_slice())?;
     let mut record_hash = [0_u8; 32];
     record_hash.copy_from_slice(digest(&SHA256, encoded.as_slice()).as_ref());
     Ok(SyntheticLeaseIssueReceipt {
-        slot,
-        epoch: requested_epoch,
-        lease_id,
+        slot: installation.slot,
+        epoch: installation.metadata.epoch,
+        lease_id: installation.lease_id,
         record_hash,
-        certificate_count,
-        valid_until_millis: effective_not_after,
+        certificate_count: installation.metadata.certificate_count,
+        valid_until_millis: installation.metadata.valid_until_millis,
     })
+}
+
+fn metadata(bundle: &SyntheticLeaseBundle) -> SyntheticLeaseMetadata {
+    SyntheticLeaseMetadata {
+        epoch: bundle.epoch(),
+        certificate_count: bundle.certificate_chain().len(),
+        valid_until_millis: bundle.not_after_millis(),
+    }
 }
 
 fn load_state(
     path: &Path,
     now_millis: u64,
 ) -> Result<SyntheticLeaseState, SyntheticLeaseIssueStatus> {
+    let parent = path
+        .parent()
+        .ok_or(SyntheticLeaseIssueStatus::StateUnavailable)?;
     match fs::symlink_metadata(path) {
         Ok(metadata)
             if metadata.file_type().is_file()
+                && fs::symlink_metadata(parent).is_ok_and(|parent_metadata| {
+                    parent_metadata.file_type().is_dir()
+                        && parent_metadata.uid() == geteuid().as_raw()
+                        && parent_metadata.gid() == getegid().as_raw()
+                        && parent_metadata.mode() & 0o777 == 0o700
+                })
+                && metadata.uid() == geteuid().as_raw()
+                && metadata.gid() == getegid().as_raw()
+                && metadata.mode() & 0o777 == 0o600
                 && metadata.len() <= MAX_SYNTHETIC_LEASE_STATE_BYTES as u64 =>
         {
             let encoded = Zeroizing::new(
@@ -224,6 +387,15 @@ fn persist_state(path: &Path, encoded: &[u8]) -> Result<(), SyntheticLeaseIssueS
     fs::create_dir_all(parent).map_err(|_| SyntheticLeaseIssueStatus::PersistenceFailed)?;
     fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
         .map_err(|_| SyntheticLeaseIssueStatus::PersistenceFailed)?;
+    let parent_metadata =
+        fs::symlink_metadata(parent).map_err(|_| SyntheticLeaseIssueStatus::PersistenceFailed)?;
+    if !parent_metadata.file_type().is_dir()
+        || parent_metadata.uid() != geteuid().as_raw()
+        || parent_metadata.gid() != getegid().as_raw()
+        || parent_metadata.mode() & 0o777 != 0o700
+    {
+        return Err(SyntheticLeaseIssueStatus::PersistenceFailed);
+    }
     if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.file_type().is_file()) {
         return Err(SyntheticLeaseIssueStatus::PersistenceFailed);
     }
@@ -403,4 +575,92 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(encoded, "{byte:02x}");
         encoded
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        SyntheticLeaseBundle, SyntheticLeaseInstall, SyntheticLeaseMetadata, SyntheticLeaseState,
+        SyntheticLeaseStatusReceipt, install_bundle, promote_staged,
+    };
+
+    fn bundle(epoch: u64, marker: u8) -> SyntheticLeaseBundle {
+        let now = 1_800_000_000_000_u64;
+        SyntheticLeaseBundle::new(
+            epoch,
+            [1; 32],
+            [2; 32],
+            now.saturating_sub(300_000),
+            now.saturating_add(3_600_000),
+            vec![marker; 121],
+            vec![0x30, marker, 0x01],
+            vec![vec![0x30, marker], vec![0x30, marker.saturating_add(1)]],
+            now,
+        )
+        .expect("fixture lease should be valid")
+    }
+
+    #[test]
+    fn empty_status_is_fixed_and_secret_free() {
+        let receipt = SyntheticLeaseStatusReceipt {
+            current: None,
+            next_epoch: None,
+        };
+
+        assert_eq!(
+            receipt.to_string(),
+            "synthetic_lease_status=NOT_READY\n\
+             lease_epoch=NOT_APPLICABLE\n\
+             lease_next=EMPTY\n\
+             lease_valid_until_millis=NOT_APPLICABLE\n\
+             lease_certificate_count=NOT_APPLICABLE"
+        );
+    }
+
+    #[test]
+    fn active_status_exposes_only_bounded_public_metadata() {
+        let receipt = SyntheticLeaseStatusReceipt {
+            current: Some(SyntheticLeaseMetadata {
+                epoch: 7,
+                certificate_count: 5,
+                valid_until_millis: 1_800_000_000_000,
+            }),
+            next_epoch: Some(8),
+        };
+
+        assert_eq!(
+            receipt.to_string(),
+            "synthetic_lease_status=ACTIVE\n\
+             lease_epoch=7\n\
+             lease_next=STAGED_8\n\
+             lease_valid_until_millis=1800000000000\n\
+             lease_certificate_count=5"
+        );
+    }
+
+    #[test]
+    fn renewal_install_atomically_replaces_current_without_a_staged_slot() {
+        let mut state = SyntheticLeaseState::empty();
+        let initial = install_bundle(&mut state, bundle(0, 3), false).unwrap();
+        let renewed = install_bundle(&mut state, bundle(1, 4), true).unwrap();
+
+        assert_eq!(initial.slot, SyntheticLeaseInstall::Current);
+        assert_eq!(renewed.slot, SyntheticLeaseInstall::Current);
+        assert_eq!(state.current().map(SyntheticLeaseBundle::epoch), Some(1));
+        assert!(state.next().is_none());
+    }
+
+    #[test]
+    fn interrupted_staged_renewal_is_promoted_before_network_use() {
+        let mut state = SyntheticLeaseState::empty();
+        state.install(bundle(0, 3)).unwrap();
+        state.install(bundle(1, 4)).unwrap();
+
+        let renewed = promote_staged(&mut state).unwrap();
+
+        assert_eq!(renewed.slot, SyntheticLeaseInstall::Current);
+        assert_eq!(renewed.metadata.epoch, 1);
+        assert_eq!(state.current().map(SyntheticLeaseBundle::epoch), Some(1));
+        assert!(state.next().is_none());
+    }
 }

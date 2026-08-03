@@ -18,6 +18,7 @@ import android.os.Parcel
 import android.os.ServiceManager
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicReference
+import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.rka.bridge.BridgeLimits
 import org.matrix.TEESimulator.rka.broker.KeyMintClient
 
@@ -183,15 +184,25 @@ private constructor(private val service: IKeyMintDevice, binder: IBinder) : Dono
             values.singleOrNull { it.securityLevel == SecurityLevel.TRUSTED_ENVIRONMENT }
                 ?: throw IllegalArgumentException("missing TEE characteristics")
         val authorizations = tee.authorizations.toList()
-        require(
-            authorizations.singleValue(Tag.ALGORITHM) { it.algorithm } == Algorithm.EC &&
-                authorizations.singleValue(Tag.EC_CURVE) { it.ecCurve } == EcCurve.P_256 &&
-                authorizations.values(Tag.PURPOSE) { it.keyPurpose } ==
-                    setOf(KeyPurpose.ATTEST_KEY) &&
-                authorizations.values(Tag.DIGEST) { it.digest }.isEmpty() &&
-                authorizations.singleValue(Tag.ORIGIN) { it.origin } == KeyOrigin.IMPORTED &&
-                authorizations.singleValue(Tag.NO_AUTH_REQUIRED) { it.boolValue }
-        )
+        val rejection =
+            when {
+                authorizations.singleValue(Tag.ALGORITHM) { it.algorithm } != Algorithm.EC ->
+                    "algorithm"
+                authorizations.singleValue(Tag.EC_CURVE) { it.ecCurve } != EcCurve.P_256 -> "curve"
+                authorizations.values(Tag.PURPOSE) { it.keyPurpose } !=
+                    setOf(KeyPurpose.ATTEST_KEY) -> "purpose"
+                authorizations.values(Tag.DIGEST) { it.digest }.isNotEmpty() -> "digest"
+                authorizations.singleValue(Tag.ORIGIN) { it.origin } != KeyOrigin.IMPORTED ->
+                    "origin"
+                !authorizations.singleValue(Tag.NO_AUTH_REQUIRED) { it.boolValue } -> "no_auth"
+                else -> null
+            }
+        if (rejection != null) {
+            SystemLogger.warning(
+                "RKA synthetic lease characteristics rejected: category=$rejection"
+            )
+            throw IllegalArgumentException("synthetic lease characteristics rejected")
+        }
         return DonorSyntheticLeaseCharacteristics.exact()
     }
 

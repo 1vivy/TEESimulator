@@ -348,14 +348,19 @@ object DonorProvisioningRuntime {
             }
         var generating: org.matrix.TEESimulator.rka.journal.RkpJournalRecord? = null
         var creation: DonorSyntheticLeaseCreation? = null
+        var stage = "PRIVATE_KEY"
         try {
             requireEcP256Pkcs8(privatePkcs8)
+            stage = "JOURNAL_RECOVER"
             val certified = requireNotNull(targetJournal.recover())
             require(certified.state == RkpJournalState.RKP_CERTIFIED)
+            stage = "RKP_CHAIN"
             val rkpCertificate = validateCertifiedChain(certified, handleBytes, rkpChain)
+            stage = "JOURNAL_TRANSITION"
             generating = targetJournal.transition(certified, RkpJournalState.APP_KEY_GENERATING)
             val secret =
                 DonorSecretBytes.of(privatePkcs8, BridgeLimits.MAX_SYNTHETIC_LEASE_PKCS8_BYTES)
+            stage = "KEYMINT_IMPORT"
             val resolved =
                 secret.use {
                     targetJournal.withCertifiedBlob(RkpOpaqueHandle.from(handleBytes)) { blob ->
@@ -375,8 +380,10 @@ object DonorProvisioningRuntime {
                             )
                     }
                 }
+            stage = "IMPORT_RESOLUTION"
             require(resolved)
             val imported = requireNotNull(creation)
+            stage = "CERTIFICATE_VALIDATION"
             val canonical =
                 validateSyntheticLeaseCreation(
                     imported,
@@ -386,9 +393,11 @@ object DonorProvisioningRuntime {
                     rkpChain,
                     rkpCertificate,
                 )
+            stage = "KEY_DELETE"
             imported.withKeyBlob(device::delete)
             imported.close()
             creation = null
+            stage = "JOURNAL_COMPLETE"
             var record = targetJournal.transition(generating, RkpJournalState.APP_KEY_RECORDED)
             record = targetJournal.transition(record, RkpJournalState.EXPOSED)
             record = targetJournal.transition(record, RkpJournalState.TERMINAL)
@@ -401,6 +410,9 @@ object DonorProvisioningRuntime {
                 certificates.forEach(PublicBytes::close)
             }
         } catch (error: Exception) {
+            SystemLogger.warning(
+                "RKA synthetic lease probe failed: stage=$stage type=${error.javaClass.simpleName}"
+            )
             creation?.let { imported ->
                 runCatching { imported.withKeyBlob(device::delete) }
                 imported.close()
@@ -471,33 +483,64 @@ object DonorProvisioningRuntime {
         rkpChain: List<ByteArray>,
         rkpCertificate: X509Certificate,
     ): List<ByteArray> {
-        require(creation.characteristics == DonorSyntheticLeaseCharacteristics.exact())
-        require(creation.certificateChain.isNotEmpty())
-        val leaseCertificate = parseCertificateStrict(creation.certificateChain.first())
-        require(leaseCertificate.publicKey is ECPublicKey)
-        require((leaseCertificate.publicKey as ECPublicKey).params.curve.field.fieldSize == 256)
-        require(leaseCertificate.publicKey.encoded.contentEquals(expectedSpki))
-        require(leaseCertificate.issuerX500Principal == rkpCertificate.subjectX500Principal)
-        leaseCertificate.verify(rkpCertificate.publicKey)
-        leaseCertificate.checkValidity()
-        val attestation = parseAttestation(leaseCertificate)
-        require(attestation.challenge.contentEquals(challenge))
-        require(attestation.aaid.contentEquals(aaid))
-        require(attestation.attestationSecurityLevel == 1)
-        require(attestation.keyMintSecurityLevel == 1)
-        require(attestation.purposes == setOf(KeyPurpose.ATTEST_KEY))
-        require(attestation.origin == KeyOrigin.IMPORTED)
-        require(attestation.digestCount == 0)
-        require(attestation.noAuthRequired)
+        requireSyntheticLease(
+            creation.characteristics == DonorSyntheticLeaseCharacteristics.exact(),
+            "characteristics",
+        )
+        requireSyntheticLease(creation.certificateChain.isNotEmpty(), "chain_empty")
+        val leaseCertificate =
+            runCatching { parseCertificateStrict(creation.certificateChain.first()) }
+                .getOrElse { rejectSyntheticLease("certificate_parse") }
+        requireSyntheticLease(leaseCertificate.publicKey is ECPublicKey, "public_key_algorithm")
+        requireSyntheticLease(
+            (leaseCertificate.publicKey as ECPublicKey).params.curve.field.fieldSize == 256,
+            "public_key_curve",
+        )
+        requireSyntheticLease(
+            leaseCertificate.publicKey.encoded.contentEquals(expectedSpki),
+            "public_key_spki",
+        )
+        requireSyntheticLease(
+            leaseCertificate.issuerX500Principal == rkpCertificate.subjectX500Principal,
+            "issuer_subject",
+        )
+        runCatching { leaseCertificate.verify(rkpCertificate.publicKey) }
+            .getOrElse { rejectSyntheticLease("issuer_signature") }
+        runCatching { leaseCertificate.checkValidity() }
+            .getOrElse { rejectSyntheticLease("validity") }
+        val attestation =
+            runCatching { parseAttestation(leaseCertificate) }
+                .getOrElse { rejectSyntheticLease("attestation_parse") }
+        requireSyntheticLease(attestation.challenge.contentEquals(challenge), "challenge")
+        requireSyntheticLease(attestation.aaid.contentEquals(aaid), "aaid")
+        requireSyntheticLease(attestation.attestationSecurityLevel == 1, "attestation_level")
+        requireSyntheticLease(attestation.keyMintSecurityLevel == 1, "keymint_level")
+        requireSyntheticLease(attestation.purposes == setOf(KeyPurpose.ATTEST_KEY), "purpose")
+        requireSyntheticLease(attestation.origin == KeyOrigin.IMPORTED, "origin")
+        requireSyntheticLease(attestation.digestCount == 0, "digest")
+        requireSyntheticLease(attestation.noAuthRequired, "no_auth")
         if (creation.certificateChain.size > 1) {
-            require(creation.certificateChain.drop(1).size == rkpChain.size)
-            require(
+            requireSyntheticLease(
+                creation.certificateChain.drop(1).size == rkpChain.size,
+                "tail_count",
+            )
+            requireSyntheticLease(
                 creation.certificateChain.drop(1).zip(rkpChain).all { (actual, expected) ->
                     actual.contentEquals(expected)
-                }
+                },
+                "tail_content",
             )
         }
         return listOf(leaseCertificate.encoded) + rkpChain.map(ByteArray::copyOf)
+    }
+
+    private fun requireSyntheticLease(condition: Boolean, category: String) {
+        if (!condition) rejectSyntheticLease(category)
+    }
+
+    private fun rejectSyntheticLease(category: String): Nothing {
+        SystemLogger.warning("RKA synthetic lease validation rejected: category=$category")
+        throw IllegalArgumentException("synthetic lease validation rejected")
     }
 
     private data class ParsedSyntheticAttestation(

@@ -14,7 +14,9 @@ import android.hardware.security.keymint.SecurityLevel
 import android.hardware.security.keymint.Tag
 import android.os.IBinder
 import android.os.ServiceManager
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicReference
+import org.matrix.TEESimulator.rka.bridge.BridgeLimits
 import org.matrix.TEESimulator.rka.broker.KeyMintClient
 
 internal class AndroidDonorKeyMintDevice
@@ -139,18 +141,38 @@ private constructor(private val service: IKeyMintDevice, binder: IBinder) : Dono
     }
 }
 
-private class AndroidDonorOperation(private val operation: IKeyMintOperation) :
+internal class AndroidDonorOperation(private val operation: IKeyMintOperation) :
     DonorOperationEndpoint {
+    private val pendingInput = ByteArrayOutputStream()
+
     override fun updateAad(input: ByteArray) {
         operation.updateAad(input, null, null)
     }
 
-    override fun update(input: ByteArray): ByteArray = operation.update(input, null, null)
+    override fun update(input: ByteArray): ByteArray {
+        require(input.size <= BridgeLimits.MAX_TOTAL_INPUT_BYTES - pendingInput.size())
+        pendingInput.write(input)
+        return ByteArray(0)
+    }
 
-    override fun finish(input: ByteArray): ByteArray =
-        operation.finish(input, null, null, null, null)
+    override fun finish(input: ByteArray): ByteArray {
+        require(input.size <= BridgeLimits.MAX_TOTAL_INPUT_BYTES - pendingInput.size())
+        val buffered = pendingInput.toByteArray()
+        val complete = buffered + input
+        return try {
+            operation.finish(complete, null, null, null, null)
+        } finally {
+            buffered.fill(0)
+            complete.fill(0)
+            pendingInput.reset()
+        }
+    }
 
     override fun abort() {
-        operation.abort()
+        try {
+            operation.abort()
+        } finally {
+            pendingInput.reset()
+        }
     }
 }

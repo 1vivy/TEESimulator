@@ -19,11 +19,13 @@ class DonorKeyMintProductionReachabilityTest {
                 "service.begin(",
                 "service.deleteKey(",
                 "operation.updateAad(",
-                "operation.update(",
                 "operation.finish(",
                 "operation.abort(",
             )
             .forEach { call -> assertTrue("missing direct call: $call", adapter.contains(call)) }
+        assertFalse(adapter.contains("operation.update(input, null, null)"))
+        assertTrue(adapter.contains("pendingInput.write(input)"))
+        assertTrue(adapter.contains("val complete = buffered + input"))
         assertTrue(adapter.contains("attestKeyParams = emptyArray()"))
         assertTrue(backend.contains("rkpCertificate.subjectX500Principal.encoded"))
         assertTrue(backend.contains("RkpJournalState.APP_KEY_GENERATING"))

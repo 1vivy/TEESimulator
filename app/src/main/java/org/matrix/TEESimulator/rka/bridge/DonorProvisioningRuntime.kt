@@ -99,6 +99,16 @@ object DonorProvisioningRuntime {
 
     @Synchronized
     private fun dispatch(message: BridgeMessage): BridgeMessage =
+        try {
+            dispatchChecked(message)
+        } catch (error: Exception) {
+            SystemLogger.warning("RKA donor dispatch failed: type=${error.javaClass.simpleName}")
+            activeRequestId = null
+            activeCancellation = null
+            failure(message.requestId)
+        }
+
+    private fun dispatchChecked(message: BridgeMessage): BridgeMessage =
         when (message) {
             is BridgeMessage.PublicKeyRequest -> provision(message)
             is BridgeMessage.CertificationRequest -> certify(message)
@@ -222,51 +232,68 @@ object DonorProvisioningRuntime {
     }
 
     private fun certify(request: BridgeMessage.CertificationRequest): BridgeMessage {
+        var stage = "MATERIAL"
         val batchBytes = request.batchId.copyBytes()
         val binding = request.activationBindingHash.copyBytes()
-        val keys = request.keyMetadata()
-        val certification =
-            try {
-                RkpCertification(
-                    request.requestId.value,
-                    RkpBatchId.from(batchBytes),
-                    keys.map {
-                        RkpCertifiedKey(
-                            it.order,
-                            org.matrix.TEESimulator.rka.journal.RkpOpaqueHandle.from(
-                                it.handle.copyBytes()
-                            ),
-                            it.publicKeyHash.copyBytes(),
-                            it.spkiHash.copyBytes(),
-                            it.chainHash.copyBytes(),
-                            it.certificateCount,
-                        )
-                    },
-                    request.profileEpoch,
-                    binding,
-                )
-            } finally {
-                keys.forEach(BrokerCertificationMetadata::close)
-            }
-        val exact =
-            if (activeRequestId == request.requestId) {
-                journal.certifyCurrent(certification)
-            } else {
-                journal.quarantineCurrent()
-                false
-            }
-        if (!exact) {
+        return try {
+            stage = "MODEL"
+            val keys = request.keyMetadata()
+            val certification =
+                try {
+                    RkpCertification(
+                        request.requestId.value,
+                        RkpBatchId.from(batchBytes),
+                        keys.map {
+                            RkpCertifiedKey(
+                                it.order,
+                                org.matrix.TEESimulator.rka.journal.RkpOpaqueHandle.from(
+                                    it.handle.copyBytes()
+                                ),
+                                it.publicKeyHash.copyBytes(),
+                                it.spkiHash.copyBytes(),
+                                it.chainHash.copyBytes(),
+                                it.certificateCount,
+                            )
+                        },
+                        request.profileEpoch,
+                        binding,
+                    )
+                } finally {
+                    keys.forEach(BrokerCertificationMetadata::close)
+                }
+            stage = "JOURNAL"
+            val exact =
+                if (activeRequestId == request.requestId) {
+                    journal.certifyCurrent(certification)
+                } else {
+                    journal.quarantineCurrent()
+                    false
+                }
             activeRequestId = null
             activeCancellation = null
-            return failure(request.requestId)
+            if (!exact) {
+                SystemLogger.warning("RKA donor certification rejected: stage=$stage")
+                failure(request.requestId)
+            } else {
+                stage = "ACK"
+                BridgeMessage.CertificationAck(
+                    request.requestId,
+                    BrokerBatchId.of(batchBytes),
+                    Hash32.of(binding),
+                )
+            }
+        } catch (error: Exception) {
+            SystemLogger.warning(
+                "RKA donor certification failed: stage=$stage " +
+                    "type=${error.javaClass.simpleName}"
+            )
+            activeRequestId = null
+            activeCancellation = null
+            failure(request.requestId)
+        } finally {
+            batchBytes.fill(0)
+            binding.fill(0)
         }
-        activeRequestId = null
-        activeCancellation = null
-        return BridgeMessage.CertificationAck(
-            request.requestId,
-            BrokerBatchId.of(batchBytes),
-            Hash32.of(binding),
-        )
     }
 
     private fun failure(requestId: RequestId): BridgeMessage.Error =

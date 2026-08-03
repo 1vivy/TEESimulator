@@ -179,7 +179,7 @@ struct TestCertificate {
 }
 
 fn certificate_fixture() -> (TestCertificate, Vec<u8>, Vec<TestCertificate>) {
-    certificate_fixture_with_eku(false, true, false)
+    certificate_fixture_with_eku(true, true, false)
 }
 
 fn certificate_fixture_with_leaf_policy(
@@ -229,6 +229,9 @@ fn certificate_fixture_with_eku(
             } else {
                 KeyUsagePurpose::KeyCertSign
             });
+            if leaf_is_ca && leaf_digital_signature {
+                params.key_usages.push(KeyUsagePurpose::KeyCertSign);
+            }
             if restrictive_eku {
                 params
                     .extended_key_usages
@@ -536,7 +539,7 @@ fn rejects_count_spki_der_signature_validity_type_root_epoch_and_status_failures
         Err(ValidationError::StatusStale)
     );
 
-    for (leaf_is_ca, digital_signature) in [(true, true), (false, false)] {
+    for (leaf_is_ca, digital_signature) in [(false, true), (true, false)] {
         let (bad_root, bad_shared, bad_leaves) =
             certificate_fixture_with_leaf_policy(leaf_is_ca, digital_signature);
         let bad_expected = bad_leaves
@@ -574,7 +577,7 @@ fn rejects_count_spki_der_signature_validity_type_root_epoch_and_status_failures
         );
     }
 
-    let (bad_root, bad_shared, bad_leaves) = certificate_fixture_with_eku(false, true, true);
+    let (bad_root, bad_shared, bad_leaves) = certificate_fixture_with_eku(true, true, true);
     let bad_response = signed_response(
         &bad_shared,
         bad_leaves.iter().map(|leaf| leaf.der.as_slice()),

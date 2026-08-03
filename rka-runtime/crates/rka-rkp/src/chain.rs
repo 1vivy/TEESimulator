@@ -63,12 +63,12 @@ pub(crate) fn validate_chain(
         }
         let valid_usage = usage.as_ref().is_some_and(|extension| {
             if is_leaf {
-                extension.value.digital_signature()
+                extension.value.digital_signature() && extension.value.key_cert_sign()
             } else {
                 extension.value.key_cert_sign()
             }
         });
-        if ca == is_leaf || !valid_usage {
+        if !ca || !valid_usage {
             return Err(ValidationError::CertificateType);
         }
         if let Some(issuer) = certificates.get(index.saturating_add(1)) {

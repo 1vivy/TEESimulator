@@ -172,7 +172,7 @@ pub enum ValidationError {
     /// A certificate was outside its validity interval.
     #[error("certificate is outside its validity window")]
     Validity,
-    /// `BasicConstraints` or `KeyUsage` did not match the certificate role.
+    /// `BasicConstraints`, `KeyUsage`, or extended usage did not match the attestation-key role.
     #[error("certificate usage or type is invalid")]
     CertificateType,
     /// The terminal root was not pinned.

@@ -68,6 +68,38 @@ It replaces TrickyStore and its forks completely. It reads config from the same 
 
 **Per-app rate limit.** Each app may request at most 2 hardware-backed keys per 30 seconds, and only 2 at a time. Past that, it receives a software-only certificate.
 
+## Two-device RKA mode
+
+RKA mode is additive to the original TEESimulator-RS path and its KernelSU
+WebUI. A paired candidate can route a narrowly allowed KeyMint request to a
+donor instead of using a local keybox:
+
+```text
+candidate app UID -> candidate keystore2 hook -> candidate RKA sidecar
+  -> TLS 1.3 mutual-authenticated channel -> donor RKA sidecar
+  -> donor KeyMint + a newly RKP-certified attestation key
+```
+
+The donor retains every private key and opaque KeyMint blob. The candidate
+receives the public certificate chain and opaque RKA handles, then proxies
+`begin`, `update`, `finish`, and `abort` back to the donor. Unsupported callers,
+StrongBox, algorithms other than EC P-256 with SHA-256, and purposes other than
+signing remain on the normal platform path. Once a request selects RKA there is
+no software or keybox fallback.
+
+Direct LAN or Tailscale routing is preferred. When the donor cannot route to
+the candidate but both are reachable from the host, the repository includes a
+byte-blind ADB stream relay:
+
+```bash
+chmod 600 /path/to/device-pair.json
+scripts/rka-adb-stream-relay.py --pair /path/to/device-pair.json
+```
+
+The relay discovers the candidate address from its installed `direct.conf` and
+does not log device serials, addresses, certificates, or payload bytes. TLS
+authentication and encryption remain end to end between the two devices.
+
 ### Task25 command-trace trust boundary
 
 The trace-completeness guarantee covers every ADB command issued by the exact hash-bound standard Task25 deploy source, HostCli, and traced adapter while their cooperative exclusive pair transaction is active. Source attestation fixes that code boundary, the pair lock fixes the transaction boundary, and the owner-only journal plus hash chain detects omission, tampering, and crashes inside it. The receipt binds the Agent-PGP-verified source SHA and the trace genesis, head, and event count; the commit signature and receipt binding do not extend that guarantee beyond the approved surface.

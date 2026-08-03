@@ -194,7 +194,7 @@ internal constructor(
         return DonorResult.Success(exposedKey.publicResult())
     }
 
-    private fun generateFailure(stage: String, error: Exception? = null) {
+    private fun generateFailure(stage: String, error: Throwable? = null) {
         val type = error?.javaClass?.simpleName ?: "NONE"
         SystemLogger.warning("RKA donor generate failed: stage=$stage type=$type")
     }
@@ -371,6 +371,9 @@ internal constructor(
             check(verifier.verify(signature))
             signature
         } catch (error: Exception) {
+            generateFailure(stage, error)
+            null
+        } catch (error: LinkageError) {
             generateFailure(stage, error)
             null
         }

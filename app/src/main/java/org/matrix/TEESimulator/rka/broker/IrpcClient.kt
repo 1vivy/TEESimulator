@@ -56,7 +56,6 @@ internal constructor(
             endpoint.descriptor != IRPC_DESCRIPTOR ||
                 endpoint.componentName.length !in 1..255 ||
                 endpoint.uniqueId.length !in 1..255 ||
-                endpoint.supportedEekCurve != EEK_CURVE_P256 ||
                 endpoint.supportedNumKeysInCsr < RkpKeyCount.MAX
         ) {
             return BrokerOutcome.Failure(
@@ -135,7 +134,6 @@ internal constructor(
             "android.hardware.security.keymint.IRemotelyProvisionedComponent"
         const val DEFAULT_TEE_SERVICE = "$IRPC_DESCRIPTOR/default"
         const val REQUIRED_VERSION = 3
-        private const val EEK_CURVE_P256 = 1
 
         fun android(): IrpcClient =
             IrpcClient(AndroidBrokerServiceResolver(), ExecutorBrokerCallRunner())
@@ -145,7 +143,6 @@ internal constructor(
 private fun IrpcServiceEndpoint.resolvedIdentity(): IrpcResolvedIdentity {
     require(
         descriptor == IrpcClient.IRPC_DESCRIPTOR &&
-            supportedEekCurve == 1 &&
             supportedNumKeysInCsr >= RkpKeyCount.MAX
     )
     return IrpcResolvedIdentity(

@@ -14,6 +14,18 @@ import org.junit.Test
 
 class RkaBrokerCapabilityFailureTest {
     @Test
+    fun versionThreeIgnoresTheDeprecatedEekCurveField() {
+        val endpoint = FakeIrpcEndpoint(supportedEekCurve = 0)
+
+        assertTrue(inspect(FakeResolver(irpc = endpoint)) is BrokerOutcome.Success)
+        assertTrue(
+            IrpcClient(FakeResolver(irpc = endpoint), DirectCallRunner)
+                .resolveIdentity(BrokerDeadline.at(5_000), BrokerCancellation.active()) is
+                BrokerOutcome.Success
+        )
+    }
+
+    @Test
     fun missingServiceIsTypedAndNeverFallsBack() {
         val resolver = FakeResolver(irpcFailure = MissingBrokerService)
         val outcome = inspect(resolver)

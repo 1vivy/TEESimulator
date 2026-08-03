@@ -24,7 +24,10 @@ mod trust_runtime;
 /// Paired-only donor policy and lifecycle service.
 pub mod donor;
 
-pub use provisioning::{ProvisioningRunError, provision_once};
+pub use provisioning::{
+    ProvisioningActivationStage, ProvisioningFailureStage, ProvisioningRunError,
+    ProvisioningValidationStage, provision_once,
+};
 pub use trust_runtime::{committed_profile_epoch, dispatch_rotation};
 
 /// Authenticated, bounded broker bridge.

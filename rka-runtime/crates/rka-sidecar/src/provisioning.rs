@@ -29,6 +29,86 @@ use crate::{
     provisioning_io::{FileAttemptJournal, FileBaseStore, FileStateStore, ProductionConfig},
 };
 
+/// Secret-free activation checkpoints suitable for production diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ProvisioningActivationStage {
+    /// Kernel-random wire request identity creation.
+    RequestIdentity,
+    /// Attempt identity construction and binding.
+    AttemptIdentity,
+    /// Durable signed-response replay lookup.
+    ResponseReplay,
+    /// Durable posting-intent load.
+    PostingLoad,
+    /// New-attempt comparison with earlier durable material.
+    AttemptFreshness,
+    /// Durable posting-intent replacement.
+    PostingRecord,
+    /// Durable validated-response replacement.
+    ResponseRecord,
+    /// Ambiguous-material construction for quarantine.
+    QuarantineMaterial,
+    /// Durable quarantine recovery.
+    QuarantineRecovery,
+    /// Cleanup-intent construction.
+    CleanupMaterial,
+    /// Certified lease and receipt preparation.
+    LeasePreparation,
+    /// Descriptor-anchored receipt registry opening.
+    ReceiptRegistry,
+    /// Signed receipt verification and one-shot consumption.
+    ReceiptVerification,
+    /// Validated certificate-chain persistence.
+    LeaseChainPersistence,
+    /// Final active-lease commit.
+    LeaseCommit,
+}
+
+/// Secret-free response-validation checkpoints suitable for production diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ProvisioningValidationStage {
+    /// Android V3 certificate request assembly.
+    RequestAssembly,
+    /// Durable signed-response envelope encoding.
+    DurableResponseEncoding,
+    /// Durable signed-response envelope decoding.
+    DurableResponseDecoding,
+    /// Certificate serial extraction.
+    ReturnedSerials,
+    /// Revocation-status snapshot retrieval.
+    StatusSnapshot,
+    /// Signed certificate response validation.
+    SignedResponse,
+    /// Certificate-chain parsing.
+    SignedChains,
+    /// Canonical chain-set hashing.
+    ChainSet,
+}
+
+/// Secret-free failure information retained when best-effort cleanup also fails.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ProvisioningFailureStage {
+    /// Configuration failure.
+    Configuration,
+    /// Broker response failure.
+    Broker,
+    /// Authenticated broker transport failure.
+    BrokerBridge(BridgeError),
+    /// HTTPS client failure.
+    Http(ClientError),
+    /// Unclassified validation failure.
+    Validation,
+    /// Classified validation failure.
+    ValidationStage(ProvisioningValidationStage),
+    /// Unclassified activation failure.
+    Activation,
+    /// Classified activation failure.
+    ActivationStage(ProvisioningActivationStage),
+}
+
 /// Closed production provisioning-run failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[non_exhaustive]
@@ -48,9 +128,49 @@ pub enum ProvisioningRunError {
     /// Returned status or certificate validation failed.
     #[error("provisioning validation failed")]
     Validation,
+    /// Returned status or certificate validation failed at a redacted checkpoint.
+    #[error("provisioning validation failed at {0:?}")]
+    ValidationStage(ProvisioningValidationStage),
     /// Signed receipt activation or durable state failed.
     #[error("provisioning activation failed")]
     Activation,
+    /// Signed receipt activation or durable state failed at a redacted checkpoint.
+    #[error("provisioning activation failed at {0:?}")]
+    ActivationStage(ProvisioningActivationStage),
+    /// Cleanup failed after a prior failure; both secret-free categories are retained.
+    #[error("provisioning cleanup failed after {prior:?}: {cleanup:?}")]
+    Cleanup {
+        /// The failure that caused cleanup to run.
+        prior: ProvisioningFailureStage,
+        /// The failure encountered while attempting cleanup.
+        cleanup: ProvisioningFailureStage,
+    },
+}
+
+impl ProvisioningRunError {
+    const fn failure_stage(self) -> ProvisioningFailureStage {
+        match self {
+            Self::Configuration => ProvisioningFailureStage::Configuration,
+            Self::Broker => ProvisioningFailureStage::Broker,
+            Self::BrokerBridge(error) => ProvisioningFailureStage::BrokerBridge(error),
+            Self::Http(error) => ProvisioningFailureStage::Http(error),
+            Self::Validation => ProvisioningFailureStage::Validation,
+            Self::ValidationStage(stage) => ProvisioningFailureStage::ValidationStage(stage),
+            Self::Activation => ProvisioningFailureStage::Activation,
+            Self::ActivationStage(stage) => ProvisioningFailureStage::ActivationStage(stage),
+            Self::Cleanup { prior, .. } => prior,
+        }
+    }
+}
+
+const fn cleanup_failure(
+    prior: ProvisioningRunError,
+    cleanup: ProvisioningRunError,
+) -> ProvisioningRunError {
+    ProvisioningRunError::Cleanup {
+        prior: prior.failure_stage(),
+        cleanup: cleanup.failure_stage(),
+    }
 }
 
 /// Runs one authenticated V2 CSR-to-activated-lease production transaction.
@@ -111,8 +231,10 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
                 ))
             })
             .collect::<Result<Vec<_>, ProvisioningRunError>>()?;
-        let prepared = assemble_android_v3_body(hal_csr.as_slice(), &config.fingerprint)
-            .map_err(|_| ProvisioningRunError::Validation)?;
+        let prepared =
+            assemble_android_v3_body(hal_csr.as_slice(), &config.fingerprint).map_err(|_| {
+                ProvisioningRunError::ValidationStage(ProvisioningValidationStage::RequestAssembly)
+            })?;
         let identity = attempt_identity(
             (request_id, *batch_id.as_array()),
             (&fetched.challenge, &prepared.hal_csr_hash()),
@@ -136,18 +258,20 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
             session.roots(),
         )
     })();
-    if result.is_err()
-        && !matches!(result, Err(ProvisioningRunError::Http(_)))
-        && !broker_handles.is_empty()
-    {
-        let batch_id = broker_batch_id.ok_or(ProvisioningRunError::Activation)?;
-        cancel_generated_batch(
-            &executor,
-            (&config.socket, request_id),
-            (batch_id, &broker_handles),
-        )?;
+    if let Err(prior) = result {
+        if !matches!(prior, ProvisioningRunError::Http(_)) && !broker_handles.is_empty() {
+            let batch_id = broker_batch_id.ok_or(ProvisioningRunError::Activation)?;
+            if let Err(cleanup) = cancel_generated_batch(
+                &executor,
+                (&config.socket, request_id),
+                (batch_id, &broker_handles),
+            ) {
+                return Err(cleanup_failure(prior, cleanup));
+            }
+        }
+        return Err(prior);
     }
-    result
+    Ok(())
 }
 
 fn cancel_generated_batch(
@@ -159,8 +283,9 @@ fn cancel_generated_batch(
     let (batch_id, handles) = material;
     let mut request = [0_u8; 16];
     request[8..].copy_from_slice(&request_id.to_be_bytes());
-    let material = AmbiguousMaterial::new(request, batch_id, handles.to_vec())
-        .map_err(|_| ProvisioningRunError::Activation)?;
+    let material = AmbiguousMaterial::new(request, batch_id, handles.to_vec()).map_err(|_| {
+        ProvisioningRunError::ActivationStage(ProvisioningActivationStage::CleanupMaterial)
+    })?;
     let action_ids = material
         .cleanup_intents()
         .iter()
@@ -201,7 +326,9 @@ fn attempt_identity(
         AttemptDigests::new(sha256(challenge), *csr_hash),
         handles.to_vec(),
     )
-    .map_err(|_| ProvisioningRunError::Activation)
+    .map_err(|_| {
+        ProvisioningRunError::ActivationStage(ProvisioningActivationStage::AttemptIdentity)
+    })
 }
 
 fn post_with_recovery<F>(
@@ -218,34 +345,46 @@ where
     match responses.replay_for(identity) {
         Ok(Some(replayed)) => return decode_durable_response(&replayed),
         Ok(None) | Err(OutcomeError::StaleReplay) => {}
-        Err(_) => return Err(ProvisioningRunError::Activation),
+        Err(_) => {
+            return Err(ProvisioningRunError::ActivationStage(
+                ProvisioningActivationStage::ResponseReplay,
+            ));
+        }
     }
     let posting = DurablePostingJournal::new(&store);
-    if let Some(previous) = posting
-        .load()
-        .map_err(|_| ProvisioningRunError::Activation)?
-    {
+    if let Some(previous) = posting.load().map_err(|_| {
+        ProvisioningRunError::ActivationStage(ProvisioningActivationStage::PostingLoad)
+    })? {
         if previous == *identity {
             quarantine(config, executor, &previous)?;
             return Err(ProvisioningRunError::Http(ClientError::PostAmbiguous));
         }
-        validate_fresh_attempt(&previous, identity)
-            .map_err(|_| ProvisioningRunError::Activation)?;
+        validate_fresh_attempt(&previous, identity).map_err(|_| {
+            ProvisioningRunError::ActivationStage(ProvisioningActivationStage::AttemptFreshness)
+        })?;
         match responses.replay_for(&previous) {
             Ok(Some(_)) => {}
             Ok(None) | Err(OutcomeError::StaleReplay) => quarantine(config, executor, &previous)?,
-            Err(_) => return Err(ProvisioningRunError::Activation),
+            Err(_) => {
+                return Err(ProvisioningRunError::ActivationStage(
+                    ProvisioningActivationStage::ResponseReplay,
+                ));
+            }
         }
     }
-    posting
-        .record(identity)
-        .map_err(|_| ProvisioningRunError::Activation)?;
+    posting.record(identity).map_err(|_| {
+        ProvisioningRunError::ActivationStage(ProvisioningActivationStage::PostingRecord)
+    })?;
     match post() {
         Ok(signed) => {
             let durable = encode_durable_response(signed.request_id(), signed.response().body())?;
             responses
                 .record_validated(identity, &durable)
-                .map_err(|_| ProvisioningRunError::Activation)?;
+                .map_err(|_| {
+                    ProvisioningRunError::ActivationStage(
+                        ProvisioningActivationStage::ResponseRecord,
+                    )
+                })?;
             Ok((
                 signed.request_id().to_owned(),
                 signed.response().body().to_vec(),
@@ -263,7 +402,9 @@ fn encode_durable_response(
     response: &[u8],
 ) -> Result<Vec<u8>, ProvisioningRunError> {
     if request_id.len() != 36 || request_id.as_bytes().contains(&b'\n') {
-        return Err(ProvisioningRunError::Validation);
+        return Err(ProvisioningRunError::ValidationStage(
+            ProvisioningValidationStage::DurableResponseEncoding,
+        ));
     }
     let mut durable = Vec::with_capacity(37_usize.saturating_add(response.len()));
     durable.extend_from_slice(request_id.as_bytes());
@@ -273,15 +414,15 @@ fn encode_durable_response(
 }
 
 fn decode_durable_response(durable: &[u8]) -> Result<(String, Vec<u8>), ProvisioningRunError> {
-    let request = durable.get(..36).ok_or(ProvisioningRunError::Validation)?;
+    let failure = || {
+        ProvisioningRunError::ValidationStage(ProvisioningValidationStage::DurableResponseDecoding)
+    };
+    let request = durable.get(..36).ok_or_else(failure)?;
     if durable.get(36) != Some(&b'\n') {
-        return Err(ProvisioningRunError::Validation);
+        return Err(failure());
     }
-    let request = std::str::from_utf8(request).map_err(|_| ProvisioningRunError::Validation)?;
-    let response = durable
-        .get(37..)
-        .ok_or(ProvisioningRunError::Validation)?
-        .to_vec();
+    let request = std::str::from_utf8(request).map_err(|_| failure())?;
+    let response = durable.get(37..).ok_or_else(failure)?.to_vec();
     Ok((request.to_owned(), response))
 }
 
@@ -295,7 +436,9 @@ fn quarantine(
         *identity.batch_id(),
         identity.handles().to_vec(),
     )
-    .map_err(|_| ProvisioningRunError::Activation)?;
+    .map_err(|_| {
+        ProvisioningRunError::ActivationStage(ProvisioningActivationStage::QuarantineMaterial)
+    })?;
     let store = FileStateStore::new(&config.state_root);
     let mut ledger = QuarantineLedger::new(&store);
     let mut actions = BrokerQuarantineActions {
@@ -309,7 +452,9 @@ fn quarantine(
             CrashRecovery::new(MutationCrashState::PostAmbiguous, &material),
             &mut actions,
         )
-        .map_err(|_| ProvisioningRunError::Activation)
+        .map_err(|_| {
+            ProvisioningRunError::ActivationStage(ProvisioningActivationStage::QuarantineRecovery)
+        })
 }
 
 struct BrokerQuarantineActions<'a> {
@@ -370,6 +515,7 @@ impl QuarantineActions for BrokerQuarantineActions<'_> {
 
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "completion binds one exact broker/HTTP/trust transaction"
 )]
 fn complete(
@@ -386,14 +532,17 @@ fn complete(
     roots: &RootBundle,
 ) -> Result<(), ProvisioningRunError> {
     let now = unix_seconds()?;
-    let serials =
-        returned_serials(response, expected.len()).map_err(|_| ProvisioningRunError::Validation)?;
+    let serials = returned_serials(response, expected.len()).map_err(|_| {
+        ProvisioningRunError::ValidationStage(ProvisioningValidationStage::ReturnedSerials)
+    })?;
     let mut status = AttestationStatusClient::new(
         BoundedHttpsTransport::new().map_err(ProvisioningRunError::Http)?,
     );
     let snapshot = status
         .snapshot_for(now, serials.iter().map(String::as_str))
-        .map_err(|_| ProvisioningRunError::Validation)?;
+        .map_err(|_| {
+            ProvisioningRunError::ValidationStage(ProvisioningValidationStage::StatusSnapshot)
+        })?;
     let challenge_hash = sha256(challenge);
     let context = rka_rkp::ResponseContext::new(
         prepared.hal_csr_hash(),
@@ -415,9 +564,13 @@ fn complete(
         &snapshot,
         &mut quarantine,
     )
-    .map_err(|_| ProvisioningRunError::Validation)?;
-    let encoded_chains = rka_rkp::parse_signed_certificates(response, expected.len())
-        .map_err(|_| ProvisioningRunError::Validation)?;
+    .map_err(|_| {
+        ProvisioningRunError::ValidationStage(ProvisioningValidationStage::SignedResponse)
+    })?;
+    let encoded_chains =
+        rka_rkp::parse_signed_certificates(response, expected.len()).map_err(|_| {
+            ProvisioningRunError::ValidationStage(ProvisioningValidationStage::SignedChains)
+        })?;
     let phase_hashes = [
         prepared.hal_csr_hash(),
         sha256(prepared.body()),
@@ -478,7 +631,11 @@ fn complete(
         .map(|chain| chain.handle)
         .collect::<Vec<_>>();
     crate::provisioning_io::persist_lease_chains(&config.state_root, &handles, &encoded_chains)
-        .map_err(|_| ProvisioningRunError::Activation)?;
+        .map_err(|_| {
+            ProvisioningRunError::ActivationStage(
+                ProvisioningActivationStage::LeaseChainPersistence,
+            )
+        })?;
     prepared_activation.activate(&FileStateStore::new(&config.state_root))?;
     Ok(())
 }
@@ -491,9 +648,9 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 
 fn fresh_request_id() -> Result<u64, ProvisioningRunError> {
     let mut bytes = [0_u8; 8];
-    SystemRandom::new()
-        .fill(&mut bytes)
-        .map_err(|_| ProvisioningRunError::Activation)?;
+    SystemRandom::new().fill(&mut bytes).map_err(|_| {
+        ProvisioningRunError::ActivationStage(ProvisioningActivationStage::RequestIdentity)
+    })?;
     Ok(request_id_from_bytes(bytes))
 }
 
@@ -505,8 +662,9 @@ fn chain_set_hash(chains: &[Vec<u8>]) -> Result<[u8; 32], ProvisioningRunError> 
     let mut writer = rka_protocol::CborWriter::with_capacity(4096);
     writer.array(chains.len());
     for chain in chains {
-        let certificates = crate::provisioning_io::decode_der_chain(chain)
-            .map_err(|_| ProvisioningRunError::Validation)?;
+        let certificates = crate::provisioning_io::decode_der_chain(chain).map_err(|_| {
+            ProvisioningRunError::ValidationStage(ProvisioningValidationStage::ChainSet)
+        })?;
         writer.array(certificates.len());
         for certificate in certificates {
             writer.bytes(&certificate);
@@ -541,8 +699,9 @@ mod tests {
     };
 
     use super::{
-        FileStateStore, ProductionConfig, ProvisioningRunError, RoleExecutor, SidecarRole,
-        attempt_identity, encode_durable_response, post_with_recovery,
+        FileStateStore, ProductionConfig, ProvisioningActivationStage, ProvisioningFailureStage,
+        ProvisioningRunError, ProvisioningValidationStage, RoleExecutor, SidecarRole,
+        attempt_identity, cleanup_failure, encode_durable_response, post_with_recovery,
     };
 
     #[test]
@@ -553,6 +712,42 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "provisioning broker bridge failed: bridge peer identity rejected"
+        );
+    }
+
+    #[test]
+    fn cleanup_failure_preserves_the_original_redacted_stage() {
+        let error = cleanup_failure(
+            ProvisioningRunError::ActivationStage(ProvisioningActivationStage::PostingRecord),
+            ProvisioningRunError::BrokerBridge(crate::bridge::BridgeError::PeerDied),
+        );
+
+        assert_eq!(
+            error,
+            ProvisioningRunError::Cleanup {
+                prior: ProvisioningFailureStage::ActivationStage(
+                    ProvisioningActivationStage::PostingRecord,
+                ),
+                cleanup: ProvisioningFailureStage::BrokerBridge(
+                    crate::bridge::BridgeError::PeerDied,
+                ),
+            }
+        );
+        assert_eq!(
+            format!("{error:?}"),
+            "Cleanup { prior: ActivationStage(PostingRecord), cleanup: BrokerBridge(PeerDied) }"
+        );
+    }
+
+    #[test]
+    fn validation_failure_exposes_only_a_stable_checkpoint() {
+        let error =
+            ProvisioningRunError::ValidationStage(ProvisioningValidationStage::SignedResponse);
+
+        assert_eq!(format!("{error:?}"), "ValidationStage(SignedResponse)");
+        assert_eq!(
+            error.to_string(),
+            "provisioning validation failed at SignedResponse"
         );
     }
 

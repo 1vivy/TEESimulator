@@ -18,7 +18,7 @@ use rka_state::{
 };
 use rustix::process::{getegid, geteuid};
 
-use crate::ProvisioningRunError;
+use crate::{ProvisioningRunError, provisioning::ProvisioningActivationStage};
 
 #[allow(
     clippy::redundant_pub_crate,
@@ -111,9 +111,9 @@ impl PreparedActivation {
         self,
         store: &dyn StateStore,
     ) -> Result<RkpLeaseBatch, ProvisioningRunError> {
-        self.pending
-            .activate(self.token, store)
-            .map_err(|_| ProvisioningRunError::Activation)
+        self.pending.activate(self.token, store).map_err(|_| {
+            ProvisioningRunError::ActivationStage(ProvisioningActivationStage::LeaseCommit)
+        })
     }
 }
 
@@ -173,7 +173,9 @@ pub(crate) fn prepare(
             profile_epoch: epoch,
             phase_hashes,
         };
-        leases.push(RkpLease::certified(metadata).map_err(|_| ProvisioningRunError::Activation)?);
+        leases.push(RkpLease::certified(metadata).map_err(|_| {
+            ProvisioningRunError::ActivationStage(ProvisioningActivationStage::LeasePreparation)
+        })?);
         claims.push(ValidatedChainClaims {
             lease_id,
             batch_id,
@@ -185,25 +187,27 @@ pub(crate) fn prepare(
             profile_epoch: epoch,
         });
     }
-    let pending = RkpLeaseBatch::new(leases).map_err(|_| ProvisioningRunError::Activation)?;
+    let pending = RkpLeaseBatch::new(leases).map_err(|_| {
+        ProvisioningRunError::ActivationStage(ProvisioningActivationStage::LeasePreparation)
+    })?;
     let receipts = claims
         .into_iter()
         .map(|value| {
             let signature = signer.sign(&value.canonical_bytes());
-            let bytes = signature
-                .as_ref()
-                .try_into()
-                .map_err(|_| ProvisioningRunError::Activation)?;
+            let bytes = signature.as_ref().try_into().map_err(|_| {
+                ProvisioningRunError::ActivationStage(ProvisioningActivationStage::LeasePreparation)
+            })?;
             Ok(ValidatedChainReceipt::new(value, bytes))
         })
         .collect::<Result<Vec<_>, ProvisioningRunError>>()?;
-    let registry =
-        ValidatedReceiptRegistry::open().map_err(|_| ProvisioningRunError::Activation)?;
+    let registry = ValidatedReceiptRegistry::open().map_err(|_| {
+        ProvisioningRunError::ActivationStage(ProvisioningActivationStage::ReceiptRegistry)
+    })?;
     let token = verify_validated_chain_receipts(&pending, &receipts, &registry).map_err(|_| {
         for chain in validated.chains() {
             quarantine(chain.handle);
         }
-        ProvisioningRunError::Activation
+        ProvisioningRunError::ActivationStage(ProvisioningActivationStage::ReceiptVerification)
     })?;
     Ok(PreparedActivation { pending, token })
 }

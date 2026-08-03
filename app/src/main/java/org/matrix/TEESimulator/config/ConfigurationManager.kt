@@ -100,6 +100,10 @@ object ConfigurationManager {
 
     fun shouldSkipUid(uid: Int): Boolean = getPackageModeForUid(uid) == null
 
+    /** Only an explicit `?` target opts a UID into persistent synthetic RKP lease patching. */
+    fun shouldUseSyntheticLease(uid: Int): Boolean =
+        getPackagesForUid(uid).any { packageModes[it] == Mode.PATCH }
+
     fun configuredCandidateIdentity(): ConfiguredCandidateIdentity? =
         runCatching {
                 val packageManager = getPackageManager() ?: return null

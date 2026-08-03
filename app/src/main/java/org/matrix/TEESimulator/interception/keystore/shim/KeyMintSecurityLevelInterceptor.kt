@@ -54,6 +54,7 @@ import org.matrix.TEESimulator.rka.candidate.CandidateResult
 import org.matrix.TEESimulator.rka.candidate.CandidateRoute
 import org.matrix.TEESimulator.rka.candidate.CandidateRuntimeRegistry
 import org.matrix.TEESimulator.rka.candidate.CandidateSecurityLevel
+import org.matrix.TEESimulator.rka.candidate.SyntheticLeaseRegistry
 import org.matrix.TEESimulator.util.AndroidDeviceUtils
 import org.matrix.TEESimulator.util.AndroidPermissionUtils
 import org.matrix.TEESimulator.util.TeeLatencySimulator
@@ -73,6 +74,33 @@ class KeyMintSecurityLevelInterceptor(
 
     private val activeOps = ConcurrentHashMap<Int, ConcurrentLinkedDeque<SoftwareOperation>>()
     private val recentOps = ConcurrentHashMap<Int, ConcurrentLinkedDeque<Long>>()
+
+    private fun patchCertificateChainForUid(
+        originalChain: Array<Certificate>,
+        callingUid: Int,
+        notBefore: Date? = null,
+        notAfter: Date? = null,
+    ): Array<Certificate> {
+        if (!ConfigurationManager.shouldUseSyntheticLease(callingUid)) {
+            return AttestationPatcher.patchCertificateChain(
+                originalChain,
+                callingUid,
+                notBefore,
+                notAfter,
+            )
+        }
+        val lease = SyntheticLeaseRegistry.current()
+        SystemLogger.info(
+            "RKA synthetic lease selected: epoch=${lease.epoch} validUntil=${lease.validUntilMillis}"
+        )
+        return AttestationPatcher.patchCertificateChainWithKeyBox(
+            originalChain,
+            callingUid,
+            lease.keyBox,
+            notBefore,
+            notAfter,
+        )
+    }
 
     override fun onPreTransact(
         txId: Long,
@@ -174,7 +202,17 @@ class KeyMintSecurityLevelInterceptor(
                 }
                 if (originalChain != null && originalChain.size > 1) {
                     val newChain =
-                        AttestationPatcher.patchCertificateChain(originalChain, callingUid)
+                        try {
+                            patchCertificateChainForUid(originalChain, callingUid)
+                        } catch (error: Exception) {
+                            SystemLogger.warning(
+                                "RKA synthetic lease patch failed: stage=IMPORT " +
+                                    "type=${error.javaClass.simpleName}"
+                            )
+                            return InterceptorUtils.createServiceSpecificErrorReply(
+                                SECURE_HW_COMMUNICATION_FAILED
+                            )
+                        }
                     CertificateHelper.updateCertificateChain(metadata, newChain).getOrThrow()
                     metadata.authorizations =
                         InterceptorUtils.patchAuthorizations(metadata.authorizations, callingUid)
@@ -281,12 +319,23 @@ class KeyMintSecurityLevelInterceptor(
                     ?.let { Date(it) }
 
             val newChain =
-                AttestationPatcher.patchCertificateChain(
-                    originalChain,
-                    callingUid,
-                    certNotBefore,
-                    certNotAfter,
-                )
+                try {
+                    patchCertificateChainForUid(
+                        originalChain,
+                        callingUid,
+                        certNotBefore,
+                        certNotAfter,
+                    )
+                } catch (error: Exception) {
+                    cleanupKeyData(keyId)
+                    SystemLogger.warning(
+                        "RKA synthetic lease patch failed: stage=GENERATE " +
+                            "type=${error.javaClass.simpleName}"
+                    )
+                    return InterceptorUtils.createServiceSpecificErrorReply(
+                        SECURE_HW_COMMUNICATION_FAILED
+                    )
+                }
 
             val key = metadata.key ?: return TransactionResult.SkipTransaction
             CertificateHelper.updateCertificateChain(metadata, newChain).getOrThrow()
@@ -357,6 +406,7 @@ class KeyMintSecurityLevelInterceptor(
         descriptor: KeyDescriptor,
     ): TransactionResult? {
         if (securityLevel != SecurityLevel.TRUSTED_ENVIRONMENT) return null
+        if (ConfigurationManager.shouldUseSyntheticLease(callingUid)) return null
         val runtime = CandidateRuntimeRegistry.current() ?: return null
         if (!runtime.admits(callingUid)) return null
         val id =
@@ -388,6 +438,7 @@ class KeyMintSecurityLevelInterceptor(
         parsed: KeyMintAttestation,
     ): TransactionResult? {
         if (securityLevel != SecurityLevel.TRUSTED_ENVIRONMENT) return null
+        if (ConfigurationManager.shouldUseSyntheticLease(callingUid)) return null
         val runtime =
             CandidateRuntimeRegistry.current()
                 ?: run {

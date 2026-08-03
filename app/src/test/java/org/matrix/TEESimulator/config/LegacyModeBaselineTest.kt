@@ -32,6 +32,7 @@ class LegacyModeBaselineTest {
         assertTrue(ConfigurationManager.shouldPatch(uid))
         assertFalse(ConfigurationManager.shouldGenerate(uid))
         assertFalse(ConfigurationManager.shouldSkipUid(uid))
+        assertTrue(ConfigurationManager.shouldUseSyntheticLease(uid))
     }
 
     @Test
@@ -41,6 +42,7 @@ class LegacyModeBaselineTest {
         assertFalse(ConfigurationManager.shouldPatch(uid))
         assertTrue(ConfigurationManager.shouldGenerate(uid))
         assertFalse(ConfigurationManager.shouldSkipUid(uid))
+        assertFalse(ConfigurationManager.shouldUseSyntheticLease(uid))
     }
 
     @Test
@@ -51,6 +53,7 @@ class LegacyModeBaselineTest {
         assertTrue(ConfigurationManager.shouldGenerate(uid))
         assertFalse(ConfigurationManager.shouldPatch(uid))
         assertFalse(ConfigurationManager.shouldSkipUid(uid))
+        assertFalse(ConfigurationManager.shouldUseSyntheticLease(uid))
     }
 
     @Test
@@ -66,6 +69,7 @@ class LegacyModeBaselineTest {
 
         assertTrue(ConfigurationManager.shouldGenerate(uid))
         assertFalse(ConfigurationManager.shouldPatch(uid))
+        assertTrue(ConfigurationManager.shouldUseSyntheticLease(uid))
     }
 
     @Test
@@ -87,6 +91,7 @@ class LegacyModeBaselineTest {
         assertFalse(ConfigurationManager.shouldPatch(uid))
         assertFalse(ConfigurationManager.shouldGenerate(uid))
         assertFalse(ConfigurationManager.isAutoMode(uid))
+        assertFalse(ConfigurationManager.shouldUseSyntheticLease(uid))
     }
 
     private fun configure(packageName: String, mode: ConfigurationManager.Mode) {

@@ -56,36 +56,8 @@ object AttestationPatcher {
 
         return runCatching {
                 val originalLeaf = originalChain[0] as X509Certificate
-                val originalLeafHolder = X509CertificateHolder(originalLeaf.encoded)
-
-                // 1. Attempt to parse the existing attestation extension. If it doesn't exist,
-                // there's nothing to patch.
-                val parsedAttestation =
-                    parseAttestationExtension(originalLeafHolder) ?: return originalChain
-
-                // 2. Get the appropriate keybox for the given algorithm to sign the new
-                // certificate.
                 val keybox = getKeyboxForUidAndAlgorithm(uid, originalLeaf.sigAlgName)
-
-                // 3. Create the new, patched leaf certificate.
-                val patchedLeaf =
-                    createPatchedLeafCertificate(
-                        originalLeafHolder,
-                        parsedAttestation,
-                        keybox,
-                        uid,
-                        notBefore,
-                        notAfter,
-                    )
-
-                // 4. Construct the NEW, VALID chain by prepending the patched leaf to the keybox's
-                // chain.
-                val newChain = listOf(patchedLeaf) + keybox.certificates
-
-                SystemLogger.info(
-                    "Successfully rebuilt a valid, patched certificate chain for UID $uid."
-                )
-                newChain.toTypedArray()
+                rebuildCertificateChain(originalChain, uid, keybox, notBefore, notAfter)
             }
             .getOrElse {
                 SystemLogger.error(
@@ -94,6 +66,48 @@ object AttestationPatcher {
                 )
                 originalChain // Return the original chain on any error.
             }
+    }
+
+    /**
+     * Strict variant used by an explicitly selected synthetic RKP lease. Unlike the legacy keybox
+     * path, this method never returns the native chain on failure.
+     */
+    fun patchCertificateChainWithKeyBox(
+        originalChain: Array<Certificate>?,
+        uid: Int,
+        keyBox: KeyBox,
+        notBefore: Date? = null,
+        notAfter: Date? = null,
+    ): Array<Certificate> {
+        require(!originalChain.isNullOrEmpty())
+        return rebuildCertificateChain(originalChain, uid, keyBox, notBefore, notAfter)
+    }
+
+    private fun rebuildCertificateChain(
+        originalChain: Array<Certificate>,
+        uid: Int,
+        keyBox: KeyBox,
+        notBefore: Date?,
+        notAfter: Date?,
+    ): Array<Certificate> {
+        val originalLeaf = originalChain[0] as X509Certificate
+        val originalLeafHolder = X509CertificateHolder(originalLeaf.encoded)
+        val parsedAttestation =
+            requireNotNull(parseAttestationExtension(originalLeafHolder)) {
+                "native leaf has no Android attestation extension"
+            }
+        val patchedLeaf =
+            createPatchedLeafCertificate(
+                originalLeafHolder,
+                parsedAttestation,
+                keyBox,
+                uid,
+                notBefore,
+                notAfter,
+            )
+        val rebuilt = listOf(patchedLeaf) + keyBox.certificates
+        SystemLogger.info("Successfully rebuilt a valid, patched certificate chain for UID $uid.")
+        return rebuilt.toTypedArray()
     }
 
     /**

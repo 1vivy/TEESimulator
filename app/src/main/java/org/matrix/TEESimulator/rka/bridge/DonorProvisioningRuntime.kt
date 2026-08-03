@@ -110,14 +110,20 @@ object DonorProvisioningRuntime {
                 val actionIds = message.cleanupActionIds()
                 val result =
                     try {
-                        requireNotNull(batchId)
                         quarantineController.quarantine(
-                            AuthenticatedQuarantineRequest.fromTrustedBridge(
-                                message.requestId,
-                                handles.map(Hash32::copyBytes),
-                                batchId,
-                                actionIds,
-                            )
+                            if (batchId == null) {
+                                AuthenticatedQuarantineRequest.fromTrustedBridge(
+                                    message.requestId,
+                                    handles.map(Hash32::copyBytes),
+                                )
+                            } else {
+                                AuthenticatedQuarantineRequest.fromTrustedBridge(
+                                    message.requestId,
+                                    handles.map(Hash32::copyBytes),
+                                    batchId,
+                                    actionIds,
+                                )
+                            }
                         )
                     } finally {
                         handles.forEach(Hash32::close)

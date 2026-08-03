@@ -168,7 +168,6 @@ internal constructor(
         val transcriptSignature =
             signAndVerify(retained, request.transcript)
                 ?: run {
-                    generateFailure("TRANSCRIPT_SIGN")
                     keys.remove(request.aliasHandle.key())
                     runCatching { device.delete(retained.keyBlob) }
                     journal.quarantineCurrent()
@@ -357,18 +356,25 @@ internal constructor(
         return leaf
     }
 
-    private fun signAndVerify(key: RetainedApplicationKey, transcript: ByteArray): ByteArray? =
-        runCatching {
-                val operation = device.begin(key.keyBlob)
-                operation.update(transcript)
-                val signature = operation.finish(ByteArray(0))
-                val verifier = Signature.getInstance("SHA256withECDSA")
-                verifier.initVerify(key.leaf.publicKey)
-                verifier.update(transcript)
-                check(verifier.verify(signature))
-                signature
-            }
-            .getOrNull()
+    private fun signAndVerify(key: RetainedApplicationKey, transcript: ByteArray): ByteArray? {
+        var stage = "TRANSCRIPT_BEGIN"
+        return try {
+            val operation = device.begin(key.keyBlob)
+            stage = "TRANSCRIPT_UPDATE"
+            operation.update(transcript)
+            stage = "TRANSCRIPT_FINISH"
+            val signature = operation.finish(ByteArray(0))
+            stage = "TRANSCRIPT_VERIFIER"
+            val verifier = Signature.getInstance("SHA256withECDSA")
+            verifier.initVerify(key.leaf.publicKey)
+            verifier.update(transcript)
+            check(verifier.verify(signature))
+            signature
+        } catch (error: Exception) {
+            generateFailure(stage, error)
+            null
+        }
+    }
 
     private fun parseAttestation(certificate: X509Certificate): Pair<ByteArray, ByteArray>? =
         runCatching {

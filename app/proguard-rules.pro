@@ -1,5 +1,10 @@
 -keep class org.matrix.TEESimulator.interception.keystore.** { *; }
 
+# These compile-only hidden-API stubs describe boot-class-path parcelables. If R8 renames them,
+# Parcel returns the platform type while verifier signatures expect the renamed app type.
+-keep class android.hardware.security.keymint.** { *; }
+-keep class android.system.keystore2.** { *; }
+
 -keep class org.bouncycastle.jcajce.provider.** { *; }
 -keep class org.bouncycastle.jce.provider.** { *; }
 -dontwarn javax.naming.**

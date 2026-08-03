@@ -4,8 +4,8 @@ use std::io::ErrorKind;
 use super::model::{
     BridgeMessage, BrokerBatchId, BrokerCertificationMetadata, BrokerKeyMetadata,
     CandidateBridgeOperation, Hash32, MAX_CERTIFICATE_BYTES, MAX_CHAIN_BYTES,
-    MAX_CHAIN_CERTIFICATES, MAX_FRAME_BYTES, MAX_PUBLIC_KEYS, MAX_TOTAL_INPUT_BYTES,
-    MAX_UPDATE_BYTES, NetworkHandle, PublicBytes, RequestId,
+    MAX_CHAIN_CERTIFICATES, MAX_FRAME_BYTES, MAX_PUBLIC_KEYS, MAX_SYNTHETIC_LEASE_PKCS8_BYTES,
+    MAX_TOTAL_INPUT_BYTES, MAX_UPDATE_BYTES, NetworkHandle, PublicBytes, RequestId, SecretBytes,
 };
 
 pub(super) fn decode_body(
@@ -73,12 +73,67 @@ pub(super) fn decode_body(
             BrokerBatchId::new(cursor.take_array()?),
             Hash32::new(cursor.take_array()?),
         ),
+        11 => decode_synthetic_lease_probe_request(request_id, &mut cursor)?,
+        12 => BridgeMessage::SyntheticLeaseProbeResponse {
+            request_id,
+            certificate_chain: decode_synthetic_chain(&mut cursor)?,
+        },
         _ => return Err(BridgeError::UnknownTag),
     };
     if cursor.remaining() != 0 {
         return Err(BridgeError::NonCanonical);
     }
     Ok(message)
+}
+
+fn decode_synthetic_lease_probe_request(
+    request_id: RequestId,
+    cursor: &mut Cursor<'_>,
+) -> Result<BridgeMessage, BridgeError> {
+    let rkp_handle = Hash32::new(cursor.take_array()?);
+    let private_key_pkcs8 = cursor.take_secret(MAX_SYNTHETIC_LEASE_PKCS8_BYTES)?;
+    let expected_spki = cursor.take_public(1, MAX_CERTIFICATE_BYTES)?;
+    let challenge = cursor.take_public(16, 64)?;
+    let aaid = cursor.take_public(1, 131_072)?;
+    let certificate_not_before_millis = cursor.take_u64()?;
+    let certificate_not_after_millis = cursor.take_u64()?;
+    if certificate_not_after_millis <= certificate_not_before_millis {
+        return Err(BridgeError::NonCanonical);
+    }
+    Ok(BridgeMessage::SyntheticLeaseProbeRequest {
+        request_id,
+        rkp_handle,
+        private_key_pkcs8,
+        expected_spki,
+        challenge,
+        aaid,
+        certificate_not_before_millis,
+        certificate_not_after_millis,
+        certificate_chain: decode_synthetic_chain(cursor)?,
+    })
+}
+
+fn decode_synthetic_chain(cursor: &mut Cursor<'_>) -> Result<Vec<PublicBytes>, BridgeError> {
+    let count = usize::from(cursor.take_u8()?);
+    if !(2..=MAX_CHAIN_CERTIFICATES).contains(&count) {
+        return Err(BridgeError::NonCanonical);
+    }
+    let mut chain = Vec::new();
+    chain
+        .try_reserve_exact(count)
+        .map_err(|_| BridgeError::Allocation)?;
+    let mut total = 0_usize;
+    for _ in 0..count {
+        let certificate = cursor.take_public(1, MAX_CERTIFICATE_BYTES)?;
+        total = total
+            .checked_add(certificate.as_slice().len())
+            .ok_or(BridgeError::ValueTooLarge)?;
+        if total > MAX_CHAIN_BYTES {
+            return Err(BridgeError::ValueTooLarge);
+        }
+        chain.push(certificate);
+    }
+    Ok(chain)
 }
 
 fn decode_public_key_request(
@@ -291,6 +346,11 @@ impl<'a> Cursor<'a> {
             return Err(BridgeError::ValueTooLarge);
         }
         PublicBytes::bounded(self.take(length)?, minimum, maximum)
+    }
+
+    fn take_secret(&mut self, maximum: usize) -> Result<SecretBytes, BridgeError> {
+        let length = usize::try_from(self.take_u32()?).map_err(|_| BridgeError::ValueTooLarge)?;
+        SecretBytes::bounded(self.take(length)?, maximum)
     }
 }
 

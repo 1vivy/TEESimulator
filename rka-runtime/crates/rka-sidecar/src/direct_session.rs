@@ -110,21 +110,21 @@ pub fn run_donor_bridge() -> Result<(), DirectSessionError> {
             let request = decode_bridge_frame(request, ExchangeRole::CandidateRequest)
                 .map_err(|_| rka_transport::TlsError::Admission)?;
             let prepared = adapter.prepare(request).map_err(|()| {
-                diagnostic(&state, "donor_bridge_prepare".to_owned());
+                diagnostic(&state, "donor_bridge_prepare");
                 rka_transport::TlsError::Admission
             })?;
             dispatched.set(true);
             let response = adapter.dispatch(&prepared).map_err(|error| {
-                diagnostic(&state, format!("donor_bridge_{}", bridge_status(error)));
+                diagnostic(&state, &format!("donor_bridge_{}", bridge_status(error)));
                 rka_transport::TlsError::Admission
             })?;
             let response = DirectBridgeAdapter::finish(&prepared, response).map_err(|()| {
-                diagnostic(&state, "donor_bridge_finish".to_owned());
+                diagnostic(&state, "donor_bridge_finish");
                 rka_transport::TlsError::Admission
             })?;
             let encoded =
                 encode_bridge_frame(&response, ExchangeRole::CandidateResponse).map_err(|_| {
-                    diagnostic(&state, "donor_bridge_encode".to_owned());
+                    diagnostic(&state, "donor_bridge_encode");
                     rka_transport::TlsError::Admission
                 })?;
             Ok(encoded.as_slice().to_vec())
@@ -132,11 +132,11 @@ pub fn run_donor_bridge() -> Result<(), DirectSessionError> {
         match (result, dispatched.get()) {
             (Ok(()), _) => {}
             (Err(error), true) => {
-                diagnostic(&state, tls_status(error, "donor_ambiguous"));
+                diagnostic(&state, &tls_status(error, "donor_ambiguous"));
                 return Err(DirectSessionError::Ambiguous);
             }
             (Err(error), false) => {
-                diagnostic(&state, tls_status(error, "donor_pre_dispatch"));
+                diagnostic(&state, &tls_status(error, "donor_pre_dispatch"));
                 std::thread::sleep(Duration::from_secs(1));
             }
         }
@@ -240,7 +240,7 @@ fn exchange_candidate_request(
             DirectSessionError::Tls => "candidate_setup_tls",
             DirectSessionError::Ambiguous => "candidate_setup_ambiguous",
         };
-        diagnostic(state, status.to_owned());
+        diagnostic(state, status);
         candidate_failure(error, 0)
     })?;
     for attempt in 0..PRE_DISPATCH_ATTEMPTS {
@@ -258,24 +258,24 @@ fn exchange_candidate_request(
             Err(CandidateExchangeError::PreDispatch(error))
                 if attempt < PRE_DISPATCH_ATTEMPTS.saturating_sub(1) =>
             {
-                diagnostic(state, tls_status(error, "candidate_pre_dispatch"));
+                diagnostic(state, &tls_status(error, "candidate_pre_dispatch"));
             }
             Err(CandidateExchangeError::Ambiguous(error)) => {
-                diagnostic(state, tls_status(error, "candidate_ambiguous"));
+                diagnostic(state, &tls_status(error, "candidate_ambiguous"));
                 return Err(candidate_failure(
                     DirectSessionError::Ambiguous,
                     accepted_connections,
                 ));
             }
             Err(CandidateExchangeError::PreDispatch(error)) => {
-                diagnostic(state, tls_status(error, "candidate_pre_dispatch"));
+                diagnostic(state, &tls_status(error, "candidate_pre_dispatch"));
                 return Err(candidate_failure(
                     DirectSessionError::Tls,
                     accepted_connections,
                 ));
             }
             Err(_) => {
-                diagnostic(state, "candidate_pre_dispatch_unknown".to_owned());
+                diagnostic(state, "candidate_pre_dispatch_unknown");
                 return Err(candidate_failure(
                     DirectSessionError::Tls,
                     accepted_connections,
@@ -304,7 +304,7 @@ fn tls_status(error: TlsError, phase: &str) -> String {
     format!("{phase}_{category}")
 }
 
-fn bridge_status(error: BridgeError) -> &'static str {
+const fn bridge_status(error: BridgeError) -> &'static str {
     match error {
         BridgeError::Deadline => "deadline",
         BridgeError::PeerDied => "peer_died",
@@ -320,7 +320,7 @@ fn bridge_status(error: BridgeError) -> &'static str {
     }
 }
 
-fn diagnostic(state: &Path, status: String) {
+fn diagnostic(state: &Path, status: &str) {
     let path = state.join("run/direct-session.diagnostic");
     if fs::symlink_metadata(&path).is_ok_and(|metadata| !metadata.file_type().is_file()) {
         return;
@@ -367,7 +367,7 @@ fn candidate_server(
         admission(state, profile)?,
     );
     if let Err(error) = &result {
-        diagnostic(state, tls_status(*error, "candidate_setup"));
+        diagnostic(state, &tls_status(*error, "candidate_setup"));
     }
     result.map_err(|_| DirectSessionError::Tls)
 }

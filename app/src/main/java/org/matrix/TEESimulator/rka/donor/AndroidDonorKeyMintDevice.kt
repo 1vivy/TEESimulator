@@ -6,6 +6,7 @@ import android.hardware.security.keymint.Digest
 import android.hardware.security.keymint.EcCurve
 import android.hardware.security.keymint.IKeyMintDevice
 import android.hardware.security.keymint.IKeyMintOperation
+import android.hardware.security.keymint.KeyFormat
 import android.hardware.security.keymint.KeyOrigin
 import android.hardware.security.keymint.KeyParameter
 import android.hardware.security.keymint.KeyParameterValue
@@ -84,6 +85,64 @@ private constructor(private val service: IKeyMintDevice, binder: IBinder) : Dono
         )
     }
 
+    override fun importSyntheticLease(
+        parameters: DonorSyntheticLeaseParameters,
+        privateKeyPkcs8: DonorSecretBytes,
+        attestationKey: DonorAttestationKey,
+    ): DonorSyntheticLeaseCreation {
+        check(
+            parameters.securityLevel == DonorSecurityLevel.TEE &&
+                parameters.algorithm == DonorAlgorithm.EC &&
+                parameters.curve == DonorCurve.P256 &&
+                parameters.purpose == DonorPurpose.ATTEST_KEY &&
+                parameters.noAuthRequired
+        )
+        val aidlAttestationKey =
+            AttestationKey().apply {
+                attestationKey.withBlob { keyBlob = it.copyOf() }
+                issuerSubjectName = attestationKey.issuerSubjectName.copyOf()
+                attestKeyParams = emptyArray()
+            }
+        val pkcs8 = privateKeyPkcs8.copyBytes()
+        val result =
+            try {
+                service.importKey(
+                    arrayOf(
+                        parameter(Tag.ALGORITHM, KeyParameterValue.algorithm(Algorithm.EC)),
+                        parameter(Tag.EC_CURVE, KeyParameterValue.ecCurve(EcCurve.P_256)),
+                        parameter(Tag.PURPOSE, KeyParameterValue.keyPurpose(KeyPurpose.ATTEST_KEY)),
+                        parameter(Tag.NO_AUTH_REQUIRED, KeyParameterValue.boolValue(true)),
+                        parameter(
+                            Tag.ATTESTATION_CHALLENGE,
+                            KeyParameterValue.blob(parameters.challenge.copyOf()),
+                        ),
+                        parameter(
+                            Tag.ATTESTATION_APPLICATION_ID,
+                            KeyParameterValue.blob(parameters.aaid.copyOf()),
+                        ),
+                        parameter(
+                            Tag.CERTIFICATE_NOT_BEFORE,
+                            KeyParameterValue.dateTime(parameters.certificateNotBeforeMillis),
+                        ),
+                        parameter(
+                            Tag.CERTIFICATE_NOT_AFTER,
+                            KeyParameterValue.dateTime(parameters.certificateNotAfterMillis),
+                        ),
+                    ),
+                    KeyFormat.PKCS8,
+                    pkcs8,
+                    aidlAttestationKey,
+                )
+            } finally {
+                pkcs8.fill(0)
+            }
+        return DonorSyntheticLeaseCreation(
+            result.keyBlob.copyOf(),
+            syntheticLeaseCharacteristics(result.keyCharacteristics),
+            result.certificateChain.map { it.encodedCertificate.copyOf() },
+        )
+    }
+
     override fun begin(keyBlob: ByteArray): DonorOperationEndpoint {
         val result =
             service.begin(
@@ -115,6 +174,25 @@ private constructor(private val service: IKeyMintDevice, binder: IBinder) : Dono
                 authorizations.singleValue(Tag.NO_AUTH_REQUIRED) { it.boolValue }
         )
         return DonorKeyCharacteristics.exact()
+    }
+
+    private fun syntheticLeaseCharacteristics(
+        values: Array<android.hardware.security.keymint.KeyCharacteristics>
+    ): DonorSyntheticLeaseCharacteristics {
+        val tee =
+            values.singleOrNull { it.securityLevel == SecurityLevel.TRUSTED_ENVIRONMENT }
+                ?: throw IllegalArgumentException("missing TEE characteristics")
+        val authorizations = tee.authorizations.toList()
+        require(
+            authorizations.singleValue(Tag.ALGORITHM) { it.algorithm } == Algorithm.EC &&
+                authorizations.singleValue(Tag.EC_CURVE) { it.ecCurve } == EcCurve.P_256 &&
+                authorizations.values(Tag.PURPOSE) { it.keyPurpose } ==
+                    setOf(KeyPurpose.ATTEST_KEY) &&
+                authorizations.values(Tag.DIGEST) { it.digest }.isEmpty() &&
+                authorizations.singleValue(Tag.ORIGIN) { it.origin } == KeyOrigin.IMPORTED &&
+                authorizations.singleValue(Tag.NO_AUTH_REQUIRED) { it.boolValue }
+        )
+        return DonorSyntheticLeaseCharacteristics.exact()
     }
 
     private fun parameter(tag: Int, value: KeyParameterValue): KeyParameter =

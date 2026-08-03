@@ -1,7 +1,25 @@
 package org.matrix.TEESimulator.rka.bridge
 
+import android.hardware.security.keymint.KeyOrigin
+import android.hardware.security.keymint.KeyPurpose
+import java.io.ByteArrayInputStream
 import java.nio.file.Path
+import java.security.KeyFactory
+import java.security.MessageDigest
+import java.security.cert.CertificateFactory
+import java.security.cert.X509Certificate
+import java.security.interfaces.ECPrivateKey
+import java.security.interfaces.ECPublicKey
+import java.security.spec.PKCS8EncodedKeySpec
 import java.util.concurrent.atomic.AtomicBoolean
+import org.bouncycastle.asn1.ASN1Enumerated
+import org.bouncycastle.asn1.ASN1Integer
+import org.bouncycastle.asn1.ASN1OctetString
+import org.bouncycastle.asn1.ASN1Sequence
+import org.bouncycastle.asn1.ASN1Set
+import org.bouncycastle.asn1.ASN1TaggedObject
+import org.matrix.TEESimulator.attestation.ATTESTATION_OID
+import org.matrix.TEESimulator.attestation.AttestationConstants
 import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.rka.broker.AttestationChallenge
 import org.matrix.TEESimulator.rka.broker.AuthenticatedQuarantineRequest
@@ -14,8 +32,14 @@ import org.matrix.TEESimulator.rka.broker.QuarantineReceiptStore
 import org.matrix.TEESimulator.rka.broker.QuarantineResult
 import org.matrix.TEESimulator.rka.broker.RkpKeyCount
 import org.matrix.TEESimulator.rka.donor.AndroidDonorKeyMintDevice
+import org.matrix.TEESimulator.rka.donor.DonorAttestationKey
 import org.matrix.TEESimulator.rka.donor.DonorDispatchAdapter
 import org.matrix.TEESimulator.rka.donor.DonorKeyMintBackend
+import org.matrix.TEESimulator.rka.donor.DonorKeyMintDevice
+import org.matrix.TEESimulator.rka.donor.DonorSecretBytes
+import org.matrix.TEESimulator.rka.donor.DonorSyntheticLeaseCharacteristics
+import org.matrix.TEESimulator.rka.donor.DonorSyntheticLeaseCreation
+import org.matrix.TEESimulator.rka.donor.DonorSyntheticLeaseParameters
 import org.matrix.TEESimulator.rka.journal.DurableIrpcKeyBatchGenerator
 import org.matrix.TEESimulator.rka.journal.FileHalCsrJournal
 import org.matrix.TEESimulator.rka.journal.FileQuarantineReceiptRegistry
@@ -25,6 +49,7 @@ import org.matrix.TEESimulator.rka.journal.RkpCertification
 import org.matrix.TEESimulator.rka.journal.RkpCertifiedKey
 import org.matrix.TEESimulator.rka.journal.RkpJournal
 import org.matrix.TEESimulator.rka.journal.RkpJournalState
+import org.matrix.TEESimulator.rka.journal.RkpOpaqueHandle
 
 object DonorProvisioningRuntime {
     private val started = AtomicBoolean()
@@ -33,10 +58,10 @@ object DonorProvisioningRuntime {
     private val journal by lazy { RkpJournal(FileRkpJournalStore.production(root)) }
     private val csrJournal by lazy { FileHalCsrJournal(root) }
     private val quarantineReceiptStore by lazy { FileQuarantineReceiptRegistry.production(root) }
+    private val donorDevice = lazy { AndroidDonorKeyMintDevice.resolve() }
     private val donorBackend = lazy {
-        val device = AndroidDonorKeyMintDevice.resolve()
-        DonorKeyMintBackend(device, journal).also {
-            device.onDeath(it::binderDied)
+        DonorKeyMintBackend(donorDevice.value, journal).also {
+            donorDevice.value.onDeath(it::binderDied)
             it.reconcile()
         }
     }
@@ -115,6 +140,10 @@ object DonorProvisioningRuntime {
             is BridgeMessage.CertificationRequest -> certify(message)
             is BridgeMessage.CandidateCommand ->
                 DonorDispatchAdapter.dispatch(message, donorBackend.value)
+            is BridgeMessage.SyntheticLeaseProbeRequest -> {
+                donorBackend.value
+                probeSyntheticLeaseForTest(message, donorDevice.value, journal)
+            }
             is BridgeMessage.Cancel -> {
                 val handles = message.brokerHandles()
                 val batchId = message.cleanupBatchId()
@@ -299,4 +328,248 @@ object DonorProvisioningRuntime {
 
     private fun failure(requestId: RequestId): BridgeMessage.Error =
         BridgeMessage.Error(requestId, BridgeErrorCode.POLICY_REJECTED, Hash32.of(ByteArray(32)))
+
+    internal fun probeSyntheticLeaseForTest(
+        request: BridgeMessage.SyntheticLeaseProbeRequest,
+        device: DonorKeyMintDevice,
+        targetJournal: RkpJournal,
+    ): BridgeMessage {
+        val handleBytes = request.rkpHandle.copyBytes()
+        val expectedSpki = request.expectedSpki.copyBytes()
+        val challenge = request.challenge.copyBytes()
+        val aaid = request.aaid.copyBytes()
+        val privatePkcs8 = request.privateKeyPkcs8.copyBytes()
+        val publicChain = request.certificateChain()
+        val rkpChain =
+            try {
+                publicChain.map(PublicBytes::copyBytes)
+            } finally {
+                publicChain.forEach(PublicBytes::close)
+            }
+        var generating: org.matrix.TEESimulator.rka.journal.RkpJournalRecord? = null
+        var creation: DonorSyntheticLeaseCreation? = null
+        try {
+            requireEcP256Pkcs8(privatePkcs8)
+            val certified = requireNotNull(targetJournal.recover())
+            require(certified.state == RkpJournalState.RKP_CERTIFIED)
+            val rkpCertificate = validateCertifiedChain(certified, handleBytes, rkpChain)
+            generating = targetJournal.transition(certified, RkpJournalState.APP_KEY_GENERATING)
+            val secret =
+                DonorSecretBytes.of(privatePkcs8, BridgeLimits.MAX_SYNTHETIC_LEASE_PKCS8_BYTES)
+            val resolved =
+                secret.use {
+                    targetJournal.withCertifiedBlob(RkpOpaqueHandle.from(handleBytes)) { blob ->
+                        creation =
+                            device.importSyntheticLease(
+                                DonorSyntheticLeaseParameters.exact(
+                                    challenge,
+                                    aaid,
+                                    request.certificateNotBeforeMillis,
+                                    request.certificateNotAfterMillis,
+                                ),
+                                it,
+                                DonorAttestationKey(
+                                    blob,
+                                    rkpCertificate.subjectX500Principal.encoded,
+                                ),
+                            )
+                    }
+                }
+            require(resolved)
+            val imported = requireNotNull(creation)
+            val canonical =
+                validateSyntheticLeaseCreation(
+                    imported,
+                    expectedSpki,
+                    challenge,
+                    aaid,
+                    rkpChain,
+                    rkpCertificate,
+                )
+            imported.withKeyBlob(device::delete)
+            imported.close()
+            creation = null
+            var record = targetJournal.transition(generating, RkpJournalState.APP_KEY_RECORDED)
+            record = targetJournal.transition(record, RkpJournalState.EXPOSED)
+            record = targetJournal.transition(record, RkpJournalState.TERMINAL)
+            targetJournal.transition(record, RkpJournalState.DELETE)
+            val certificates =
+                canonical.map { PublicBytes.of(it, BridgeLimits.MAX_CERTIFICATE_BYTES) }
+            return try {
+                BridgeMessage.SyntheticLeaseProbeResponse(request.requestId, certificates)
+            } finally {
+                certificates.forEach(PublicBytes::close)
+            }
+        } catch (error: Exception) {
+            creation?.let { imported ->
+                runCatching { imported.withKeyBlob(device::delete) }
+                imported.close()
+            }
+            runCatching {
+                val current = targetJournal.recover()
+                if (current?.state == RkpJournalState.APP_KEY_GENERATING) {
+                    targetJournal.quarantine(current)
+                } else if (generating != null) {
+                    targetJournal.quarantineCurrent()
+                }
+            }
+            throw error
+        } finally {
+            handleBytes.fill(0)
+            expectedSpki.fill(0)
+            challenge.fill(0)
+            aaid.fill(0)
+            privatePkcs8.fill(0)
+            rkpChain.forEach { it.fill(0) }
+        }
+    }
+
+    private fun requireEcP256Pkcs8(privatePkcs8: ByteArray) {
+        val key =
+            KeyFactory.getInstance("EC").generatePrivate(PKCS8EncodedKeySpec(privatePkcs8))
+                as? ECPrivateKey ?: throw IllegalArgumentException("not an EC private key")
+        require(key.params.curve.field.fieldSize == 256)
+    }
+
+    private fun validateCertifiedChain(
+        record: org.matrix.TEESimulator.rka.journal.RkpJournalRecord,
+        handleBytes: ByteArray,
+        chain: List<ByteArray>,
+    ): X509Certificate {
+        val certified =
+            requireNotNull(
+                record.certification?.keys?.singleOrNull {
+                    it.handle.copyBytes().contentEquals(handleBytes)
+                }
+            )
+        require(chain.size == certified.certificateCount)
+        val digest = MessageDigest.getInstance("SHA-256")
+        chain.forEach(digest::update)
+        require(digest.digest().contentEquals(certified.copyChainHash()))
+        val certificates = chain.map(::parseCertificateStrict)
+        certificates.zipWithNext().forEach { (child, issuer) ->
+            require(child.issuerX500Principal == issuer.subjectX500Principal)
+            child.verify(issuer.publicKey)
+        }
+        val root = certificates.last()
+        require(root.issuerX500Principal == root.subjectX500Principal)
+        root.verify(root.publicKey)
+        val rkpCertificate = certificates.first()
+        require(
+            MessageDigest.getInstance("SHA-256")
+                .digest(rkpCertificate.publicKey.encoded)
+                .contentEquals(certified.copySpkiHash())
+        )
+        return rkpCertificate
+    }
+
+    private fun validateSyntheticLeaseCreation(
+        creation: DonorSyntheticLeaseCreation,
+        expectedSpki: ByteArray,
+        challenge: ByteArray,
+        aaid: ByteArray,
+        rkpChain: List<ByteArray>,
+        rkpCertificate: X509Certificate,
+    ): List<ByteArray> {
+        require(creation.characteristics == DonorSyntheticLeaseCharacteristics.exact())
+        require(creation.certificateChain.isNotEmpty())
+        val leaseCertificate = parseCertificateStrict(creation.certificateChain.first())
+        require(leaseCertificate.publicKey is ECPublicKey)
+        require((leaseCertificate.publicKey as ECPublicKey).params.curve.field.fieldSize == 256)
+        require(leaseCertificate.publicKey.encoded.contentEquals(expectedSpki))
+        require(leaseCertificate.issuerX500Principal == rkpCertificate.subjectX500Principal)
+        leaseCertificate.verify(rkpCertificate.publicKey)
+        leaseCertificate.checkValidity()
+        val attestation = parseAttestation(leaseCertificate)
+        require(attestation.challenge.contentEquals(challenge))
+        require(attestation.aaid.contentEquals(aaid))
+        require(attestation.attestationSecurityLevel == 1)
+        require(attestation.keyMintSecurityLevel == 1)
+        require(attestation.purposes == setOf(KeyPurpose.ATTEST_KEY))
+        require(attestation.origin == KeyOrigin.IMPORTED)
+        require(attestation.digestCount == 0)
+        require(attestation.noAuthRequired)
+        if (creation.certificateChain.size > 1) {
+            require(creation.certificateChain.drop(1).size == rkpChain.size)
+            require(
+                creation.certificateChain.drop(1).zip(rkpChain).all { (actual, expected) ->
+                    actual.contentEquals(expected)
+                }
+            )
+        }
+        return listOf(leaseCertificate.encoded) + rkpChain.map(ByteArray::copyOf)
+    }
+
+    private data class ParsedSyntheticAttestation(
+        val challenge: ByteArray,
+        val aaid: ByteArray,
+        val attestationSecurityLevel: Int,
+        val keyMintSecurityLevel: Int,
+        val purposes: Set<Int>,
+        val origin: Int,
+        val digestCount: Int,
+        val noAuthRequired: Boolean,
+    )
+
+    private fun parseAttestation(certificate: X509Certificate): ParsedSyntheticAttestation {
+        val outer = ASN1OctetString.getInstance(certificate.getExtensionValue(ATTESTATION_OID.id))
+        val description = ASN1Sequence.getInstance(outer.octets)
+        val parsedChallenge =
+            ASN1OctetString.getInstance(
+                    description.getObjectAt(
+                        AttestationConstants.KEY_DESCRIPTION_ATTESTATION_CHALLENGE_INDEX
+                    )
+                )
+                .octets
+        val tagged =
+            listOf(
+                    description.getObjectAt(
+                        AttestationConstants.KEY_DESCRIPTION_SOFTWARE_ENFORCED_INDEX
+                    ),
+                    description.getObjectAt(AttestationConstants.KEY_DESCRIPTION_TEE_ENFORCED_INDEX),
+                )
+                .asSequence()
+                .map(ASN1Sequence::getInstance)
+                .flatMap { it.asSequence() }
+                .filterIsInstance<ASN1TaggedObject>()
+                .toList()
+        val aaid = tagged.single { it.tagNo == AttestationConstants.TAG_ATTESTATION_APPLICATION_ID }
+        val purpose = tagged.single { it.tagNo == AttestationConstants.TAG_PURPOSE }
+        val purposeSet = ASN1Set.getInstance(purpose.baseObject)
+        val purposes =
+            (0 until purposeSet.size())
+                .map { ASN1Integer.getInstance(purposeSet.getObjectAt(it)).value.toInt() }
+                .toSet()
+        val origin = tagged.single { it.tagNo == AttestationConstants.TAG_ORIGIN }
+        return ParsedSyntheticAttestation(
+            parsedChallenge,
+            ASN1OctetString.getInstance(aaid.baseObject).octets,
+            ASN1Enumerated.getInstance(
+                    description.getObjectAt(
+                        AttestationConstants.KEY_DESCRIPTION_ATTESTATION_SECURITY_LEVEL_INDEX
+                    )
+                )
+                .value
+                .toInt(),
+            ASN1Enumerated.getInstance(
+                    description.getObjectAt(
+                        AttestationConstants.KEY_DESCRIPTION_KEYMINT_SECURITY_LEVEL_INDEX
+                    )
+                )
+                .value
+                .toInt(),
+            purposes,
+            ASN1Integer.getInstance(origin.baseObject).value.toInt(),
+            tagged.count { it.tagNo == AttestationConstants.TAG_DIGEST },
+            tagged.count { it.tagNo == AttestationConstants.TAG_NO_AUTH_REQUIRED } == 1,
+        )
+    }
+
+    private fun parseCertificateStrict(encoded: ByteArray): X509Certificate {
+        val input = ByteArrayInputStream(encoded)
+        val certificate =
+            CertificateFactory.getInstance("X.509").generateCertificate(input) as X509Certificate
+        require(input.available() == 0)
+        return certificate
+    }
 }

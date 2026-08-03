@@ -71,7 +71,7 @@ pub fn decode_frame(bytes: &[u8], role: ExchangeRole) -> Result<BridgeMessage, B
     if direction != role.direction() {
         return Err(BridgeError::WrongDirection);
     }
-    if !(1..=10).contains(&tag) {
+    if !(1..=12).contains(&tag) {
         return Err(BridgeError::UnknownTag);
     }
     if !role.accepts(tag) {
@@ -181,6 +181,36 @@ fn body_length(message: &BridgeMessage) -> Result<usize, BridgeError> {
             .and_then(|length| length.checked_add(57))
             .ok_or(BridgeError::ValueTooLarge),
         BridgeMessage::CertificationAck(..) => Ok(48),
+        BridgeMessage::SyntheticLeaseProbeRequest {
+            private_key_pkcs8,
+            expected_spki,
+            challenge,
+            aaid,
+            certificate_chain,
+            ..
+        } => certificate_chain.iter().try_fold(
+            checked(
+                checked(
+                    checked(
+                        checked(
+                            checked(65, private_key_pkcs8.as_slice().len())?,
+                            expected_spki.as_slice().len(),
+                        )?,
+                        challenge.as_slice().len(),
+                    )?,
+                    aaid.as_slice().len(),
+                )?,
+                0,
+            )?,
+            |sum, certificate| checked(checked(sum, 4)?, certificate.as_slice().len()),
+        ),
+        BridgeMessage::SyntheticLeaseProbeResponse {
+            certificate_chain, ..
+        } => certificate_chain
+            .iter()
+            .try_fold(1_usize, |sum, certificate| {
+                checked(checked(sum, 4)?, certificate.as_slice().len())
+            }),
     }
 }
 
@@ -278,6 +308,78 @@ fn encode_body(message: &BridgeMessage, output: &mut Vec<u8>) -> Result<(), Brid
             output.extend_from_slice(batch_id.as_array());
             output.extend_from_slice(activation_binding.as_array());
         }
+        BridgeMessage::SyntheticLeaseProbeRequest { .. }
+        | BridgeMessage::SyntheticLeaseProbeResponse { .. } => {
+            encode_synthetic_probe(message, output)?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_synthetic_probe(
+    message: &BridgeMessage,
+    output: &mut Vec<u8>,
+) -> Result<(), BridgeError> {
+    let certificate_chain = match message {
+        BridgeMessage::SyntheticLeaseProbeRequest {
+            rkp_handle,
+            private_key_pkcs8,
+            expected_spki,
+            challenge,
+            aaid,
+            certificate_not_before_millis,
+            certificate_not_after_millis,
+            certificate_chain,
+            ..
+        } => {
+            if private_key_pkcs8.as_slice().is_empty()
+                || private_key_pkcs8.as_slice().len() > 4_096
+                || expected_spki.as_slice().is_empty()
+                || expected_spki.as_slice().len() > 65_536
+                || !(16..=64).contains(&challenge.as_slice().len())
+                || aaid.as_slice().is_empty()
+                || aaid.as_slice().len() > 131_072
+                || certificate_not_after_millis <= certificate_not_before_millis
+            {
+                return Err(BridgeError::ValueTooLarge);
+            }
+            output.extend_from_slice(rkp_handle.as_array());
+            put_bytes(output, private_key_pkcs8.as_slice())?;
+            put_bytes(output, expected_spki.as_slice())?;
+            put_bytes(output, challenge.as_slice())?;
+            put_bytes(output, aaid.as_slice())?;
+            output.extend_from_slice(&certificate_not_before_millis.to_be_bytes());
+            output.extend_from_slice(&certificate_not_after_millis.to_be_bytes());
+            certificate_chain
+        }
+        BridgeMessage::SyntheticLeaseProbeResponse {
+            certificate_chain, ..
+        } => certificate_chain,
+        _ => return Err(BridgeError::UnexpectedTag),
+    };
+    validate_synthetic_chain(certificate_chain)?;
+    output.push(u8::try_from(certificate_chain.len()).map_err(|_| BridgeError::ValueTooLarge)?);
+    for certificate in certificate_chain {
+        put_bytes(output, certificate.as_slice())?;
+    }
+    Ok(())
+}
+
+fn validate_synthetic_chain(certificate_chain: &[super::PublicBytes]) -> Result<(), BridgeError> {
+    if !(2..=20).contains(&certificate_chain.len()) {
+        return Err(BridgeError::ValueTooLarge);
+    }
+    let total = certificate_chain
+        .iter()
+        .try_fold(0_usize, |sum, certificate| {
+            if certificate.as_slice().is_empty() || certificate.as_slice().len() > 65_536 {
+                return Err(BridgeError::ValueTooLarge);
+            }
+            sum.checked_add(certificate.as_slice().len())
+                .ok_or(BridgeError::ValueTooLarge)
+        })?;
+    if total > 524_288 {
+        return Err(BridgeError::ValueTooLarge);
     }
     Ok(())
 }

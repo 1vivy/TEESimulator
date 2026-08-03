@@ -19,6 +19,7 @@ pub mod direct_session;
 mod provision_activation;
 mod provisioning;
 mod provisioning_io;
+pub mod synthetic_lease_probe;
 mod trust_runtime;
 
 /// Paired-only donor policy and lifecycle service.

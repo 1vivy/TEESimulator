@@ -16,7 +16,8 @@ object BridgeCodec {
                 message is BridgeMessage.UpdateRequest ||
                 message is BridgeMessage.Cancel ||
                 message is BridgeMessage.CandidateCommand ||
-                message is BridgeMessage.CertificationRequest
+                message is BridgeMessage.CertificationRequest ||
+                message is BridgeMessage.SyntheticLeaseProbeRequest
         val role =
             when (direction) {
                 BridgeDirection.SIDECAR_TO_BROKER ->
@@ -205,6 +206,31 @@ object BridgeCodec {
                         writeFixed(out, message.batchId)
                         writeFixed(out, message.activationBindingHash)
                     }
+                    is BridgeMessage.SyntheticLeaseProbeRequest -> {
+                        writeFixed(out, message.rkpHandle)
+                        writeSecret(out, message.privateKeyPkcs8)
+                        writeBytes(out, message.expectedSpki)
+                        writeBytes(out, message.challenge)
+                        writeBytes(out, message.aaid)
+                        out.writeLong(message.certificateNotBeforeMillis)
+                        out.writeLong(message.certificateNotAfterMillis)
+                        val chain = message.certificateChain()
+                        try {
+                            out.writeByte(chain.size)
+                            chain.forEach { writeBytes(out, it) }
+                        } finally {
+                            chain.forEach(PublicBytes::close)
+                        }
+                    }
+                    is BridgeMessage.SyntheticLeaseProbeResponse -> {
+                        val chain = message.certificateChain()
+                        try {
+                            out.writeByte(chain.size)
+                            chain.forEach { writeBytes(out, it) }
+                        } finally {
+                            chain.forEach(PublicBytes::close)
+                        }
+                    }
                 }
             }
             bytes.toByteArray()
@@ -392,6 +418,47 @@ object BridgeCodec {
                             readBatchId(input),
                             readHash(input),
                         )
+                    BridgeTag.SYNTHETIC_LEASE_PROBE_REQUEST -> {
+                        val handle = readHash(input)
+                        val secret = readSecretBytes(input)
+                        val spki =
+                            readPublicBytes(input, BridgeLimits.MAX_CERTIFICATE_BYTES, minimum = 1)
+                        val challenge = readPublicBytes(input, 64, minimum = 16)
+                        val aaid = readPublicBytes(input, 131_072, minimum = 1)
+                        val notBefore = input.readLong()
+                        val notAfter = input.readLong()
+                        val chain = readSyntheticLeaseChain(input)
+                        try {
+                            BridgeMessage.SyntheticLeaseProbeRequest(
+                                requestId,
+                                handle,
+                                secret,
+                                spki,
+                                challenge,
+                                aaid,
+                                notBefore,
+                                notAfter,
+                                chain,
+                            )
+                        } catch (error: Throwable) {
+                            handle.close()
+                            secret.close()
+                            spki.close()
+                            challenge.close()
+                            aaid.close()
+                            throw error
+                        } finally {
+                            chain.forEach(PublicBytes::close)
+                        }
+                    }
+                    BridgeTag.SYNTHETIC_LEASE_PROBE_RESPONSE -> {
+                        val chain = readSyntheticLeaseChain(input)
+                        try {
+                            BridgeMessage.SyntheticLeaseProbeResponse(requestId, chain)
+                        } finally {
+                            chain.forEach(PublicBytes::close)
+                        }
+                    }
                     else -> return BridgeResult.Failure(BridgeError.UnknownTag)
                 }
             if (input.available() != 0) {
@@ -413,6 +480,46 @@ object BridgeCodec {
             output.write(copy)
         } finally {
             copy.fill(0)
+        }
+    }
+
+    private fun writeSecret(output: DataOutputStream, bytes: SecretBytes) {
+        val copy = bytes.copyBytes()
+        try {
+            output.writeInt(copy.size)
+            output.write(copy)
+        } finally {
+            copy.fill(0)
+        }
+    }
+
+    private fun readSecretBytes(input: DataInputStream): SecretBytes {
+        val length = readLength(input, BridgeLimits.MAX_SYNTHETIC_LEASE_PKCS8_BYTES, minimum = 1)
+        val value = ByteArray(length)
+        return try {
+            input.readFully(value)
+            SecretBytes.of(value, BridgeLimits.MAX_SYNTHETIC_LEASE_PKCS8_BYTES)
+        } finally {
+            value.fill(0)
+        }
+    }
+
+    private fun readSyntheticLeaseChain(input: DataInputStream): List<PublicBytes> {
+        val count = input.readUnsignedByte()
+        require(count in 2..BridgeLimits.MAX_CHAIN_CERTIFICATES)
+        var total = 0L
+        val chain = mutableListOf<PublicBytes>()
+        try {
+            repeat(count) {
+                val length = readLength(input, BridgeLimits.MAX_CERTIFICATE_BYTES, minimum = 1)
+                total = Math.addExact(total, length.toLong())
+                require(total <= BridgeLimits.MAX_CHAIN_BYTES)
+                chain += readPublicBytesOfLength(input, length, BridgeLimits.MAX_CERTIFICATE_BYTES)
+            }
+            return chain
+        } catch (error: Throwable) {
+            chain.forEach(PublicBytes::close)
+            throw error
         }
     }
 

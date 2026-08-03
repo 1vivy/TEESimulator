@@ -12,6 +12,7 @@ pub(super) const MAX_CERTIFICATE_BYTES: usize = 65_536;
 pub(super) const MAX_CHAIN_BYTES: usize = 524_288;
 pub(super) const MAX_CHAIN_CERTIFICATES: usize = 20;
 pub(super) const MAX_PUBLIC_KEYS: usize = 20;
+pub(super) const MAX_SYNTHETIC_LEASE_PKCS8_BYTES: usize = 4_096;
 
 #[doc = "Request correlation identifier."]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -63,6 +64,46 @@ impl fmt::Debug for PublicBytes {
 }
 
 impl Drop for PublicBytes {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+/// Owned secret bytes with a redacted formatter and deterministic wipe.
+#[derive(Eq, PartialEq)]
+pub struct SecretBytes(Vec<u8>);
+
+impl SecretBytes {
+    /// Defensively copies secret bytes after enforcing the fixed bound.
+    pub fn bounded(bytes: &[u8], maximum: usize) -> Result<Self, BridgeError> {
+        if bytes.is_empty()
+            || maximum == 0
+            || maximum > MAX_SYNTHETIC_LEASE_PKCS8_BYTES
+            || bytes.len() > maximum
+        {
+            return Err(BridgeError::ValueTooLarge);
+        }
+        let mut value = Vec::new();
+        value
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| BridgeError::Allocation)?;
+        value.extend_from_slice(bytes);
+        Ok(Self(value))
+    }
+
+    /// Borrows the secret only for authenticated local framing.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretBytes {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SecretBytes(redacted)")
+    }
+}
+
+impl Drop for SecretBytes {
     fn drop(&mut self) {
         self.0.fill(0);
     }
@@ -313,6 +354,34 @@ pub enum BridgeMessage {
     ),
     #[doc = "Acknowledges one exact durable broker certification."]
     CertificationAck(RequestId, BrokerBatchId, Hash32),
+    /// Imports one caller-owned P-256 key under a live certified RKP key.
+    SyntheticLeaseProbeRequest {
+        /// Correlation identifier.
+        request_id: RequestId,
+        /// Exact live broker RKP handle.
+        rkp_handle: Hash32,
+        /// Caller-owned PKCS#8 bytes.
+        private_key_pkcs8: SecretBytes,
+        /// Caller-derived public SPKI.
+        expected_spki: PublicBytes,
+        /// Fresh attestation challenge.
+        challenge: PublicBytes,
+        /// Synthetic-lease attestation application identifier.
+        aaid: PublicBytes,
+        /// Requested lower certificate validity bound.
+        certificate_not_before_millis: u64,
+        /// Requested upper certificate validity bound.
+        certificate_not_after_millis: u64,
+        /// Certified donor RKP chain.
+        certificate_chain: Vec<PublicBytes>,
+    },
+    /// Returns only the canonical public lease-plus-RKP chain after deletion.
+    SyntheticLeaseProbeResponse {
+        /// Correlation identifier.
+        request_id: RequestId,
+        /// Canonical public lease-plus-RKP chain.
+        certificate_chain: Vec<PublicBytes>,
+    },
 }
 
 impl BridgeMessage {
@@ -329,6 +398,8 @@ impl BridgeMessage {
             | Self::CandidateReply(id, ..)
             | Self::CertificationRequest(id, ..)
             | Self::CertificationAck(id, ..) => *id,
+            Self::SyntheticLeaseProbeRequest { request_id, .. }
+            | Self::SyntheticLeaseProbeResponse { request_id, .. } => *request_id,
         }
     }
 
@@ -344,6 +415,8 @@ impl BridgeMessage {
             Self::CandidateReply(..) => 8,
             Self::CertificationRequest(..) => 9,
             Self::CertificationAck(..) => 10,
+            Self::SyntheticLeaseProbeRequest { .. } => 11,
+            Self::SyntheticLeaseProbeResponse { .. } => 12,
         }
     }
 }
@@ -382,8 +455,8 @@ impl ExchangeRole {
 
     pub(crate) const fn accepts(self, tag: u8) -> bool {
         match self {
-            Self::DonorRequest => matches!(tag, 1 | 3 | 5 | 7 | 9),
-            Self::DonorResponse => matches!(tag, 2 | 4 | 5 | 6 | 8 | 10),
+            Self::DonorRequest => matches!(tag, 1 | 3 | 5 | 7 | 9 | 11),
+            Self::DonorResponse => matches!(tag, 2 | 4 | 5 | 6 | 8 | 10 | 12),
             Self::CandidateRequest => matches!(tag, 1 | 3 | 5 | 7),
             Self::CandidateResponse => matches!(tag, 2 | 4 | 5 | 6 | 8),
         }
@@ -398,9 +471,11 @@ pub const fn expected_response_tag(message: &BridgeMessage) -> Result<u8, Bridge
         BridgeMessage::Cancel(..) => Ok(5),
         BridgeMessage::CandidateCommand(..) => Ok(8),
         BridgeMessage::CertificationRequest(..) => Ok(10),
+        BridgeMessage::SyntheticLeaseProbeRequest { .. } => Ok(12),
         BridgeMessage::PublicKeyResponse(..)
         | BridgeMessage::PublicResult(..)
         | BridgeMessage::CertificationAck(..)
+        | BridgeMessage::SyntheticLeaseProbeResponse { .. }
         | BridgeMessage::CandidateReply(..)
         | BridgeMessage::Error(..) => Err(BridgeError::UnexpectedTag),
     }

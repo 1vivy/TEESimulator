@@ -15,8 +15,10 @@ import org.bouncycastle.asn1.ASN1Enumerated
 import org.bouncycastle.asn1.ASN1Integer
 import org.bouncycastle.asn1.DEROctetString
 import org.bouncycastle.asn1.DERSequence
+import org.bouncycastle.asn1.DERSet
 import org.bouncycastle.asn1.DERTaggedObject
 import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.asn1.x509.BasicConstraints
 import org.bouncycastle.asn1.x509.Extension
 import org.bouncycastle.asn1.x509.KeyUsage
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
@@ -160,6 +162,7 @@ internal class DonorFixture {
 
 internal class FakeDonorKeyMintDevice(private val fixture: DonorFixture) : DonorKeyMintDevice {
     var generateCalls = 0
+    var importSyntheticLeaseCalls = 0
     var exposureCalls = 0
     var deleteCalls = 0
     var beginCalls = 0
@@ -177,6 +180,7 @@ internal class FakeDonorKeyMintDevice(private val fixture: DonorFixture) : Donor
     var failUpdate = false
     var lastAttestationKey: DonorAttestationKey? = null
     var lastParameters: DonorKeyParameters? = null
+    var syntheticLeaseKey: KeyPair? = null
     private var applicationKey: KeyPair? = null
 
     override fun generate(
@@ -205,6 +209,35 @@ internal class FakeDonorKeyMintDevice(private val fixture: DonorFixture) : Donor
                 if (wrongCharacteristics) it.copy(curve = DonorCurve.P384) else it
             }
         return DonorKeyCreation(ByteArray(32) { 0x6b }, characteristics, listOf(leaf.encoded))
+    }
+
+    override fun importSyntheticLease(
+        parameters: DonorSyntheticLeaseParameters,
+        privateKeyPkcs8: DonorSecretBytes,
+        attestationKey: DonorAttestationKey,
+    ): DonorSyntheticLeaseCreation {
+        importSyntheticLeaseCalls += 1
+        val key = requireNotNull(syntheticLeaseKey)
+        val supplied = privateKeyPkcs8.copyBytes()
+        try {
+            require(supplied.contentEquals(key.private.encoded))
+        } finally {
+            supplied.fill(0)
+        }
+        val leaf =
+            attestedCertificate(
+                key,
+                fixture.rkpKey,
+                fixture.rkpCertificate.subjectX500Principal.name,
+                parameters.challenge,
+                parameters.aaid,
+                attestKey = true,
+            )
+        return DonorSyntheticLeaseCreation(
+            ByteArray(32) { 0x7c },
+            DonorSyntheticLeaseCharacteristics.exact(),
+            listOf(leaf.encoded),
+        )
     }
 
     override fun begin(keyBlob: ByteArray): DonorOperationEndpoint {
@@ -287,6 +320,7 @@ private fun attestedCertificate(
     issuer: String,
     challenge: ByteArray,
     aaid: ByteArray,
+    attestKey: Boolean = false,
 ): X509Certificate {
     val now = Instant.now()
     val description =
@@ -299,7 +333,17 @@ private fun attestedCertificate(
                 DEROctetString(challenge),
                 DEROctetString(ByteArray(0)),
                 DERSequence(arrayOf(DERTaggedObject(true, 709, DEROctetString(aaid)))),
-                DERSequence(),
+                if (attestKey) {
+                    DERSequence(
+                        arrayOf(
+                            DERTaggedObject(true, 1, DERSet(ASN1Integer(7))),
+                            DERTaggedObject(true, 503, org.bouncycastle.asn1.DERNull.INSTANCE),
+                            DERTaggedObject(true, 702, ASN1Integer(2)),
+                        )
+                    )
+                } else {
+                    DERSequence()
+                },
             )
         )
     val builder =
@@ -312,7 +356,12 @@ private fun attestedCertificate(
             key.public,
         )
     builder.addExtension(ATTESTATION_OID, false, description)
-    builder.addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.digitalSignature))
+    builder.addExtension(
+        Extension.keyUsage,
+        true,
+        KeyUsage(if (attestKey) KeyUsage.keyCertSign else KeyUsage.digitalSignature),
+    )
+    if (attestKey) builder.addExtension(Extension.basicConstraints, true, BasicConstraints(true))
     return JcaX509CertificateConverter()
         .getCertificate(
             builder.build(JcaContentSignerBuilder("SHA256withECDSA").build(signer.private))

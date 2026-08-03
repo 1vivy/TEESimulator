@@ -24,13 +24,31 @@ class BrokerBridgeStaticPolicyTest {
                 "android.os.IBinder",
                 "android.os.Parcel",
                 "keyBlob",
-                "privateKey",
                 "transportSecret",
                 "GenericMap",
                 "JSONObject",
                 "Gson",
             )) {
             assertFalse("forbidden bridge material/API: $forbidden", source.contains(forbidden))
+        }
+        val secretBearingFiles =
+            setOf("BridgeProtocol.kt", "BridgeCodec.kt", "DonorProvisioningRuntime.kt")
+        val secretBearingSource =
+            secretBearingFiles.joinToString("\n") {
+                String(Files.readAllBytes(sourceRoot.resolve(it)))
+            }
+        assertTrue(secretBearingSource.contains("SecretBytes"))
+        assertTrue(secretBearingSource.contains("privateKey=redacted"))
+        assertTrue(secretBearingSource.contains("MAX_SYNTHETIC_LEASE_PKCS8_BYTES"))
+        Files.walk(sourceRoot).use { paths ->
+            paths
+                .filter { Files.isRegularFile(it) && it.fileName.toString() !in secretBearingFiles }
+                .forEach {
+                    assertFalse(
+                        "secret field escaped the explicit lease bridge: $it",
+                        String(Files.readAllBytes(it)).contains("privateKey"),
+                    )
+                }
         }
     }
 

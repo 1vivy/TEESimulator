@@ -45,7 +45,6 @@ fn bridge_material_source_has_no_generic_or_forbidden_serializer() {
         "unsafe {",
         "Binder",
         "Parcel",
-        "private_key",
         "key_blob",
         "transport_secret",
         "unwrap(",
@@ -81,6 +80,8 @@ fn bridge_material_source_has_no_generic_or_forbidden_serializer() {
         "RecordAuthorization::new",
         "OFlags::NONBLOCK",
         "OFlags::PATH",
+        "SecretBytes(redacted)",
+        "MAX_SYNTHETIC_LEASE_PKCS8_BYTES",
     ] {
         assert!(
             source.contains(required),
@@ -93,6 +94,23 @@ fn bridge_material_source_has_no_generic_or_forbidden_serializer() {
     ]
     .concat();
     assert!(!lifecycle.contains("saturating_sub"));
+    let secret_free_control_plane = [
+        include_str!("../src/bridge/identity.rs"),
+        include_str!("../src/bridge/trusted_record.rs"),
+        include_str!("../src/bridge/runtime.rs"),
+        include_str!("../src/bridge/executor_state.rs"),
+        include_str!("../src/bridge/lifecycle.rs"),
+        include_str!("../src/bridge/deadline.rs"),
+        include_str!("../src/bridge/descriptor_io.rs"),
+        include_str!("../src/bridge/identity_source.rs"),
+        include_str!("../src/bridge/peer_authorization.rs"),
+        include_str!("../src/bridge/process_identity.rs"),
+        include_str!("../src/bridge/process_liveness.rs"),
+        include_str!("../src/bridge/record_authorization.rs"),
+        include_str!("../src/bridge/socket.rs"),
+    ]
+    .concat();
+    assert!(!secret_free_control_plane.contains("private_key"));
 }
 
 #[test]

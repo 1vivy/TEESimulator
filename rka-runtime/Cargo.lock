@@ -1053,6 +1053,7 @@ dependencies = [
  "rustls",
  "socket2",
  "thiserror",
+ "x509-parser",
 ]
 
 [[package]]

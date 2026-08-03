@@ -317,26 +317,6 @@ const fn dispatch_budget(plan: ResponsePlan) -> Duration {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::{ResponsePlan, dispatch_budget};
-
-    #[test]
-    fn generation_dispatch_has_hardware_budget() {
-        assert_eq!(
-            dispatch_budget(ResponsePlan::Generate { epoch: 1 }),
-            Duration::from_secs(20),
-        );
-    }
-
-    #[test]
-    fn non_generation_dispatch_retains_the_short_budget() {
-        assert_eq!(dispatch_budget(ResponsePlan::List), Duration::from_secs(5));
-    }
-}
-
 fn exact<const N: usize>(payload: &[u8]) -> Result<[u8; N], ()> {
     payload.try_into().map_err(|_| ())
 }
@@ -407,5 +387,25 @@ impl<'a> Cursor<'a> {
         } else {
             Err(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{ResponsePlan, dispatch_budget};
+
+    #[test]
+    fn generation_dispatch_has_hardware_budget() {
+        assert_eq!(
+            dispatch_budget(ResponsePlan::Generate { epoch: 1 }),
+            Duration::from_secs(20),
+        );
+    }
+
+    #[test]
+    fn non_generation_dispatch_retains_the_short_budget() {
+        assert_eq!(dispatch_budget(ResponsePlan::List), Duration::from_secs(5));
     }
 }

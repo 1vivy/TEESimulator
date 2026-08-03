@@ -21,6 +21,7 @@ rustls.workspace = true
 rustix.workspace = true
 socket2.workspace = true
 thiserror.workspace = true
+x509-parser.workspace = true
 
 [lints]
 workspace = true

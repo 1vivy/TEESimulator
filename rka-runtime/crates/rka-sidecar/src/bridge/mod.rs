@@ -37,6 +37,6 @@ pub use identity::{BrokerRole, PeerCredentials};
 pub use model::{
     BridgeMessage, BrokerBatchId, BrokerCertificationMetadata, BrokerKeyMetadata,
     CandidateBridgeOperation, Correlation, ExchangeRole, Hash32, NetworkHandle, PublicBytes,
-    RequestId, expected_response_tag,
+    RequestId, SecretBytes, expected_response_tag,
 };
 pub use runtime::{BrokerOperation, RoleExecutor, SidecarRole};

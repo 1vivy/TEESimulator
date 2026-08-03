@@ -14,7 +14,8 @@ enum class DonorCurve {
 }
 
 enum class DonorPurpose {
-    SIGN
+    SIGN,
+    ATTEST_KEY,
 }
 
 enum class DonorDigest {
@@ -26,7 +27,8 @@ enum class DonorSecurityLevel {
 }
 
 enum class DonorOrigin {
-    GENERATED
+    GENERATED,
+    IMPORTED,
 }
 
 data class DonorKeyCharacteristics(
@@ -82,6 +84,95 @@ data class DonorKeyParameters(
     }
 }
 
+data class DonorSyntheticLeaseParameters(
+    val securityLevel: DonorSecurityLevel,
+    val algorithm: DonorAlgorithm,
+    val curve: DonorCurve,
+    val purpose: DonorPurpose,
+    val noAuthRequired: Boolean,
+    val challenge: ByteArray,
+    val aaid: ByteArray,
+    val certificateNotBeforeMillis: Long,
+    val certificateNotAfterMillis: Long,
+) {
+    init {
+        require(challenge.size in 16..64)
+        require(aaid.isNotEmpty() && aaid.size <= 131_072)
+        require(certificateNotBeforeMillis >= 0)
+        require(certificateNotAfterMillis > certificateNotBeforeMillis)
+    }
+
+    companion object {
+        fun exact(
+            challenge: ByteArray,
+            aaid: ByteArray,
+            certificateNotBeforeMillis: Long,
+            certificateNotAfterMillis: Long,
+        ): DonorSyntheticLeaseParameters =
+            DonorSyntheticLeaseParameters(
+                DonorSecurityLevel.TEE,
+                DonorAlgorithm.EC,
+                DonorCurve.P256,
+                DonorPurpose.ATTEST_KEY,
+                true,
+                challenge.copyOf(),
+                aaid.copyOf(),
+                certificateNotBeforeMillis,
+                certificateNotAfterMillis,
+            )
+    }
+}
+
+data class DonorSyntheticLeaseCharacteristics(
+    val securityLevel: DonorSecurityLevel,
+    val algorithm: DonorAlgorithm,
+    val curve: DonorCurve,
+    val purposes: Set<DonorPurpose>,
+    val origin: DonorOrigin,
+    val noAuthRequired: Boolean,
+) {
+    companion object {
+        fun exact(): DonorSyntheticLeaseCharacteristics =
+            DonorSyntheticLeaseCharacteristics(
+                DonorSecurityLevel.TEE,
+                DonorAlgorithm.EC,
+                DonorCurve.P256,
+                setOf(DonorPurpose.ATTEST_KEY),
+                DonorOrigin.IMPORTED,
+                true,
+            )
+    }
+}
+
+internal class DonorSecretBytes private constructor(bytes: ByteArray) : AutoCloseable {
+    private val value = bytes.copyOf()
+    private val destroyed = AtomicBoolean()
+
+    fun copyBytes(): ByteArray {
+        check(!destroyed.get()) { "secret bytes destroyed" }
+        return value.copyOf()
+    }
+
+    fun <T> withBytes(action: (ByteArray) -> T): T {
+        check(!destroyed.get()) { "secret bytes destroyed" }
+        return action(value)
+    }
+
+    override fun close() {
+        if (destroyed.compareAndSet(false, true)) value.fill(0)
+    }
+
+    override fun toString(): String = "DonorSecretBytes(redacted)"
+
+    companion object {
+        fun of(bytes: ByteArray, maximum: Int): DonorSecretBytes {
+            require(maximum in 1..4_096)
+            require(bytes.size in 1..maximum)
+            return DonorSecretBytes(bytes)
+        }
+    }
+}
+
 internal class DonorAttestationKey(
     keyBlob: ByteArray,
     val issuerSubjectName: ByteArray,
@@ -100,6 +191,35 @@ internal data class DonorKeyCreation(
     val certificateChain: List<ByteArray>,
 )
 
+internal class DonorSyntheticLeaseCreation(
+    keyBlob: ByteArray,
+    val characteristics: DonorSyntheticLeaseCharacteristics,
+    certificateChain: List<ByteArray>,
+) : AutoCloseable {
+    private val keyBlob = keyBlob.copyOf()
+    private val destroyed = AtomicBoolean()
+    val certificateChain = certificateChain.map(ByteArray::copyOf)
+
+    init {
+        require(this.keyBlob.isNotEmpty())
+        require(this.certificateChain.isNotEmpty())
+    }
+
+    fun <T> withKeyBlob(action: (ByteArray) -> T): T {
+        check(!destroyed.get()) { "synthetic lease creation destroyed" }
+        return action(keyBlob)
+    }
+
+    override fun close() {
+        if (destroyed.compareAndSet(false, true)) keyBlob.fill(0)
+    }
+
+    internal fun isDestroyedForTest(): Boolean = destroyed.get()
+
+    override fun toString(): String =
+        "DonorSyntheticLeaseCreation(certificateCount=${certificateChain.size},keyBlob=redacted)"
+}
+
 internal interface DonorOperationEndpoint {
     fun updateAad(input: ByteArray)
 
@@ -115,6 +235,12 @@ internal interface DonorKeyMintDevice {
         parameters: DonorKeyParameters,
         attestationKey: DonorAttestationKey,
     ): DonorKeyCreation
+
+    fun importSyntheticLease(
+        parameters: DonorSyntheticLeaseParameters,
+        privateKeyPkcs8: DonorSecretBytes,
+        attestationKey: DonorAttestationKey,
+    ): DonorSyntheticLeaseCreation
 
     fun begin(keyBlob: ByteArray): DonorOperationEndpoint
 

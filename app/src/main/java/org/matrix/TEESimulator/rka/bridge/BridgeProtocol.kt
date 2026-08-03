@@ -23,6 +23,7 @@ object BridgeLimits {
     const val MAX_CHAIN_CERTIFICATES = 20
     const val MAX_CERTIFICATE_BYTES = 65_536
     const val MAX_CHAIN_BYTES = 524_288
+    const val MAX_SYNTHETIC_LEASE_PKCS8_BYTES = 4_096
 }
 
 enum class BridgeDirection(val wire: Int) {
@@ -41,6 +42,8 @@ object BridgeTag {
     const val CANDIDATE_REPLY = 8
     const val CERTIFICATION_REQUEST = 9
     const val CERTIFICATION_ACK = 10
+    const val SYNTHETIC_LEASE_PROBE_REQUEST = 11
+    const val SYNTHETIC_LEASE_PROBE_RESPONSE = 12
 
     internal val known =
         setOf(
@@ -54,6 +57,8 @@ object BridgeTag {
             CANDIDATE_REPLY,
             CERTIFICATION_REQUEST,
             CERTIFICATION_ACK,
+            SYNTHETIC_LEASE_PROBE_REQUEST,
+            SYNTHETIC_LEASE_PROBE_RESPONSE,
         )
 }
 
@@ -66,6 +71,7 @@ enum class BridgeExchangeRole(val direction: BridgeDirection, internal val tags:
             BridgeTag.CANCEL,
             BridgeTag.CERTIFICATION_REQUEST,
             BridgeTag.CANDIDATE_COMMAND,
+            BridgeTag.SYNTHETIC_LEASE_PROBE_REQUEST,
         ),
     ),
     DONOR_RESPONSE(
@@ -77,6 +83,7 @@ enum class BridgeExchangeRole(val direction: BridgeDirection, internal val tags:
             BridgeTag.ERROR,
             BridgeTag.CERTIFICATION_ACK,
             BridgeTag.CANDIDATE_REPLY,
+            BridgeTag.SYNTHETIC_LEASE_PROBE_RESPONSE,
         ),
     ),
     CANDIDATE_REQUEST(
@@ -146,6 +153,36 @@ class PublicBytes private constructor(bytes: ByteArray) : AutoCloseable {
             require(maximum in 0..BridgeLimits.MAX_FRAME_BYTES)
             require(bytes.size <= maximum)
             return PublicBytes(bytes)
+        }
+    }
+}
+
+class SecretBytes private constructor(bytes: ByteArray) : AutoCloseable {
+    private val value = bytes.copyOf()
+    private val destroyed = AtomicBoolean()
+
+    fun copyBytes(): ByteArray {
+        check(!destroyed.get()) { "secret bytes destroyed" }
+        return value.copyOf()
+    }
+
+    internal val size: Int
+        get() {
+            check(!destroyed.get()) { "secret bytes destroyed" }
+            return value.size
+        }
+
+    override fun close() {
+        if (destroyed.compareAndSet(false, true)) value.fill(0)
+    }
+
+    override fun toString(): String = "SecretBytes(redacted)"
+
+    companion object {
+        fun of(bytes: ByteArray, maximum: Int): SecretBytes {
+            require(maximum in 1..BridgeLimits.MAX_SYNTHETIC_LEASE_PKCS8_BYTES)
+            require(bytes.size in 1..maximum)
+            return SecretBytes(bytes)
         }
     }
 }
@@ -533,6 +570,60 @@ sealed class BridgeMessage : AutoCloseable {
         }
     }
 
+    class SyntheticLeaseProbeRequest(
+        override val requestId: RequestId,
+        val rkpHandle: Hash32,
+        val privateKeyPkcs8: SecretBytes,
+        val expectedSpki: PublicBytes,
+        val challenge: PublicBytes,
+        val aaid: PublicBytes,
+        val certificateNotBeforeMillis: Long,
+        val certificateNotAfterMillis: Long,
+        certificateChain: List<PublicBytes>,
+    ) : BridgeMessage() {
+        private val chain = copySyntheticLeaseChain(certificateChain, minimum = 2)
+
+        init {
+            require(privateKeyPkcs8.size in 1..BridgeLimits.MAX_SYNTHETIC_LEASE_PKCS8_BYTES)
+            require(expectedSpki.size in 1..BridgeLimits.MAX_CERTIFICATE_BYTES)
+            require(challenge.size in 16..64)
+            require(aaid.size in 1..131_072)
+            require(certificateNotBeforeMillis >= 0)
+            require(certificateNotAfterMillis > certificateNotBeforeMillis)
+        }
+
+        fun certificateChain(): List<PublicBytes> =
+            chain.map { PublicBytes.of(it.copyBytes(), BridgeLimits.MAX_CERTIFICATE_BYTES) }
+
+        override fun close() {
+            rkpHandle.close()
+            privateKeyPkcs8.close()
+            expectedSpki.close()
+            challenge.close()
+            aaid.close()
+            chain.forEach(PublicBytes::close)
+        }
+
+        override fun toString(): String =
+            "SyntheticLeaseProbeRequest(requestId=$requestId,privateKey=redacted," +
+                "certificateCount=${chain.size})"
+    }
+
+    class SyntheticLeaseProbeResponse(
+        override val requestId: RequestId,
+        certificateChain: List<PublicBytes>,
+    ) : BridgeMessage() {
+        private val chain = copySyntheticLeaseChain(certificateChain, minimum = 2)
+
+        fun certificateChain(): List<PublicBytes> =
+            chain.map { PublicBytes.of(it.copyBytes(), BridgeLimits.MAX_CERTIFICATE_BYTES) }
+
+        override fun close() = chain.forEach(PublicBytes::close)
+
+        override fun toString(): String =
+            "SyntheticLeaseProbeResponse(requestId=$requestId,certificateCount=${chain.size})"
+    }
+
     class CandidateCommand(
         override val requestId: RequestId,
         val operation: CandidateBridgeOperation,
@@ -588,6 +679,8 @@ internal object BridgeProtocol {
             is BridgeMessage.CandidateReply -> BridgeTag.CANDIDATE_REPLY
             is BridgeMessage.CertificationRequest -> BridgeTag.CERTIFICATION_REQUEST
             is BridgeMessage.CertificationAck -> BridgeTag.CERTIFICATION_ACK
+            is BridgeMessage.SyntheticLeaseProbeRequest -> BridgeTag.SYNTHETIC_LEASE_PROBE_REQUEST
+            is BridgeMessage.SyntheticLeaseProbeResponse -> BridgeTag.SYNTHETIC_LEASE_PROBE_RESPONSE
         }
 
     fun correlationFor(request: BridgeMessage, generation: Long): BridgeCorrelation {
@@ -598,10 +691,23 @@ internal object BridgeProtocol {
                 is BridgeMessage.Cancel -> BridgeTag.CANCEL
                 is BridgeMessage.CandidateCommand -> BridgeTag.CANDIDATE_REPLY
                 is BridgeMessage.CertificationRequest -> BridgeTag.CERTIFICATION_ACK
+                is BridgeMessage.SyntheticLeaseProbeRequest ->
+                    BridgeTag.SYNTHETIC_LEASE_PROBE_RESPONSE
                 else -> throw IllegalArgumentException("message is not a request")
             }
         return BridgeCorrelation(request.requestId, expected, generation, Thread.currentThread())
     }
+}
+
+private fun copySyntheticLeaseChain(source: List<PublicBytes>, minimum: Int): List<PublicBytes> {
+    require(source.size in minimum..BridgeLimits.MAX_CHAIN_CERTIFICATES)
+    val total =
+        source.fold(0L) { sum, certificate ->
+            require(certificate.size in 1..BridgeLimits.MAX_CERTIFICATE_BYTES)
+            Math.addExact(sum, certificate.size.toLong())
+        }
+    require(total <= BridgeLimits.MAX_CHAIN_BYTES)
+    return source.map { PublicBytes.of(it.copyBytes(), BridgeLimits.MAX_CERTIFICATE_BYTES) }
 }
 
 enum class BridgeErrorCode(val wire: Int) {

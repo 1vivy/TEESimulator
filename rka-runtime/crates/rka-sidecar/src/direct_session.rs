@@ -21,7 +21,8 @@ use thiserror::Error;
 use crate::{
     LifecycleRole,
     bridge::{
-        ExchangeRole, decode_frame as decode_bridge_frame, encode_frame as encode_bridge_frame,
+        BridgeError, ExchangeRole, decode_frame as decode_bridge_frame,
+        encode_frame as encode_bridge_frame,
     },
     direct_bridge::DirectBridgeAdapter,
     direct_profile::{DialMode, DirectProfile},
@@ -108,17 +109,24 @@ pub fn run_donor_bridge() -> Result<(), DirectSessionError> {
         let result = donor.serve_once(socket, |request| {
             let request = decode_bridge_frame(request, ExchangeRole::CandidateRequest)
                 .map_err(|_| rka_transport::TlsError::Admission)?;
-            let prepared = adapter
-                .prepare(request)
-                .map_err(|()| rka_transport::TlsError::Admission)?;
+            let prepared = adapter.prepare(request).map_err(|()| {
+                diagnostic(&state, "donor_bridge_prepare".to_owned());
+                rka_transport::TlsError::Admission
+            })?;
             dispatched.set(true);
-            let response = adapter
-                .dispatch(&prepared)
-                .map_err(|()| rka_transport::TlsError::Admission)?;
-            let response = DirectBridgeAdapter::finish(&prepared, response)
-                .map_err(|()| rka_transport::TlsError::Admission)?;
-            let encoded = encode_bridge_frame(&response, ExchangeRole::CandidateResponse)
-                .map_err(|_| rka_transport::TlsError::Admission)?;
+            let response = adapter.dispatch(&prepared).map_err(|error| {
+                diagnostic(&state, format!("donor_bridge_{}", bridge_status(error)));
+                rka_transport::TlsError::Admission
+            })?;
+            let response = DirectBridgeAdapter::finish(&prepared, response).map_err(|()| {
+                diagnostic(&state, "donor_bridge_finish".to_owned());
+                rka_transport::TlsError::Admission
+            })?;
+            let encoded =
+                encode_bridge_frame(&response, ExchangeRole::CandidateResponse).map_err(|_| {
+                    diagnostic(&state, "donor_bridge_encode".to_owned());
+                    rka_transport::TlsError::Admission
+                })?;
             Ok(encoded.as_slice().to_vec())
         });
         match (result, dispatched.get()) {
@@ -294,6 +302,22 @@ fn tls_status(error: TlsError, phase: &str) -> String {
         _ => "unknown",
     };
     format!("{phase}_{category}")
+}
+
+fn bridge_status(error: BridgeError) -> &'static str {
+    match error {
+        BridgeError::Deadline => "deadline",
+        BridgeError::PeerDied => "peer_died",
+        BridgeError::PeerIdentity => "peer_identity",
+        BridgeError::TrustedState => "trusted_state",
+        BridgeError::Io => "io",
+        BridgeError::Correlation => "correlation",
+        BridgeError::Generation => "generation",
+        BridgeError::Capacity => "capacity",
+        BridgeError::QueueSaturated => "queue_saturated",
+        BridgeError::Cancelled => "cancelled",
+        _ => "protocol",
+    }
 }
 
 fn diagnostic(state: &Path, status: String) {

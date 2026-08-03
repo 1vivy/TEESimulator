@@ -5,8 +5,8 @@ use rka_state::RkpLeaseBatch;
 
 use crate::{
     bridge::{
-        BridgeMessage, BrokerOperation, CandidateBridgeOperation, PublicBytes, RoleExecutor,
-        SidecarRole,
+        BridgeError, BridgeMessage, BrokerOperation, CandidateBridgeOperation, PublicBytes,
+        RoleExecutor, SidecarRole,
     },
     provisioning_io::{FileStateStore, load_lease_chain},
 };
@@ -110,13 +110,14 @@ impl DirectBridgeAdapter {
         })
     }
 
-    pub(super) fn dispatch(&self, prepared: &PreparedBridgeRequest) -> Result<BridgeMessage, ()> {
-        self.executor
-            .dispatch(BrokerOperation::Donor {
-                socket_path: &self.state_root.join("run/sockets/broker.sock"),
-                request: prepared.request(),
-            })
-            .map_err(|_| ())
+    pub(super) fn dispatch(
+        &self,
+        prepared: &PreparedBridgeRequest,
+    ) -> Result<BridgeMessage, BridgeError> {
+        self.executor.dispatch(BrokerOperation::Donor {
+            socket_path: &self.state_root.join("run/sockets/broker.sock"),
+            request: prepared.request(),
+        })
     }
 
     pub(super) fn finish(

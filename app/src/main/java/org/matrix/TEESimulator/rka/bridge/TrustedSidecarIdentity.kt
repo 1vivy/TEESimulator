@@ -6,6 +6,7 @@ import android.system.StructStat
 import java.io.Closeable
 import java.io.FileDescriptor
 import java.nio.charset.StandardCharsets
+import org.matrix.TEESimulator.logging.SystemLogger
 
 internal sealed interface ProductionPeerAuthorization : Closeable {
     fun authenticate(credentials: PeerCredentials): BridgeResult<SupervisorSnapshot>
@@ -120,6 +121,7 @@ private object FixedSupervisorAuthorization {
         val initial = (record as BridgeResult.Success).value
         val snapshot = initial.snapshotFor(expectedRole)
         if (snapshot == null || !processMatches(snapshot)) {
+            SystemLogger.warning("RKA bridge peer rejected: stage=supervisor category=identity")
             handle.close()
             return BridgeResult.Failure(BridgeError.PeerIdentityMismatch)
         }
@@ -148,24 +150,40 @@ private class DescriptorPeerAuthorization(
         if (current is BridgeResult.Failure) return current
         val fields = (current as BridgeResult.Success).value
         if (fields != initial) return BridgeResult.Failure(BridgeError.TrustedStateChanged)
-        val snapshot =
-            fields.snapshotFor(expectedRole)
-                ?: return BridgeResult.Failure(BridgeError.PeerIdentityMismatch)
+        val snapshot = fields.snapshotFor(expectedRole) ?: return identityFailure("role")
         val observed =
             runCatching { LinuxProcessIdentitySource().read(snapshot.pid) }
                 .getOrElse {
+                    SystemLogger.warning(
+                        "RKA bridge peer rejected: stage=authenticate category=supervisor_unreadable"
+                    )
                     return BridgeResult.Failure(BridgeError.PeerDied)
                 }
         val admitted =
             if (identityMatches(credentials, snapshot, observed)) {
                 snapshot
             } else {
-                runCatching { LinuxProcessIdentitySource().read(credentials.pid) }
-                    .getOrNull()
-                    ?.let { provisioningPeerSnapshot(expectedRole, credentials, snapshot, it) }
+                val provisioningObserved =
+                    runCatching { LinuxProcessIdentitySource().read(credentials.pid) }
+                        .getOrElse {
+                            return identityFailure("peer_unreadable")
+                        }
+                provisioningPeerSnapshot(expectedRole, credentials, snapshot, provisioningObserved)
+                    ?: return identityFailure(
+                        provisioningPeerMismatchCategory(
+                            expectedRole,
+                            credentials,
+                            snapshot,
+                            provisioningObserved,
+                        )
+                    )
             }
-        return admitted?.let { BridgeResult.Success(it) }
-            ?: BridgeResult.Failure(BridgeError.PeerIdentityMismatch)
+        return BridgeResult.Success(admitted)
+    }
+
+    private fun identityFailure(category: String): BridgeResult.Failure {
+        SystemLogger.warning("RKA bridge peer rejected: stage=authenticate category=$category")
+        return BridgeResult.Failure(BridgeError.PeerIdentityMismatch)
     }
 
     override fun close() {
@@ -201,6 +219,24 @@ internal fun provisioningPeerSnapshot(
         cmdline = observed.cmdline,
     )
 }
+
+private fun provisioningPeerMismatchCategory(
+    expectedRole: BrokerSidecarRole,
+    credentials: PeerCredentials,
+    supervised: SupervisorSnapshot,
+    observed: ObservedProcessIdentity,
+): String =
+    when {
+        expectedRole != BrokerSidecarRole.DONOR -> "provision_role"
+        credentials.uid != supervised.uid || credentials.gid != supervised.gid ->
+            "provision_credentials"
+        observed.cmdline != listOf(SupervisorRecordFields.FIXED_EXECUTABLE, "provision") ->
+            "provision_cmdline"
+        observed.executablePath != supervised.executablePath -> "provision_executable"
+        supervised.executableInode == null ||
+            observed.executableInode != supervised.executableInode -> "provision_inode"
+        else -> "provision_identity"
+    }
 
 private class TrustedRecordHandle
 private constructor(

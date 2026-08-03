@@ -230,8 +230,11 @@ private fun provisioningPeerMismatchCategory(
         expectedRole != BrokerSidecarRole.DONOR -> "provision_role"
         credentials.uid != supervised.uid || credentials.gid != supervised.gid ->
             "provision_credentials"
-        observed.cmdline != listOf(SupervisorRecordFields.FIXED_EXECUTABLE, "provision") ->
-            "provision_cmdline"
+        observed.cmdline == supervised.cmdline -> "provision_cmdline_supervised"
+        observed.cmdline.size != 2 -> "provision_cmdline_arity"
+        observed.cmdline.first() != SupervisorRecordFields.FIXED_EXECUTABLE ->
+            "provision_cmdline_executable"
+        observed.cmdline.last() != "provision" -> "provision_cmdline_action"
         observed.executablePath != supervised.executablePath -> "provision_executable"
         supervised.executableInode == null ||
             observed.executableInode != supervised.executableInode -> "provision_inode"

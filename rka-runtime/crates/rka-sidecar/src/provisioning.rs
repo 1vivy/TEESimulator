@@ -6,7 +6,7 @@ use ring::{
 };
 use rka_rkp::{
     AttestationStatusClient, BoundedHttpsTransport, ClientError, ExpectedKey, RootBundle,
-    assemble_android_v3_body,
+    ValidationError, assemble_android_v3_body,
     challenge::{OsEntropy, ProvisioningHttpClient},
     outcome::{
         AttemptDigests, AttemptIdentity, AttemptIds, DurablePostingJournal, DurableResponseJournal,
@@ -75,14 +75,14 @@ pub enum ProvisioningValidationStage {
     DurableResponseEncoding,
     /// Durable signed-response envelope decoding.
     DurableResponseDecoding,
-    /// Certificate serial extraction.
-    ReturnedSerials,
-    /// Revocation-status snapshot retrieval.
-    StatusSnapshot,
-    /// Signed certificate response validation.
-    SignedResponse,
-    /// Certificate-chain parsing.
-    SignedChains,
+    /// Certificate serial extraction with a redacted validation category.
+    ReturnedSerials(ValidationError),
+    /// Revocation-status snapshot retrieval with a redacted validation category.
+    StatusSnapshot(ValidationError),
+    /// Signed certificate response validation with a redacted validation category.
+    SignedResponse(ValidationError),
+    /// Certificate-chain parsing with a redacted validation category.
+    SignedChains(ValidationError),
     /// Canonical chain-set hashing.
     ChainSet,
 }
@@ -532,16 +532,18 @@ fn complete(
     roots: &RootBundle,
 ) -> Result<(), ProvisioningRunError> {
     let now = unix_seconds()?;
-    let serials = returned_serials(response, expected.len()).map_err(|_| {
-        ProvisioningRunError::ValidationStage(ProvisioningValidationStage::ReturnedSerials)
+    let serials = returned_serials(response, expected.len()).map_err(|error| {
+        ProvisioningRunError::ValidationStage(ProvisioningValidationStage::ReturnedSerials(error))
     })?;
     let mut status = AttestationStatusClient::new(
         BoundedHttpsTransport::new().map_err(ProvisioningRunError::Http)?,
     );
     let snapshot = status
         .snapshot_for(now, serials.iter().map(String::as_str))
-        .map_err(|_| {
-            ProvisioningRunError::ValidationStage(ProvisioningValidationStage::StatusSnapshot)
+        .map_err(|error| {
+            ProvisioningRunError::ValidationStage(ProvisioningValidationStage::StatusSnapshot(
+                error,
+            ))
         })?;
     let challenge_hash = sha256(challenge);
     let context = rka_rkp::ResponseContext::new(
@@ -564,12 +566,12 @@ fn complete(
         &snapshot,
         &mut quarantine,
     )
-    .map_err(|_| {
-        ProvisioningRunError::ValidationStage(ProvisioningValidationStage::SignedResponse)
+    .map_err(|error| {
+        ProvisioningRunError::ValidationStage(ProvisioningValidationStage::SignedResponse(error))
     })?;
     let encoded_chains =
-        rka_rkp::parse_signed_certificates(response, expected.len()).map_err(|_| {
-            ProvisioningRunError::ValidationStage(ProvisioningValidationStage::SignedChains)
+        rka_rkp::parse_signed_certificates(response, expected.len()).map_err(|error| {
+            ProvisioningRunError::ValidationStage(ProvisioningValidationStage::SignedChains(error))
         })?;
     let phase_hashes = [
         prepared.hal_csr_hash(),
@@ -741,13 +743,17 @@ mod tests {
 
     #[test]
     fn validation_failure_exposes_only_a_stable_checkpoint() {
-        let error =
-            ProvisioningRunError::ValidationStage(ProvisioningValidationStage::SignedResponse);
+        let error = ProvisioningRunError::ValidationStage(
+            ProvisioningValidationStage::SignedResponse(rka_rkp::ValidationError::Spki),
+        );
 
-        assert_eq!(format!("{error:?}"), "ValidationStage(SignedResponse)");
+        assert_eq!(
+            format!("{error:?}"),
+            "ValidationStage(SignedResponse(Spki))"
+        );
         assert_eq!(
             error.to_string(),
-            "provisioning validation failed at SignedResponse"
+            "provisioning validation failed at SignedResponse(Spki)"
         );
     }
 

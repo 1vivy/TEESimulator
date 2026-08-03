@@ -222,6 +222,13 @@ async function screenshot(connection, context, width, height, destination) {
     format: { type: "png" },
   });
   await writeFile(destination, Buffer.from(capture.data, "base64"));
+  const rendered = JSON.parse(await evaluate(connection, context, `JSON.stringify({
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+    documentWidth: document.documentElement.scrollWidth,
+    documentHeight: document.documentElement.scrollHeight
+  })`));
+  return { file: destination.split("/").at(-1), requested: { width, height }, rendered };
 }
 
 async function main() {
@@ -248,6 +255,7 @@ async function main() {
     })()`);
     if (readyState !== "Status refreshed") throw new Error(`WebUI initial state: ${readyState}`);
     const observed = [];
+    const viewportEvidence = [];
     let escaping;
     for (const action of actions) {
       observed.push({ action, ...(await click(connection, context, action)) });
@@ -263,9 +271,9 @@ async function main() {
         await screenshot(connection, context, 1280, 1500, `${evidenceDirectory}/browser-1280.png`);
       }
     }
-    await screenshot(connection, context, 375, 2300, `${evidenceDirectory}/visual-375.png`);
-    await screenshot(connection, context, 768, 1700, `${evidenceDirectory}/visual-768.png`);
-    await screenshot(connection, context, 1280, 1500, `${evidenceDirectory}/visual-1280.png`);
+    viewportEvidence.push(await screenshot(connection, context, 375, 2300, `${evidenceDirectory}/visual-375.png`));
+    viewportEvidence.push(await screenshot(connection, context, 768, 1700, `${evidenceDirectory}/visual-768.png`));
+    viewportEvidence.push(await screenshot(connection, context, 1280, 1500, `${evidenceDirectory}/visual-1280.png`));
     const renewalRequested = await click(connection, context, "renew-synthetic-lease");
     if (renewalRequested.commandState !== "Confirmation required") throw new Error("renewal confirmation was not requested");
     const renewalAwaiting = JSON.parse(await evaluate(connection, context, `JSON.stringify({
@@ -274,7 +282,7 @@ async function main() {
       token: document.querySelector("#confirmation-token").textContent
     })`));
     if (!renewalAwaiting.open || renewalAwaiting.state !== "Awaiting one-time token") throw new Error("renewal confirmation was not visible");
-    await screenshot(connection, context, 375, 2300, `${evidenceDirectory}/renewal-confirmation.png`);
+    viewportEvidence.push(await screenshot(connection, context, 375, 2300, `${evidenceDirectory}/renewal-confirmation.png`));
     const renewalAccepted = JSON.parse(await evaluate(connection, context, `(async () => {
       document.querySelector("#confirmation-input").value = document.querySelector("#confirmation-token").textContent;
       document.querySelector("#confirmation-submit").click();
@@ -282,11 +290,13 @@ async function main() {
       return JSON.stringify({
         state: document.querySelector("#confirmation-state").textContent,
         token: document.querySelector("#confirmation-token").textContent,
+        input: document.querySelector("#confirmation-input").value,
         lease: [...document.querySelectorAll("#rka-status div")].find((box) => box.querySelector("dt").textContent === "synthetic lease")?.querySelector("dd").textContent
       });
     })()`));
-    if (renewalAccepted.state !== "Protected action accepted" || renewalAccepted.token !== "" || renewalAccepted.lease !== "Active") throw new Error("renewal confirmation did not settle as active");
-    await screenshot(connection, context, 375, 2300, `${evidenceDirectory}/renewal-accepted.png`);
+    if (renewalAccepted.state !== "Protected action accepted" || renewalAccepted.token !== "" || renewalAccepted.input !== "" || renewalAccepted.lease !== "Active") throw new Error("renewal confirmation did not settle as active");
+    await evaluate(connection, context, "new Promise((resolveFrame) => requestAnimationFrame(() => requestAnimationFrame(resolveFrame)))");
+    viewportEvidence.push(await screenshot(connection, context, 375, 2300, `${evidenceDirectory}/renewal-accepted.png`));
     await evaluate(connection, context, "globalThis.__bridge.failNext = true");
     const failure = await click(connection, context, "status");
     if (failure.commandState !== "Fixed control request failed") throw new Error("command failure was not visible");
@@ -320,7 +330,7 @@ async function main() {
       return JSON.stringify({ disabled: button.disabled, commandState: document.querySelector("#command-state").textContent });
     })()`));
     if (settled.disabled || settled.commandState !== "Status refreshed") throw new Error("button did not settle after the pending bridge request");
-    await writeFile(`${evidenceDirectory}/browser-action-log.json`, JSON.stringify({ bridge, observed, escaping, renewalRequested, renewalAwaiting, renewalAccepted, failure, malformedState, busy, settled }, null, 2) + "\n");
+    await writeFile(`${evidenceDirectory}/browser-action-log.json`, JSON.stringify({ bridge, observed, escaping, viewportEvidence, renewalRequested, renewalAwaiting, renewalAccepted, failure, malformedState, busy, settled }, null, 2) + "\n");
   } finally {
     if (connection !== undefined && context !== undefined) {
       try { await connection.send("browsingContext.close", { context }); } catch {}

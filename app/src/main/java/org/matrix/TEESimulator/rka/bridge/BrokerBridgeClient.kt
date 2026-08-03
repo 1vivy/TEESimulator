@@ -1,5 +1,7 @@
 package org.matrix.TEESimulator.rka.bridge
 
+import org.matrix.TEESimulator.logging.SystemLogger
+
 interface BrokerBridgeClient {
     fun exchange(request: BridgeMessage): BridgeResult<BridgeMessage>
 
@@ -47,7 +49,8 @@ private class DefaultBrokerBridgeClient(
                 return BridgeResult.Failure(error.error)
             } catch (_: SecurityException) {
                 return BridgeResult.Failure(BridgeError.SelinuxDenied)
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                transportFailure("PEER_CREDENTIALS", error)
                 return BridgeResult.Failure(BridgeError.PeerDied)
             }
         return peerAuthorization.authenticate(credentials)
@@ -75,7 +78,8 @@ private class DefaultBrokerBridgeClient(
                 transport.output().flush()
             } catch (_: SecurityException) {
                 return closeWith(BridgeError.SelinuxDenied)
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                transportFailure("WRITE", error)
                 return closeWith(BridgeError.PeerDied)
             } finally {
                 encoded.fill(0)
@@ -85,7 +89,8 @@ private class DefaultBrokerBridgeClient(
                     BridgeCodec.decode(transport.input(), BridgeExchangeRole.CANDIDATE_RESPONSE)
                 } catch (_: SecurityException) {
                     return closeWith(BridgeError.SelinuxDenied)
-                } catch (_: Exception) {
+                } catch (error: Exception) {
+                    transportFailure("READ", error)
                     return closeWith(BridgeError.PeerDied)
                 }
             if (response is BridgeResult.Failure) return closeWith(response.error)
@@ -145,6 +150,12 @@ private class DefaultBrokerBridgeClient(
         workers.filter { it !== Thread.currentThread() }.forEach(Thread::interrupt)
         runCatching { transport.close() }
         runCatching { peerAuthorization.close() }
+    }
+
+    private fun transportFailure(stage: String, error: Exception) {
+        SystemLogger.warning(
+            "RKA candidate bridge transport failed: stage=$stage type=${error.javaClass.simpleName}"
+        )
     }
 }
 

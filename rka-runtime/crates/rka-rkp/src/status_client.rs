@@ -8,6 +8,34 @@ use serde::{
 use crate::{
     ClientError, HttpResponse, StatusSnapshot, ValidationError, status::CertificateStatus,
 };
+use thiserror::Error;
+
+/// Closed, secret-free failure categories for the production status fetch and parser.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[non_exhaustive]
+pub enum StatusClientError {
+    /// A requested serial was not canonical hexadecimal.
+    #[error("status serial rejected")]
+    Serial,
+    /// The bounded HTTPS transport failed.
+    #[error("status transport failed: {0}")]
+    Transport(ClientError),
+    /// HTTP status or redirect policy was rejected.
+    #[error("status HTTP response rejected")]
+    Http,
+    /// Cache-Control was missing, ambiguous, or invalid.
+    #[error("status cache policy rejected")]
+    CachePolicy,
+    /// The JSON document did not match the closed schema.
+    #[error("status document rejected")]
+    Document,
+    /// A status entry was not canonical.
+    #[error("status entry rejected")]
+    Entry,
+    /// The bounded status snapshot could not be constructed.
+    #[error("status snapshot rejected")]
+    Snapshot,
+}
 
 /// Fixed bounded GET request for Android attestation status.
 #[derive(Clone, Copy, Debug)]
@@ -54,10 +82,21 @@ impl<T: StatusHttpTransport> AttestationStatusClient<T> {
         now: u64,
         serials: impl IntoIterator<Item = &'a str>,
     ) -> Result<StatusSnapshot, ValidationError> {
+        self.snapshot_for_diagnostic(now, serials)
+            .map_err(|_| ValidationError::Status)
+    }
+
+    /// Resolves statuses while retaining only a closed production-safe failure category.
+    pub fn snapshot_for_diagnostic<'a>(
+        &mut self,
+        now: u64,
+        serials: impl IntoIterator<Item = &'a str>,
+    ) -> Result<StatusSnapshot, StatusClientError> {
         let serials = serials
             .into_iter()
             .map(normalize_serial)
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| StatusClientError::Serial)?;
         if !self
             .cached
             .as_ref()
@@ -65,7 +104,7 @@ impl<T: StatusHttpTransport> AttestationStatusClient<T> {
         {
             self.cached = Some(self.fetch(now)?);
         }
-        let cached = self.cached.as_ref().ok_or(ValidationError::Status)?;
+        let cached = self.cached.as_ref().ok_or(StatusClientError::Snapshot)?;
         let entries = serials.into_iter().map(|serial| {
             let status = cached
                 .revoked
@@ -79,6 +118,7 @@ impl<T: StatusHttpTransport> AttestationStatusClient<T> {
             &format!("max-age={}", cached.max_age),
             entries,
         )
+        .map_err(|_| StatusClientError::Snapshot)
     }
 
     #[doc(hidden)]
@@ -86,25 +126,26 @@ impl<T: StatusHttpTransport> AttestationStatusClient<T> {
         &self.transport
     }
 
-    fn fetch(&mut self, now: u64) -> Result<CachedStatus, ValidationError> {
+    fn fetch(&mut self, now: u64) -> Result<CachedStatus, StatusClientError> {
         let response = self
             .transport
             .get(StatusRequest {
                 url: crate::STATUS_URL,
                 headers: &[("Accept", "application/json")],
             })
-            .map_err(|_| ValidationError::Status)?;
+            .map_err(StatusClientError::Transport)?;
         if response.status() != 200 || response.headers().has_location() {
-            return Err(ValidationError::Status);
+            return Err(StatusClientError::Http);
         }
         let cache_control = response
             .headers()
             .unique_value("cache-control")
-            .ok_or(ValidationError::Status)?;
-        let max_age = crate::status::parse_max_age(cache_control)?;
+            .ok_or(StatusClientError::CachePolicy)?;
+        let max_age = crate::status::parse_max_age(cache_control)
+            .map_err(|_| StatusClientError::CachePolicy)?;
         let document: StatusDocument =
-            serde_json::from_slice(response.body()).map_err(|_| ValidationError::Status)?;
-        document.validate()?;
+            serde_json::from_slice(response.body()).map_err(|_| StatusClientError::Document)?;
+        document.validate().map_err(|_| StatusClientError::Entry)?;
         Ok(CachedStatus {
             fetched_at: now,
             max_age,

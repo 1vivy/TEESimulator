@@ -6,7 +6,7 @@ use ring::{
 };
 use rka_rkp::{
     AttestationStatusClient, BoundedHttpsTransport, ClientError, ExpectedKey, RootBundle,
-    ValidationError, assemble_android_v3_body,
+    StatusClientError, ValidationError, assemble_android_v3_body,
     challenge::{OsEntropy, ProvisioningHttpClient},
     outcome::{
         AttemptDigests, AttemptIdentity, AttemptIds, DurablePostingJournal, DurableResponseJournal,
@@ -78,7 +78,7 @@ pub enum ProvisioningValidationStage {
     /// Certificate serial extraction with a redacted validation category.
     ReturnedSerials(ValidationError),
     /// Revocation-status snapshot retrieval with a redacted validation category.
-    StatusSnapshot(ValidationError),
+    StatusSnapshot(StatusClientError),
     /// Signed certificate response validation with a redacted validation category.
     SignedResponse(ValidationError),
     /// Certificate-chain parsing with a redacted validation category.
@@ -539,7 +539,7 @@ fn complete(
         BoundedHttpsTransport::new().map_err(ProvisioningRunError::Http)?,
     );
     let snapshot = status
-        .snapshot_for(now, serials.iter().map(String::as_str))
+        .snapshot_for_diagnostic(now, serials.iter().map(String::as_str))
         .map_err(|error| {
             ProvisioningRunError::ValidationStage(ProvisioningValidationStage::StatusSnapshot(
                 error,
@@ -754,6 +754,19 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "provisioning validation failed at SignedResponse(Spki)"
+        );
+    }
+
+    #[test]
+    fn status_failure_exposes_the_closed_transport_category() {
+        let error =
+            ProvisioningRunError::ValidationStage(ProvisioningValidationStage::StatusSnapshot(
+                rka_rkp::StatusClientError::Transport(rka_rkp::ClientError::Transport),
+            ));
+
+        assert_eq!(
+            format!("{error:?}"),
+            "ValidationStage(StatusSnapshot(Transport(Transport)))"
         );
     }
 

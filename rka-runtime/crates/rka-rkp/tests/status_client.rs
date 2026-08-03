@@ -9,7 +9,7 @@
 
 use rka_rkp::{
     AttestationStatusClient, ClientError, HttpResponse, ResponseHeaders, STATUS_URL,
-    StatusHttpTransport, StatusRequest, ValidationError,
+    StatusClientError, StatusHttpTransport, StatusRequest, ValidationError,
 };
 
 #[derive(Debug)]
@@ -82,6 +82,27 @@ fn status_transport_and_schema_fail_closed() {
     assert_eq!(
         AttestationStatusClient::new(transport).snapshot_for(100, ["1a"]),
         Err(ValidationError::Status)
+    );
+}
+
+#[test]
+fn diagnostic_status_path_preserves_only_the_closed_failure_category() {
+    let transport = FakeStatusTransport {
+        response: Some(Err(ClientError::Transport)),
+        urls: Vec::new(),
+    };
+    assert_eq!(
+        AttestationStatusClient::new(transport).snapshot_for_diagnostic(100, ["1a"]),
+        Err(StatusClientError::Transport(ClientError::Transport))
+    );
+
+    let transport = FakeStatusTransport {
+        response: Some(Ok(response("max-age=60", "{}"))),
+        urls: Vec::new(),
+    };
+    assert_eq!(
+        AttestationStatusClient::new(transport).snapshot_for_diagnostic(100, ["1a"]),
+        Err(StatusClientError::Document)
     );
 }
 

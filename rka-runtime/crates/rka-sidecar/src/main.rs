@@ -9,7 +9,7 @@ use std::{
     path::PathBuf,
     process::ExitCode,
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use rka_sidecar::{
@@ -85,6 +85,9 @@ fn main() -> ExitCode {
     if command == Some(OsStr::new("activate-direct")) {
         return activate_direct(&args);
     }
+    if command == Some(OsStr::new("status-probe")) {
+        return status_probe();
+    }
     let command = match parse_command(&args) {
         Ok(command) => command,
         Err(error) => {
@@ -93,6 +96,24 @@ fn main() -> ExitCode {
         }
     };
     match execute(command) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            report_error(&*error);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn status_probe() -> ExitCode {
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let mut client =
+            rka_rkp::AttestationStatusClient::new(rka_rkp::BoundedHttpsTransport::new()?);
+        client.snapshot_for_diagnostic(now, std::iter::empty())?;
+        writeln!(io::stdout().lock(), "status_probe=READY")?;
+        Ok(())
+    })();
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             report_error(&*error);

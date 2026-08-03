@@ -223,7 +223,9 @@ pub use csr::{PreparedCertificateRequest, assemble_android_v3_body};
 pub use https::BoundedHttpsTransport;
 pub use response::parse_signed_certificates;
 pub use status::{CertificateStatus, STATUS_URL, StatusSnapshot};
-pub use status_client::{AttestationStatusClient, StatusHttpTransport, StatusRequest};
+pub use status_client::{
+    AttestationStatusClient, StatusClientError, StatusHttpTransport, StatusRequest,
+};
 pub use trust::{GOOGLE_ROOT_HASHES, GOOGLE_ROOTS_DER, RootBundle, RootRotationAuthorization};
 pub use trust_session::{ProvisioningSession, RootTrustManager, TrustSessionError};
 pub use validation::{

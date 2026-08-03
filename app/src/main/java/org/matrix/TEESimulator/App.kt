@@ -83,7 +83,7 @@ object App {
     }
 
     /** Initializes the necessary Android framework internals to satisfy KeyStore requirements. */
-    private fun prepareEnvironment(): Context {
+    internal fun prepareEnvironment(): Context {
         // 1. Prepare Main Looper
         if (Looper.getMainLooper() == null) {
             @Suppress("deprecation") Looper.prepareMainLooper()

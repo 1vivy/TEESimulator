@@ -15,6 +15,7 @@ import kotlin.system.exitProcess
 import org.bouncycastle.asn1.ASN1OctetString
 import org.bouncycastle.asn1.ASN1Sequence
 import org.bouncycastle.cert.X509CertificateHolder
+import org.matrix.TEESimulator.App
 import org.matrix.TEESimulator.attestation.ATTESTATION_OID
 import org.matrix.TEESimulator.attestation.AttestationConstants
 
@@ -44,6 +45,10 @@ object SyntheticLeaseAttestationProbe {
             val random = SecureRandom()
             val challenge = ByteArray(CHALLENGE_BYTES).also(random::nextBytes)
             val alias = ALIAS_PREFIX + ByteArray(ALIAS_SUFFIX_BYTES).also(random::nextBytes).toHex()
+            stage = "RUNTIME"
+            App.prepareEnvironment()
+            stage = "PROVIDER"
+            android.security.keystore2.AndroidKeyStoreProvider.install()
             val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
             var generated = false
             try {

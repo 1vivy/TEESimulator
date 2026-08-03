@@ -559,16 +559,14 @@ fn proc_directory_strategy_rejects_start_and_cmdline_change()
 }
 
 #[test]
-fn proc_directory_strategy_rejects_socket_hup() -> Result<(), Box<dyn std::error::Error>> {
+fn proc_directory_strategy_accepts_clean_socket_hup_after_response()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut fixture = fixture_with_proc_liveness(Phase::Ready, true)?;
     let (stream, peer) = UnixStream::pair()?;
     let deadline = deadline(Duration::from_millis(250))?;
     let authorization = authenticate(&mut fixture.source, &stream, &deadline)?;
     drop(peer);
-    assert_eq!(
-        authorization.revalidate(&stream, &deadline),
-        Err(BridgeError::PeerDied)
-    );
+    assert_eq!(authorization.revalidate(&stream, &deadline), Ok(()));
     Ok(())
 }
 

@@ -179,7 +179,6 @@ impl PeerAuthorization {
         deadline: &Deadline,
     ) -> Result<(), BridgeError> {
         deadline.remaining()?;
-        deadline.check_socket(stream)?;
         if self.revalidate_socket_credentials
             && PeerCredentials::from_stream(stream)? != self.credentials
         {
@@ -191,7 +190,6 @@ impl PeerAuthorization {
         self.liveness.check(deadline)?;
         self.record.revalidate(&self.identity, deadline)?;
         self.process.revalidate(&self.identity, deadline)?;
-        self.liveness.check(deadline)?;
-        deadline.check_socket(stream)
+        self.liveness.check(deadline)
     }
 }

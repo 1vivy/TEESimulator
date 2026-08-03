@@ -166,7 +166,10 @@ provision_rkp_inputs() {
 }
 
 provision_rkp() {
-    provision_rkp_inputs || return 1
+    provision_rkp_inputs || {
+        printf '%s\n' 'RKA_PROVISION_FAILED stage=INPUTS' >&2
+        return 1
+    }
     provision_output=$(
         RKA_STATE_ROOT="$rka_state_root" \
         RKA_PROFILE_PATH="$rka_state_root/profiles/direct.conf" \
@@ -181,15 +184,24 @@ provision_rkp() {
         RKA_PROFILE_EPOCH="$provision_epoch" \
         RKA_KEY_COUNT=1 \
             "$provision_sidecar" provision
-    ) || return 1
+    ) || {
+        printf '%s\n' 'RKA_PROVISION_FAILED stage=SIDECAR' >&2
+        return 1
+    }
     [ "$provision_output" = "role=donor status=READY
-RESULT=PROVISIONED" ] || return 1
+RESULT=PROVISIONED" ] || {
+        printf '%s\n' 'RKA_PROVISION_FAILED stage=OUTPUT' >&2
+        return 1
+    }
     rka_atomic_replace "$rka_state_root/journal" \
         "$rka_state_root/journal/provisioning.state" "version=1
 status=PROVISIONED
 profile_epoch=$provision_epoch
 key_count=1
-" || return 1
+" || {
+        printf '%s\n' 'RKA_PROVISION_FAILED stage=STATE' >&2
+        return 1
+    }
     printf '%s\n' "$provision_output"
 }
 

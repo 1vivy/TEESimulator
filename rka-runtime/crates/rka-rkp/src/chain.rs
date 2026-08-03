@@ -2,6 +2,8 @@ use x509_parser::{certificate::X509Certificate, parse_x509_certificate, time::AS
 
 use crate::{RootBundle, StatusSnapshot, ValidationError, parse_signed_certificates};
 
+const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
+
 #[allow(
     clippy::redundant_pub_crate,
     reason = "sibling validation module consumes the private chain implementation"
@@ -43,7 +45,7 @@ pub(crate) fn validate_chain(
         if !certificate.validity().is_valid_at(time) {
             return Err(ValidationError::Validity);
         }
-        status.require_good(now, &certificate.raw_serial_as_string())?;
+        status.require_good(now, &canonical_serial(certificate)?)?;
         let is_leaf = index == 0;
         let ca = certificate
             .basic_constraints()
@@ -97,11 +99,33 @@ pub fn returned_serials(
     let mut serials = Vec::new();
     for encoded in &chains {
         for certificate in parse_chain(encoded)? {
-            let serial = certificate.raw_serial_as_string().to_ascii_lowercase();
+            let serial = canonical_serial(&certificate)?;
             if !serials.contains(&serial) {
                 serials.push(serial);
             }
         }
     }
     Ok(serials)
+}
+
+fn canonical_serial(certificate: &X509Certificate<'_>) -> Result<String, ValidationError> {
+    let raw = certificate.raw_serial();
+    let mut encoded = String::with_capacity(raw.len().saturating_mul(2));
+    for byte in raw {
+        let high = LOWER_HEX
+            .get(usize::from(byte >> 4))
+            .copied()
+            .ok_or(ValidationError::Status)?;
+        let low = LOWER_HEX
+            .get(usize::from(byte & 0x0f))
+            .copied()
+            .ok_or(ValidationError::Status)?;
+        encoded.push(char::from(high));
+        encoded.push(char::from(low));
+    }
+    let serial = encoded.trim_start_matches('0');
+    if serial.is_empty() {
+        return Err(ValidationError::Status);
+    }
+    Ok(serial.to_owned())
 }

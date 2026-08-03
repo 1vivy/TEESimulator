@@ -16,7 +16,7 @@ use ring::digest::{SHA256, digest};
 use rka_rkp::{
     CertificateStatus, ExpectedKey, PreparedCertificateRequest, ResponseContext, RootBundle,
     StatusSnapshot, ValidationError, assemble_android_v3_body, parse_signed_certificates,
-    validate_response,
+    returned_serials, validate_response,
 };
 use x509_parser::parse_x509_certificate;
 
@@ -73,6 +73,22 @@ fn parses_standard_shared_and_unique_certificate_response() {
 
     // Then each unique prefix is followed by the exact shared suffix.
     assert_eq!(chains, vec![vec![1, 2, 3, 4], vec![9, 3, 4]]);
+}
+
+#[test]
+fn returned_certificate_serials_are_canonical_status_keys() {
+    let (_, shared, leaves) = certificate_fixture();
+    let response = signed_response(&shared, leaves.iter().map(|leaf| leaf.der.as_slice()));
+
+    let serials = returned_serials(&response, leaves.len()).unwrap();
+
+    assert!(!serials.is_empty());
+    assert!(serials.iter().all(|serial| {
+        !serial.starts_with('0')
+            && serial
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }));
 }
 
 #[test]
@@ -245,10 +261,21 @@ fn serials(certificates: &[&[u8]]) -> Vec<String> {
     certificates
         .iter()
         .map(|der| {
-            parse_x509_certificate(der)
-                .unwrap()
-                .1
-                .raw_serial_as_string()
+            let certificate = parse_x509_certificate(der).unwrap().1;
+            certificate
+                .raw_serial()
+                .iter()
+                .flat_map(|byte| [byte >> 4, byte & 0x0f])
+                .map(|nibble| {
+                    char::from(
+                        b"0123456789abcdef"
+                            .get(usize::from(nibble))
+                            .copied()
+                            .unwrap(),
+                    )
+                })
+                .skip_while(|character| *character == '0')
+                .collect()
         })
         .collect()
 }

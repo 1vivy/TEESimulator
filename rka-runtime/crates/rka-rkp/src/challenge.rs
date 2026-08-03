@@ -294,7 +294,7 @@ impl<T: HttpTransport, S: EffectiveBaseStore, E: EntropySource, J: AttemptJourna
             return Err(ClientError::RequestIdCollision);
         }
         let url = format!(
-            "{}/:signCertificates?challenge={}",
+            "{}/:signCertificates?challenge={}&request_id={request_id}",
             self.effective_base,
             base64_url(challenge)
         );
@@ -401,7 +401,7 @@ mod tests {
         );
         assert_eq!(
             sign.url,
-            "https://override.example/v2/:signCertificates?challenge=-_v7-_v7-_v7-_v7-_v7-w"
+            "https://override.example/v2/:signCertificates?challenge=-_v7-_v7-_v7-_v7-_v7-w&request_id=00000000-0000-4000-8000-000000000000"
         );
         assert_eq!(fetch_two.url, "https://snapshot.example/v1/:fetchEekChain");
         assert_eq!(sign.body, vec![1, 2, 3]);
@@ -448,7 +448,9 @@ mod tests {
         let [first, second] = client.transport().calls() else {
             panic!("expected exactly two uploads");
         };
-        assert_eq!(first.url, second.url);
+        assert_ne!(first.url, second.url);
+        assert!(first.url.ends_with(&format!("request_id={first_id}")));
+        assert!(second.url.ends_with(&format!("request_id={second_id}")));
     }
 
     #[test]

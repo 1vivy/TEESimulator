@@ -383,10 +383,12 @@ private constructor(
         fun open(): BridgeResult<TrustedRecordHandle> {
             val held = mutableListOf<HeldDirectory>()
             var record: FileDescriptor? = null
+            var stage = "ROOT"
             try {
                 val root = openDirectory("/")
                 held += HeldDirectory("", root, DirectorySignature.from(Os.fstat(root)))
                 for (name in COMPONENTS) {
+                    stage = name.uppercase()
                     val descriptor =
                         openDirectory("${descriptorPath(held.last().descriptor)}/$name")
                     val signature = DirectorySignature.from(Os.fstat(descriptor))
@@ -399,6 +401,7 @@ private constructor(
                 if (!protectedDirectoriesAreValid(held)) {
                     return closeAndFail(held, BridgeError.TrustedStateInvalid)
                 }
+                stage = "RECORD"
                 record =
                     Os.open(
                         "${descriptorPath(held.last().descriptor)}/$RECORD_NAME",
@@ -419,6 +422,10 @@ private constructor(
                 }
                 return BridgeResult.Success(TrustedRecordHandle(held.toList(), record, signature))
             } catch (error: android.system.ErrnoException) {
+                SystemLogger.warning(
+                    "RKA trusted record open failed: stage=$stage " +
+                        "category=${if (error.errno == OsConstants.ENOENT) "MISSING" else "INVALID"}"
+                )
                 record?.let { runCatching { Os.close(it) } }
                 held.asReversed().forEach { runCatching { Os.close(it.descriptor) } }
                 return BridgeResult.Failure(
@@ -428,7 +435,11 @@ private constructor(
                         BridgeError.TrustedStateInvalid
                     }
                 )
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                SystemLogger.warning(
+                    "RKA trusted record open failed: stage=$stage " +
+                        "category=${error.javaClass.simpleName}"
+                )
                 record?.let { runCatching { Os.close(it) } }
                 held.asReversed().forEach { runCatching { Os.close(it.descriptor) } }
                 return BridgeResult.Failure(BridgeError.TrustedStateInvalid)

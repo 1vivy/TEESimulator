@@ -87,6 +87,7 @@ object DonorProvisioningRuntime {
                                 SystemLogger.warning(
                                     "RKA donor bridge exchange failed: ${accepted.error}"
                                 )
+                                Thread.sleep(100)
                             }
                         }
                     }

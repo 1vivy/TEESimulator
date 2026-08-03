@@ -21,6 +21,10 @@
     public static void main(java.lang.String[]);
 }
 
+-keepclasseswithmembers class org.matrix.TEESimulator.rka.candidate.SyntheticLeaseAttestationProbe {
+    public static void main(java.lang.String[]);
+}
+
 -keepclasseswithmembers class org.matrix.TEESimulator.pki.NativeCertGen {
     native <methods>;
     *;

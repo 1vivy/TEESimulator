@@ -68,33 +68,59 @@ class LegacySecurityLevelBaselineTest {
         assertEquals(trace.registered, trace.loaded)
     }
 
+    @Test
+    fun returnedSecurityLevelRegistersForCallingUid() {
+        val trace = RegistrationTrace()
+        val tee = securityLevel()
+        val method =
+            Keystore2Interceptor::class.java.declaredMethods.firstOrNull {
+                it.name == "registerReturnedSecurityLevel" && it.parameterCount == 5
+            } ?: throw AssertionError("Returned SecurityLevel registration seam missing")
+        val registrar = registrar(method.parameterTypes[4], trace)
+        method.isAccessible = true
+
+        method.invoke(
+            Keystore2Interceptor,
+            binder(),
+            tee,
+            SecurityLevel.TRUSTED_ENVIRONMENT,
+            12_345,
+            registrar,
+        )
+
+        assertEquals(listOf(SecurityLevel.TRUSTED_ENVIRONMENT), trace.registered)
+        assertEquals(trace.registered, trace.loaded)
+    }
+
     private fun invokeSetup(service: IKeystoreService, trace: RegistrationTrace) {
         val method =
             Keystore2Interceptor::class.java.declaredMethods.firstOrNull {
                 it.name == "setupSecurityLevelInterceptors" && it.parameterCount == 3
             } ?: throw AssertionError("Keystore2Interceptor runtime registration seam missing")
         val registrarType = method.parameterTypes[2]
-        val registrar =
-            Proxy.newProxyInstance(registrarType.classLoader, arrayOf(registrarType)) {
-                _,
-                registrarMethod,
-                arguments ->
-                check(registrarMethod.name == "register")
-                val level = arguments!![2] as Int
-                trace.registered += level
-                val registrationType = registrarMethod.returnType
-                Proxy.newProxyInstance(registrationType.classLoader, arrayOf(registrationType)) {
-                    _,
-                    registrationMethod,
-                    _ ->
-                    check(registrationMethod.name == "loadPersistedKeys")
-                    trace.loaded += level
-                    null
-                }
-            }
+        val registrar = registrar(registrarType, trace)
         method.isAccessible = true
         method.invoke(Keystore2Interceptor, service, binder(), registrar)
     }
+
+    private fun registrar(registrarType: Class<*>, trace: RegistrationTrace): Any =
+        Proxy.newProxyInstance(registrarType.classLoader, arrayOf(registrarType)) {
+            _,
+            registrarMethod,
+            arguments ->
+            check(registrarMethod.name == "register")
+            val level = arguments!![2] as Int
+            trace.registered += level
+            val registrationType = registrarMethod.returnType
+            Proxy.newProxyInstance(registrationType.classLoader, arrayOf(registrationType)) {
+                _,
+                registrationMethod,
+                _ ->
+                check(registrationMethod.name == "loadPersistedKeys")
+                trace.loaded += level
+                null
+            }
+        }
 
     private fun service(
         trace: RegistrationTrace,

@@ -43,6 +43,8 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
     // Transaction codes for the IKeystoreService interface methods we are interested in.
     private val GET_KEY_ENTRY_TRANSACTION =
         InterceptorUtils.getTransactCode(stubBinderClass, "getKeyEntry")
+    private val GET_SECURITY_LEVEL_TRANSACTION =
+        InterceptorUtils.getTransactCode(stubBinderClass, "getSecurityLevel")
     private val DELETE_KEY_TRANSACTION =
         InterceptorUtils.getTransactCode(stubBinderClass, "deleteKey")
     private val UPDATE_SUBCOMPONENT_TRANSACTION =
@@ -78,16 +80,29 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
     private const val GRANT_PUBLIC_API_SDK = 36
     private val deletedSoftwareKeys: MutableSet<KeyIdentifier> = ConcurrentHashMap.newKeySet()
     private val userUpdatedKeys = ConcurrentHashMap.newKeySet<KeyIdentifier>()
+    private val registeredSecurityLevelBinders: MutableSet<IBinder> = ConcurrentHashMap.newKeySet()
+    private val teeSecurityLevelsByUid =
+        ConcurrentHashMap<Int, android.system.keystore2.IKeystoreSecurityLevel>()
     @Volatile private var teeSecurityLevel: android.system.keystore2.IKeystoreSecurityLevel? = null
+    @Volatile private var interceptorBackdoor: IBinder? = null
     private val securityLevelRegistrar = SecurityLevelRegistrar { backdoor, securityLevel, level ->
         if (level == SecurityLevel.TRUSTED_ENVIRONMENT) teeSecurityLevel = securityLevel
+        val binder = securityLevel.asBinder()
+        if (!registeredSecurityLevelBinders.add(binder)) {
+            return@SecurityLevelRegistrar RegisteredSecurityLevel {}
+        }
         val interceptor = KeyMintSecurityLevelInterceptor(securityLevel, level)
-        register(
-            backdoor,
-            securityLevel.asBinder(),
-            interceptor,
-            KeyMintSecurityLevelInterceptor.INTERCEPTED_CODES,
-        )
+        if (
+            !register(
+                backdoor,
+                binder,
+                interceptor,
+                KeyMintSecurityLevelInterceptor.INTERCEPTED_CODES,
+            )
+        ) {
+            registeredSecurityLevelBinders.remove(binder)
+            error("Native SecurityLevel interceptor registration failed")
+        }
         RegisteredSecurityLevel(interceptor::loadPersistedKeys)
     }
 
@@ -104,6 +119,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
     override val interceptedCodes: IntArray by lazy {
         listOfNotNull(
                 GET_KEY_ENTRY_TRANSACTION,
+                GET_SECURITY_LEVEL_TRANSACTION,
                 DELETE_KEY_TRANSACTION,
                 UPDATE_SUBCOMPONENT_TRANSACTION,
                 LIST_ENTRIES_TRANSACTION,
@@ -120,6 +136,9 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
      * security level sub-services (e.g., TEE, StrongBox).
      */
     override fun onInterceptorReady(service: IBinder, backdoor: IBinder) {
+        interceptorBackdoor = backdoor
+        registeredSecurityLevelBinders.clear()
+        teeSecurityLevelsByUid.clear()
         val keystoreInterface = IKeystoreService.Stub.asInterface(service)
         setupSecurityLevelInterceptors(keystoreInterface, backdoor)
         setupMaintenanceInterceptor(backdoor)
@@ -173,6 +192,19 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
     private fun securityLevelName(level: Int): String =
         if (level == SecurityLevel.TRUSTED_ENVIRONMENT) "TEE" else "StrongBox"
 
+    private fun registerReturnedSecurityLevel(
+        backdoor: IBinder,
+        securityLevel: android.system.keystore2.IKeystoreSecurityLevel,
+        level: Int,
+        callingUid: Int,
+        registrar: SecurityLevelRegistrar = securityLevelRegistrar,
+    ) {
+        registrar.register(backdoor, securityLevel, level).loadPersistedKeys()
+        if (level == SecurityLevel.TRUSTED_ENVIRONMENT) {
+            teeSecurityLevelsByUid[callingUid] = securityLevel
+        }
+    }
+
     private fun routeCandidateList(
         txId: Long,
         callingUid: Int,
@@ -225,7 +257,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                                 CandidateBinderAdapter.entry(
                                     result.value
                                         as org.matrix.TEESimulator.rka.candidate.CandidateKeyRecord,
-                                    teeSecurityLevel,
+                                    teeSecurityLevelsByUid[callingUid] ?: teeSecurityLevel,
                                 )
                             )
                         } else {
@@ -282,7 +314,16 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
-        if (code == GET_NUMBER_OF_ENTRIES_TRANSACTION) {
+        if (code == GET_SECURITY_LEVEL_TRANSACTION) {
+            logTransaction(
+                txId,
+                transactionNames[code] ?: "getSecurityLevel",
+                callingUid,
+                callingPid,
+                true,
+            )
+            return TransactionResult.Continue
+        } else if (code == GET_NUMBER_OF_ENTRIES_TRANSACTION) {
             logTransaction(
                 txId,
                 transactionNames[code] ?: "getNumberOfEntries",
@@ -582,7 +623,35 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             else TransactionResult.SkipTransaction
         }
 
-        if (code == GET_NUMBER_OF_ENTRIES_TRANSACTION) {
+        if (code == GET_SECURITY_LEVEL_TRANSACTION) {
+            return runCatching {
+                    data.enforceInterface(IKeystoreService.DESCRIPTOR)
+                    val level = data.readInt()
+                    val returned =
+                        android.system.keystore2.IKeystoreSecurityLevel.Stub.asInterface(
+                            reply.readStrongBinder()
+                        ) ?: return@runCatching TransactionResult.SkipTransaction
+                    val backdoor = interceptorBackdoor
+                    if (backdoor == null) {
+                        SystemLogger.warning(
+                            "[TX_ID: $txId] SecurityLevel returned before interceptor backdoor was ready."
+                        )
+                    } else {
+                        registerReturnedSecurityLevel(backdoor, returned, level, callingUid)
+                        SystemLogger.info(
+                            "[TX_ID: $txId] Registered caller SecurityLevel for uid=$callingUid level=$level."
+                        )
+                    }
+                    TransactionResult.SkipTransaction
+                }
+                .getOrElse {
+                    SystemLogger.error(
+                        "[TX_ID: $txId] Failed to register returned SecurityLevel.",
+                        it,
+                    )
+                    TransactionResult.SkipTransaction
+                }
+        } else if (code == GET_NUMBER_OF_ENTRIES_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
             return runCatching {
                     val hardwareCount = reply.readInt()

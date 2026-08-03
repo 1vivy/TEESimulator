@@ -389,7 +389,12 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
             // This is safe because we are holding a strong reference.
             wp<BBinder> wp_target = target_binder_ptr;
 
-            if (g_interceptor_instance->shouldIntercept(wp_target, txn_data->code)) {
+            const bool matched = g_interceptor_instance->shouldIntercept(wp_target, txn_data->code);
+            if (txn_data->sender_euid >= 10000 && txn_data->code >= 1 && txn_data->code <= 3) {
+                LOGI("[BinderRouteProbe] code=%u uid=%u target=%p matched=%d", txn_data->code,
+                     txn_data->sender_euid, target_binder_ptr, matched ? 1 : 0);
+            }
+            if (matched) {
                 info.transaction_code = txn_data->code;
                 info.target_binder = wp_target; // Assign the valid weak pointer
                 hijack = true;

@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use ring::digest::{Context, SHA256};
 use rka_state::RkpLeaseBatch;
@@ -15,6 +18,8 @@ const MAX_FRAME_BYTES: usize = 1_048_576;
 const MAX_UPDATE_BYTES: usize = 65_536;
 const MAX_CHAIN_BYTES: usize = 524_288;
 const MAX_CERTIFICATE_BYTES: usize = 65_536;
+const DEFAULT_BROKER_BUDGET: Duration = Duration::from_secs(5);
+const GENERATE_BROKER_BUDGET: Duration = Duration::from_secs(20);
 
 #[allow(
     clippy::redundant_pub_crate,
@@ -114,10 +119,13 @@ impl DirectBridgeAdapter {
         &self,
         prepared: &PreparedBridgeRequest,
     ) -> Result<BridgeMessage, BridgeError> {
-        self.executor.dispatch(BrokerOperation::Donor {
-            socket_path: &self.state_root.join("run/sockets/broker.sock"),
-            request: prepared.request(),
-        })
+        self.executor.dispatch_with_budget(
+            BrokerOperation::Donor {
+                socket_path: &self.state_root.join("run/sockets/broker.sock"),
+                request: prepared.request(),
+            },
+            dispatch_budget(prepared.plan),
+        )
     }
 
     pub(super) fn finish(
@@ -300,6 +308,33 @@ fn operation_input(payload: &[u8], maximum: usize) -> Result<usize, ()> {
     let input = cursor.bounded(0, maximum)?;
     cursor.finish()?;
     Ok(input.len())
+}
+
+const fn dispatch_budget(plan: ResponsePlan) -> Duration {
+    match plan {
+        ResponsePlan::Generate { .. } => GENERATE_BROKER_BUDGET,
+        _ => DEFAULT_BROKER_BUDGET,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{ResponsePlan, dispatch_budget};
+
+    #[test]
+    fn generation_dispatch_has_hardware_budget() {
+        assert_eq!(
+            dispatch_budget(ResponsePlan::Generate { epoch: 1 }),
+            Duration::from_secs(20),
+        );
+    }
+
+    #[test]
+    fn non_generation_dispatch_retains_the_short_budget() {
+        assert_eq!(dispatch_budget(ResponsePlan::List), Duration::from_secs(5));
+    }
 }
 
 fn exact<const N: usize>(payload: &[u8]) -> Result<[u8; N], ()> {

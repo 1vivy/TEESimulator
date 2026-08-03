@@ -31,7 +31,7 @@ use crate::{
 };
 
 const PORT: u16 = 37_373;
-const BUDGET: Duration = Duration::from_secs(8);
+const BUDGET: Duration = Duration::from_secs(25);
 const MAX_FRAME_BYTES: usize = 1_048_576;
 const PRE_DISPATCH_ATTEMPTS: usize = 3;
 const LOCAL_BRIDGE_SOCKET: &str = "broker.sock";

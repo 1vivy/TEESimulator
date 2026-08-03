@@ -78,12 +78,48 @@ pub(super) fn decode_body(
             request_id,
             certificate_chain: decode_synthetic_chain(&mut cursor)?,
         },
+        13 => decode_synthetic_lease_issue_request(request_id, &mut cursor)?,
+        14 => BridgeMessage::SyntheticLeaseIssueResponse {
+            request_id,
+            lease_epoch: cursor.take_u64()?,
+            certificate_chain: decode_synthetic_chain(&mut cursor)?,
+        },
         _ => return Err(BridgeError::UnknownTag),
     };
     if cursor.remaining() != 0 {
         return Err(BridgeError::NonCanonical);
     }
     Ok(message)
+}
+
+fn decode_synthetic_lease_issue_request(
+    request_id: RequestId,
+    cursor: &mut Cursor<'_>,
+) -> Result<BridgeMessage, BridgeError> {
+    let candidate_nonce = Hash32::new(cursor.take_array()?);
+    let profile_id_hash = Hash32::new(cursor.take_array()?);
+    let requested_epoch = cursor.take_u64()?;
+    let private_key_pkcs8 = cursor.take_secret(MAX_SYNTHETIC_LEASE_PKCS8_BYTES)?;
+    let expected_spki = cursor.take_public(1, MAX_CERTIFICATE_BYTES)?;
+    let challenge = cursor.take_public(16, 64)?;
+    let aaid = cursor.take_public(1, 131_072)?;
+    let certificate_not_before_millis = cursor.take_u64()?;
+    let certificate_not_after_millis = cursor.take_u64()?;
+    if certificate_not_after_millis <= certificate_not_before_millis {
+        return Err(BridgeError::NonCanonical);
+    }
+    Ok(BridgeMessage::SyntheticLeaseIssueRequest {
+        request_id,
+        candidate_nonce,
+        profile_id_hash,
+        requested_epoch,
+        private_key_pkcs8,
+        expected_spki,
+        challenge,
+        aaid,
+        certificate_not_before_millis,
+        certificate_not_after_millis,
+    })
 }
 
 fn decode_synthetic_lease_probe_request(

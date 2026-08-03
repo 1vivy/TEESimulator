@@ -4,7 +4,7 @@ use std::{
 };
 
 use ring::digest::{Context, SHA256};
-use rka_state::RkpLeaseBatch;
+use rka_state::{PairedActivationRecord, RkpLeaseBatch};
 
 use crate::{
     bridge::{
@@ -55,6 +55,7 @@ enum ResponsePlan {
     Update { input_bytes: usize },
     Begin,
     Finish,
+    SyntheticLeaseIssue { epoch: u64 },
 }
 
 impl DirectBridgeAdapter {
@@ -67,6 +68,9 @@ impl DirectBridgeAdapter {
     }
 
     pub(super) fn prepare(&mut self, request: BridgeMessage) -> Result<PreparedBridgeRequest, ()> {
+        if matches!(request, BridgeMessage::SyntheticLeaseIssueRequest { .. }) {
+            return self.prepare_synthetic_lease_issue(request);
+        }
         let BridgeMessage::CandidateCommand(request_id, operation, payload) = request else {
             return Err(());
         };
@@ -135,6 +139,23 @@ impl DirectBridgeAdapter {
         if let BridgeMessage::Error(..) = response {
             return Ok(response);
         }
+        if let ResponsePlan::SyntheticLeaseIssue { epoch } = prepared.plan {
+            let BridgeMessage::SyntheticLeaseProbeResponse {
+                request_id,
+                certificate_chain,
+            } = response
+            else {
+                return Err(());
+            };
+            if request_id != prepared.request.request_id() {
+                return Err(());
+            }
+            return Ok(BridgeMessage::SyntheticLeaseIssueResponse {
+                request_id,
+                lease_epoch: epoch,
+                certificate_chain,
+            });
+        }
         let BridgeMessage::CandidateReply(request_id, operation, payload) = response else {
             return Err(());
         };
@@ -197,6 +218,74 @@ impl DirectBridgeAdapter {
         ))
     }
 
+    fn prepare_synthetic_lease_issue(
+        &self,
+        request: BridgeMessage,
+    ) -> Result<PreparedBridgeRequest, ()> {
+        let BridgeMessage::SyntheticLeaseIssueRequest {
+            request_id,
+            candidate_nonce,
+            profile_id_hash,
+            requested_epoch,
+            private_key_pkcs8,
+            expected_spki,
+            challenge,
+            aaid,
+            certificate_not_before_millis,
+            certificate_not_after_millis,
+        } = request
+        else {
+            return Err(());
+        };
+        let activation =
+            PairedActivationRecord::load(&FileStateStore::new(&self.state_root)).map_err(|_| ())?;
+        if candidate_nonce.as_array() != &activation.candidate_nonce
+            || profile_id_hash.as_array() != &activation.profile_id_hash
+            || aaid.as_slice() != synthetic_aaid(&activation.profile_id_hash, requested_epoch)
+            || certificate_not_after_millis <= certificate_not_before_millis
+        {
+            return Err(());
+        }
+        let batch =
+            RkpLeaseBatch::load_active(&FileStateStore::new(&self.state_root)).map_err(|_| ())?;
+        let [lease] = batch.leases() else {
+            return Err(());
+        };
+        let metadata = lease.metadata();
+        if metadata.profile_epoch != activation.profile_epoch {
+            return Err(());
+        }
+        let chain = load_lease_chain(&self.state_root, metadata.remote_handle.as_bytes())
+            .map_err(|_| ())?;
+        if chain.len() != usize::from(metadata.chain.certificate_count)
+            || !(2..=20).contains(&chain.len())
+            || chain.iter().map(Vec::len).sum::<usize>() > MAX_CHAIN_BYTES
+        {
+            return Err(());
+        }
+        let certificate_chain = chain
+            .iter()
+            .map(|certificate| PublicBytes::bounded(certificate, 1, MAX_CERTIFICATE_BYTES))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| ())?;
+        Ok(PreparedBridgeRequest {
+            request: BridgeMessage::SyntheticLeaseProbeRequest {
+                request_id,
+                rkp_handle: crate::bridge::Hash32::new(*metadata.remote_handle.as_bytes()),
+                private_key_pkcs8,
+                expected_spki,
+                challenge,
+                aaid,
+                certificate_not_before_millis,
+                certificate_not_after_millis,
+                certificate_chain,
+            },
+            plan: ResponsePlan::SyntheticLeaseIssue {
+                epoch: requested_epoch,
+            },
+        })
+    }
+
     fn admit_identity(&mut self, identity: [u8; 32]) -> Result<(), ()> {
         match self.candidate_identity {
             Some(expected) if expected != identity => Err(()),
@@ -256,6 +345,7 @@ fn translate_response(plan: ResponsePlan, payload: &[u8]) -> Result<Vec<u8>, ()>
             cursor.finish()?;
             Ok(payload.to_vec())
         }
+        ResponsePlan::SyntheticLeaseIssue { .. } => Err(()),
     }
 }
 
@@ -312,9 +402,21 @@ fn operation_input(payload: &[u8], maximum: usize) -> Result<usize, ()> {
 
 const fn dispatch_budget(plan: ResponsePlan) -> Duration {
     match plan {
-        ResponsePlan::Generate { .. } => GENERATE_BROKER_BUDGET,
+        ResponsePlan::Generate { .. } | ResponsePlan::SyntheticLeaseIssue { .. } => {
+            GENERATE_BROKER_BUDGET
+        }
         _ => DEFAULT_BROKER_BUDGET,
     }
+}
+
+fn synthetic_aaid(profile_id_hash: &[u8; 32], epoch: u64) -> [u8; 32] {
+    let mut context = Context::new(&SHA256);
+    context.update(b"TEESimulator-RS synthetic RKP lease v1\0");
+    context.update(profile_id_hash);
+    context.update(&epoch.to_be_bytes());
+    let mut value = [0_u8; 32];
+    value.copy_from_slice(context.finish().as_ref());
+    value
 }
 
 fn exact<const N: usize>(payload: &[u8]) -> Result<[u8; N], ()> {

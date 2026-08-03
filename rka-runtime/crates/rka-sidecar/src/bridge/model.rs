@@ -382,6 +382,38 @@ pub enum BridgeMessage {
         /// Canonical public lease-plus-RKP chain.
         certificate_chain: Vec<PublicBytes>,
     },
+    /// Requests one persistent lease for a candidate-owned P-256 key over pinned mTLS.
+    SyntheticLeaseIssueRequest {
+        /// Correlation identifier.
+        request_id: RequestId,
+        /// Candidate nonce from the durable paired-activation record.
+        candidate_nonce: Hash32,
+        /// Profile identifier from the durable paired-activation record.
+        profile_id_hash: Hash32,
+        /// Monotonic candidate lease epoch.
+        requested_epoch: u64,
+        /// Candidate-owned PKCS#8 bytes.
+        private_key_pkcs8: SecretBytes,
+        /// Candidate-derived public SPKI.
+        expected_spki: PublicBytes,
+        /// Fresh attestation challenge.
+        challenge: PublicBytes,
+        /// Synthetic-lease attestation application identifier.
+        aaid: PublicBytes,
+        /// Requested lower certificate validity bound.
+        certificate_not_before_millis: u64,
+        /// Requested upper certificate validity bound.
+        certificate_not_after_millis: u64,
+    },
+    /// Returns the canonical public lease-plus-RKP chain over pinned mTLS.
+    SyntheticLeaseIssueResponse {
+        /// Correlation identifier.
+        request_id: RequestId,
+        /// Exact accepted candidate lease epoch.
+        lease_epoch: u64,
+        /// Canonical public lease-plus-RKP chain.
+        certificate_chain: Vec<PublicBytes>,
+    },
 }
 
 impl BridgeMessage {
@@ -399,7 +431,9 @@ impl BridgeMessage {
             | Self::CertificationRequest(id, ..)
             | Self::CertificationAck(id, ..) => *id,
             Self::SyntheticLeaseProbeRequest { request_id, .. }
-            | Self::SyntheticLeaseProbeResponse { request_id, .. } => *request_id,
+            | Self::SyntheticLeaseProbeResponse { request_id, .. }
+            | Self::SyntheticLeaseIssueRequest { request_id, .. }
+            | Self::SyntheticLeaseIssueResponse { request_id, .. } => *request_id,
         }
     }
 
@@ -417,6 +451,8 @@ impl BridgeMessage {
             Self::CertificationAck(..) => 10,
             Self::SyntheticLeaseProbeRequest { .. } => 11,
             Self::SyntheticLeaseProbeResponse { .. } => 12,
+            Self::SyntheticLeaseIssueRequest { .. } => 13,
+            Self::SyntheticLeaseIssueResponse { .. } => 14,
         }
     }
 }
@@ -457,8 +493,8 @@ impl ExchangeRole {
         match self {
             Self::DonorRequest => matches!(tag, 1 | 3 | 5 | 7 | 9 | 11),
             Self::DonorResponse => matches!(tag, 2 | 4 | 5 | 6 | 8 | 10 | 12),
-            Self::CandidateRequest => matches!(tag, 1 | 3 | 5 | 7),
-            Self::CandidateResponse => matches!(tag, 2 | 4 | 5 | 6 | 8),
+            Self::CandidateRequest => matches!(tag, 1 | 3 | 5 | 7 | 13),
+            Self::CandidateResponse => matches!(tag, 2 | 4 | 5 | 6 | 8 | 14),
         }
     }
 }
@@ -472,10 +508,12 @@ pub const fn expected_response_tag(message: &BridgeMessage) -> Result<u8, Bridge
         BridgeMessage::CandidateCommand(..) => Ok(8),
         BridgeMessage::CertificationRequest(..) => Ok(10),
         BridgeMessage::SyntheticLeaseProbeRequest { .. } => Ok(12),
+        BridgeMessage::SyntheticLeaseIssueRequest { .. } => Ok(14),
         BridgeMessage::PublicKeyResponse(..)
         | BridgeMessage::PublicResult(..)
         | BridgeMessage::CertificationAck(..)
         | BridgeMessage::SyntheticLeaseProbeResponse { .. }
+        | BridgeMessage::SyntheticLeaseIssueResponse { .. }
         | BridgeMessage::CandidateReply(..)
         | BridgeMessage::Error(..) => Err(BridgeError::UnexpectedTag),
     }

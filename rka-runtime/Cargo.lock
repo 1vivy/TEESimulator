@@ -1054,6 +1054,7 @@ dependencies = [
  "socket2",
  "thiserror",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]

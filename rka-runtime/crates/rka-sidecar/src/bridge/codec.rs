@@ -71,7 +71,7 @@ pub fn decode_frame(bytes: &[u8], role: ExchangeRole) -> Result<BridgeMessage, B
     if direction != role.direction() {
         return Err(BridgeError::WrongDirection);
     }
-    if !(1..=12).contains(&tag) {
+    if !(1..=14).contains(&tag) {
         return Err(BridgeError::UnknownTag);
     }
     if !role.accepts(tag) {
@@ -211,9 +211,36 @@ fn body_length(message: &BridgeMessage) -> Result<usize, BridgeError> {
             .try_fold(1_usize, |sum, certificate| {
                 checked(checked(sum, 4)?, certificate.as_slice().len())
             }),
+        BridgeMessage::SyntheticLeaseIssueRequest {
+            private_key_pkcs8,
+            expected_spki,
+            challenge,
+            aaid,
+            ..
+        } => checked(
+            checked(
+                checked(
+                    checked(104, private_key_pkcs8.as_slice().len())?,
+                    expected_spki.as_slice().len(),
+                )?,
+                challenge.as_slice().len(),
+            )?,
+            aaid.as_slice().len(),
+        ),
+        BridgeMessage::SyntheticLeaseIssueResponse {
+            certificate_chain, ..
+        } => certificate_chain
+            .iter()
+            .try_fold(9_usize, |sum, certificate| {
+                checked(checked(sum, 4)?, certificate.as_slice().len())
+            }),
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the closed bridge tag family is encoded in one auditable exhaustive match"
+)]
 fn encode_body(message: &BridgeMessage, output: &mut Vec<u8>) -> Result<(), BridgeError> {
     match message {
         BridgeMessage::PublicKeyRequest(_, challenge, key_count) => {
@@ -311,6 +338,45 @@ fn encode_body(message: &BridgeMessage, output: &mut Vec<u8>) -> Result<(), Brid
         BridgeMessage::SyntheticLeaseProbeRequest { .. }
         | BridgeMessage::SyntheticLeaseProbeResponse { .. } => {
             encode_synthetic_probe(message, output)?;
+        }
+        BridgeMessage::SyntheticLeaseIssueRequest {
+            candidate_nonce,
+            profile_id_hash,
+            requested_epoch,
+            private_key_pkcs8,
+            expected_spki,
+            challenge,
+            aaid,
+            certificate_not_before_millis,
+            certificate_not_after_millis,
+            ..
+        } => {
+            if certificate_not_after_millis <= certificate_not_before_millis {
+                return Err(BridgeError::NonCanonical);
+            }
+            output.extend_from_slice(candidate_nonce.as_array());
+            output.extend_from_slice(profile_id_hash.as_array());
+            output.extend_from_slice(&requested_epoch.to_be_bytes());
+            put_bytes(output, private_key_pkcs8.as_slice())?;
+            put_bytes(output, expected_spki.as_slice())?;
+            put_bytes(output, challenge.as_slice())?;
+            put_bytes(output, aaid.as_slice())?;
+            output.extend_from_slice(&certificate_not_before_millis.to_be_bytes());
+            output.extend_from_slice(&certificate_not_after_millis.to_be_bytes());
+        }
+        BridgeMessage::SyntheticLeaseIssueResponse {
+            lease_epoch,
+            certificate_chain,
+            ..
+        } => {
+            output.extend_from_slice(&lease_epoch.to_be_bytes());
+            validate_synthetic_chain(certificate_chain)?;
+            output.push(
+                u8::try_from(certificate_chain.len()).map_err(|_| BridgeError::ValueTooLarge)?,
+            );
+            for certificate in certificate_chain {
+                put_bytes(output, certificate.as_slice())?;
+            }
         }
     }
     Ok(())

@@ -91,6 +91,9 @@ fn main() -> ExitCode {
     if command == Some(OsStr::new("synthetic-lease-probe")) {
         return synthetic_lease_probe();
     }
+    if command == Some(OsStr::new("synthetic-lease-issue")) {
+        return synthetic_lease_issue();
+    }
     let command = match parse_command(&args) {
         Ok(command) => command,
         Err(error) => {
@@ -103,6 +106,22 @@ fn main() -> ExitCode {
         Err(error) => {
             report_error(&*error);
             ExitCode::FAILURE
+        }
+    }
+}
+
+fn synthetic_lease_issue() -> ExitCode {
+    match rka_sidecar::synthetic_lease_issue::issue() {
+        Ok(receipt) => {
+            if writeln!(io::stdout().lock(), "{receipt}").is_ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(2)
+            }
+        }
+        Err(status) => {
+            let _ = writeln!(io::stderr().lock(), "synthetic_lease_issue_status={status}");
+            ExitCode::from(2)
         }
     }
 }

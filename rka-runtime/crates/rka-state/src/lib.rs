@@ -19,6 +19,11 @@ mod rkp_lease;
 mod rkp_receipt;
 mod rkp_receipt_registry;
 mod sensitive;
+#[allow(
+    missing_docs,
+    reason = "the closed synthetic-lease record uses self-describing field and status names"
+)]
+mod synthetic_lease;
 
 pub use failure_budget::{
     FAILURE_THRESHOLD, FAILURE_WINDOW_SECONDS, FailureAdmission, FailureBudget, FailureBudgetError,
@@ -39,6 +44,12 @@ pub use rkp_receipt::{
 };
 pub use rkp_receipt_registry::ValidatedReceiptRegistry;
 pub use sensitive::SensitiveStateStore;
+pub use synthetic_lease::{
+    MAX_SYNTHETIC_LEASE_CERTIFICATE_BYTES, MAX_SYNTHETIC_LEASE_CERTIFICATES,
+    MAX_SYNTHETIC_LEASE_CHAIN_BYTES, MAX_SYNTHETIC_LEASE_PKCS8_BYTES,
+    MAX_SYNTHETIC_LEASE_STATE_BYTES, SyntheticLeaseBundle, SyntheticLeaseError,
+    SyntheticLeaseInstall, SyntheticLeaseState,
+};
 
 /// Maximum serialized state record size.
 pub const MAX_STATE_BYTES: usize = 131_072;

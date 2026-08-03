@@ -13,6 +13,7 @@ import android.hardware.security.keymint.KeyPurpose
 import android.hardware.security.keymint.SecurityLevel
 import android.hardware.security.keymint.Tag
 import android.os.IBinder
+import android.os.Parcel
 import android.os.ServiceManager
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicReference
@@ -141,12 +142,77 @@ private constructor(private val service: IKeyMintDevice, binder: IBinder) : Dono
     }
 }
 
-internal class AndroidDonorOperation(private val operation: IKeyMintOperation) :
-    DonorOperationEndpoint {
+internal interface KeyMintOperationTransport {
+    fun updateAad(input: ByteArray)
+
+    fun finish(input: ByteArray): ByteArray
+
+    fun abort()
+}
+
+private class BinderKeyMintOperationTransport(private val binder: IBinder) :
+    KeyMintOperationTransport {
+    override fun updateAad(input: ByteArray) {
+        exchange(
+            TRANSACTION_UPDATE_AAD,
+            {
+                it.writeByteArray(input)
+                it.writeInt(0)
+                it.writeInt(0)
+            },
+        ) {}
+    }
+
+    override fun finish(input: ByteArray): ByteArray =
+        exchange(
+            TRANSACTION_FINISH,
+            {
+                it.writeByteArray(input)
+                it.writeByteArray(null)
+                it.writeInt(0)
+                it.writeInt(0)
+                it.writeByteArray(null)
+            },
+        ) {
+            requireNotNull(it.createByteArray())
+        }
+
+    override fun abort() {
+        exchange(TRANSACTION_ABORT, {}) {}
+    }
+
+    private fun <T> exchange(code: Int, write: (Parcel) -> Unit, read: (Parcel) -> T): T {
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(IKeyMintOperation.DESCRIPTOR)
+            write(data)
+            check(binder.transact(code, data, reply, 0))
+            reply.readException()
+            read(reply)
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
+    companion object {
+        private const val TRANSACTION_UPDATE_AAD = IBinder.FIRST_CALL_TRANSACTION
+        private const val TRANSACTION_FINISH = IBinder.FIRST_CALL_TRANSACTION + 2
+        private const val TRANSACTION_ABORT = IBinder.FIRST_CALL_TRANSACTION + 3
+    }
+}
+
+internal class AndroidDonorOperation
+internal constructor(private val transport: KeyMintOperationTransport) : DonorOperationEndpoint {
+    constructor(
+        operation: IKeyMintOperation
+    ) : this(BinderKeyMintOperationTransport(requireNotNull(operation.asBinder())))
+
     private val pendingInput = ByteArrayOutputStream()
 
     override fun updateAad(input: ByteArray) {
-        operation.updateAad(input, null, null)
+        transport.updateAad(input)
     }
 
     override fun update(input: ByteArray): ByteArray {
@@ -160,7 +226,7 @@ internal class AndroidDonorOperation(private val operation: IKeyMintOperation) :
         val buffered = pendingInput.toByteArray()
         val complete = buffered + input
         return try {
-            operation.finish(complete, null, null, null, null)
+            transport.finish(complete)
         } finally {
             buffered.fill(0)
             complete.fill(0)
@@ -170,7 +236,7 @@ internal class AndroidDonorOperation(private val operation: IKeyMintOperation) :
 
     override fun abort() {
         try {
-            operation.abort()
+            transport.abort()
         } finally {
             pendingInput.reset()
         }

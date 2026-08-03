@@ -14,18 +14,13 @@ class DonorKeyMintProductionReachabilityTest {
         val backend = source("donor/DonorKeyMintBackend.kt")
         val runtime = source("bridge/DonorProvisioningRuntime.kt")
 
-        listOf(
-                "service.generateKey(",
-                "service.begin(",
-                "service.deleteKey(",
-                "operation.updateAad(",
-                "operation.finish(",
-                "operation.abort(",
-            )
+        listOf("service.generateKey(", "service.begin(", "service.deleteKey(", "binder.transact(")
             .forEach { call -> assertTrue("missing direct call: $call", adapter.contains(call)) }
         assertFalse(adapter.contains("operation.update(input, null, null)"))
+        assertFalse(adapter.contains("operation.finish(input, null, null, null, null)"))
         assertTrue(adapter.contains("pendingInput.write(input)"))
         assertTrue(adapter.contains("val complete = buffered + input"))
+        assertTrue(adapter.contains("TRANSACTION_FINISH = IBinder.FIRST_CALL_TRANSACTION + 2"))
         assertTrue(adapter.contains("attestKeyParams = emptyArray()"))
         assertTrue(backend.contains("rkpCertificate.subjectX500Principal.encoded"))
         assertTrue(backend.contains("RkpJournalState.APP_KEY_GENERATING"))

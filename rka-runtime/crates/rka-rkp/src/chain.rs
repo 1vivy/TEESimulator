@@ -70,13 +70,9 @@ pub(crate) fn validate_chain(
             return Err(basic_constraints_error);
         }
         let usage = certificate.key_usage().map_err(|_| key_usage_error)?;
-        let valid_usage = usage.as_ref().is_some_and(|extension| {
-            if is_leaf {
-                extension.value.digital_signature() && extension.value.key_cert_sign()
-            } else {
-                extension.value.key_cert_sign()
-            }
-        });
+        let valid_usage = usage
+            .as_ref()
+            .is_some_and(|extension| extension.value.key_cert_sign());
         if !valid_usage {
             return Err(key_usage_error);
         }

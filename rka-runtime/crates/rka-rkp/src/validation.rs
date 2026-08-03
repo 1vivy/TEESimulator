@@ -175,7 +175,7 @@ pub enum ValidationError {
     /// The issued attestation-signing certificate was not a certificate authority.
     #[error("attestation certificate basic constraints are invalid")]
     AttestationBasicConstraints,
-    /// The issued attestation-signing certificate lacked its required signing usages.
+    /// The issued attestation-signing certificate lacked certificate-signing usage.
     #[error("attestation certificate key usage is invalid")]
     AttestationKeyUsage,
     /// The issued attestation-signing certificate declared an extended usage.

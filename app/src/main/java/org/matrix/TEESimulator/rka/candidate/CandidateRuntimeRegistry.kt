@@ -2,6 +2,7 @@ package org.matrix.TEESimulator.rka.candidate
 
 import java.nio.file.Path
 import org.matrix.TEESimulator.config.ConfigurationManager
+import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.rka.bridge.BridgeResult
 import org.matrix.TEESimulator.rka.bridge.BrokerSidecarRole
 import org.matrix.TEESimulator.rka.bridge.captureProductionPeerAuthorization
@@ -18,9 +19,19 @@ object CandidateRuntimeRegistry {
     fun initializeLifecycle() {
         state = State.PassThrough
         val captured = captureProductionPeerAuthorization(BrokerSidecarRole.CANDIDATE)
-        if (captured !is BridgeResult.Success) return
+        if (captured !is BridgeResult.Success) {
+            SystemLogger.warning("RKA candidate runtime unavailable: stage=SIDECAR_IDENTITY")
+            return
+        }
         captured.value.use {
-            val target = ConfigurationManager.configuredCandidateIdentity() ?: return
+            val target =
+                ConfigurationManager.configuredCandidateIdentity()
+                    ?: run {
+                        SystemLogger.warning(
+                            "RKA candidate runtime unavailable: stage=TARGET_IDENTITY"
+                        )
+                        return
+                    }
             val identityHash = IdentityHash.of(target.identityHash)
             val service =
                 RemoteCandidateService(
@@ -32,6 +43,7 @@ object CandidateRuntimeRegistry {
                     target.aaidDer,
                 )
             state = State.Authorized(InstalledRuntime(target.uid, identityHash, service))
+            SystemLogger.info("RKA candidate runtime state=AUTHORIZED")
         }
     }
 

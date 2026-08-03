@@ -388,8 +388,20 @@ class KeyMintSecurityLevelInterceptor(
         parsed: KeyMintAttestation,
     ): TransactionResult? {
         if (securityLevel != SecurityLevel.TRUSTED_ENVIRONMENT) return null
-        val runtime = CandidateRuntimeRegistry.current() ?: return null
-        if (!runtime.admits(callingUid)) return null
+        val runtime =
+            CandidateRuntimeRegistry.current()
+                ?: run {
+                    if (!ConfigurationManager.shouldSkipUid(callingUid)) {
+                        SystemLogger.warning("RKA candidate route unavailable: stage=RUNTIME")
+                    }
+                    return null
+                }
+        if (!runtime.admits(callingUid)) {
+            if (!ConfigurationManager.shouldSkipUid(callingUid)) {
+                SystemLogger.warning("RKA candidate route unavailable: stage=UID")
+            }
+            return null
+        }
         val alias = descriptor.alias ?: return null
         val id = CandidateKeyId(callingUid, callingUid.toLong(), alias)
         val shape =
@@ -407,13 +419,17 @@ class KeyMintSecurityLevelInterceptor(
                 parsed.attestationChallenge?.copyOf() ?: ByteArray(0),
             )
         return when (val route = runtime.generate(id, shape)) {
-            CandidateRoute.PassThrough -> null
+            CandidateRoute.PassThrough -> {
+                SystemLogger.warning("RKA candidate route unavailable: stage=SERVICE")
+                null
+            }
             is CandidateRoute.Remote ->
                 when (val result = route.result) {
                     is CandidateResult.Success ->
                         InterceptorUtils.createTypedObjectReply(
-                            CandidateBinderAdapter.metadata(result.value)
-                        )
+                                CandidateBinderAdapter.metadata(result.value)
+                            )
+                            .also { SystemLogger.info("RKA candidate route state=REMOTE") }
                     is CandidateResult.Failure ->
                         InterceptorUtils.createServiceSpecificErrorReply(
                             CandidateBinderAdapter.errorCode(result.error)

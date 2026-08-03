@@ -91,6 +91,7 @@ class BrokerBridgeFourthFollowupTest {
                 "allow ksu teesimulator_rka_socket sock_file { create open read write getattr setattr unlink }",
                 "allow ksu unlabeled sock_file relabelfrom",
                 "allow ksu adb_data_file sock_file relabelfrom",
+                "allow ksu teesimulator_rka_socket_dir sock_file relabelfrom",
                 "allow ksu teesimulator_rka_socket sock_file relabelto",
                 "allow ksu adb_data_file dir relabelfrom",
                 "allow ksu teesimulator_rka_socket_dir dir relabelto",

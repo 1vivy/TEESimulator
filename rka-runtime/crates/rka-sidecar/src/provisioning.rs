@@ -133,7 +133,10 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
             session.roots(),
         )
     })();
-    if result.is_err() && !matches!(result, Err(ProvisioningRunError::Http(_))) {
+    if result.is_err()
+        && !matches!(result, Err(ProvisioningRunError::Http(_)))
+        && !broker_handles.is_empty()
+    {
         let cancel = BridgeMessage::Cancel(
             RequestId::new(request_id),
             broker_handles

@@ -149,15 +149,20 @@ object DonorProvisioningRuntime {
             val count =
                 RkpKeyCount.parse(request.keyCount) as? BrokerOutcome.Success
                     ?: return failure(request.requestId)
-            val generated =
+            val generatedOutcome =
                 generator.generate(count.value, deadline, cancellation) { stage = it }
-                    as? BrokerOutcome.Success ?: return failure(request.requestId)
+            val generated =
+                generatedOutcome as? BrokerOutcome.Success
+                    ?: return rejected(request.requestId, stage, generatedOutcome)
             val batch = generated.value
             stage = "IRPC_CSR"
-            val csr =
+            val csrOutcome =
                 client.generateCertificateRequest(batch, challenge.value, deadline, cancellation)
-                    as? BrokerOutcome.Success
-                    ?: return failure(request.requestId).also { journal.quarantineCurrent() }
+            val csr =
+                csrOutcome as? BrokerOutcome.Success
+                    ?: return rejected(request.requestId, stage, csrOutcome).also {
+                        journal.quarantineCurrent()
+                    }
             stage = "JOURNAL_RECOVER"
             val record = requireNotNull(journal.recover())
             stage = "CSR_PERSIST"
@@ -191,6 +196,21 @@ object DonorProvisioningRuntime {
             )
             failure(request.requestId)
         }
+    }
+
+    private fun rejected(
+        requestId: RequestId,
+        stage: String,
+        outcome: BrokerOutcome<*>,
+    ): BridgeMessage.Error {
+        val type =
+            when (outcome) {
+                is BrokerOutcome.Failure -> outcome.error.javaClass.simpleName
+                BrokerOutcome.SelfCallBypass -> "SelfCallBypass"
+                is BrokerOutcome.Success -> "UnexpectedSuccess"
+            }
+        SystemLogger.warning("RKA donor provisioning rejected: stage=$stage type=$type")
+        return failure(requestId)
     }
 
     private fun certify(request: BridgeMessage.CertificationRequest): BridgeMessage {

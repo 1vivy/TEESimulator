@@ -500,7 +500,8 @@ sealed class BridgeMessage : AutoCloseable {
             require(distinct(values.map { it.publicKeyHash.copyBytes() }))
             require(distinct(values.map { it.spkiHash.copyBytes() }))
             require(distinct(values.map { it.chainHash.copyBytes() }))
-            require(profileEpoch > 0)
+            // Raw unsigned 64-bit wire value. Epoch zero is the valid bootstrap trust epoch,
+            // and high-bit epochs appear negative on the JVM.
         }
 
         fun keyMetadata(): List<BrokerCertificationMetadata> =

@@ -128,6 +128,32 @@ class IrpcKeyBatchTest {
     }
 
     @Test
+    fun certificationAcceptsZeroAndHighBitWireEpochs() {
+        val (_, record) = certificationFixture()
+        listOf(0L, Long.MIN_VALUE).forEach { epoch ->
+            val certification =
+                RkpCertification(
+                    79,
+                    record.batchId,
+                    record.entries.map { entry ->
+                        RkpCertifiedKey(
+                            entry.order,
+                            entry.handle,
+                            entry.copyPublicHash(),
+                            entry.copySpkiHash(),
+                            ByteArray(32) { (entry.order + 30).toByte() },
+                            2,
+                        )
+                    },
+                    epoch,
+                    ByteArray(32),
+                )
+
+            assertEquals(epoch, certification.profileEpoch)
+        }
+    }
+
+    @Test
     fun certificationMutationOrReplayQuarantinesWithoutCertifiedSuccess() {
         val (journal, record) = certificationFixture()
         val certification = certification(record, 78)

@@ -94,6 +94,42 @@ class BridgeProtocolMappingTest {
         request.close()
     }
 
+    @Test
+    fun certification_epoch_preserves_the_complete_unsigned_wire_domain() {
+        listOf(0L, Long.MIN_VALUE).forEach { epoch ->
+            val request =
+                BridgeMessage.CertificationRequest(
+                    RequestId(44),
+                    BrokerBatchId.of(ByteArray(16) { 8 }),
+                    listOf(
+                        BrokerCertificationMetadata(
+                            0,
+                            Hash32.of(ByteArray(32) { 1 }),
+                            Hash32.of(ByteArray(32) { 2 }),
+                            Hash32.of(ByteArray(32) { 3 }),
+                            Hash32.of(ByteArray(32) { 4 }),
+                            2,
+                        )
+                    ),
+                    epoch,
+                    Hash32.of(ByteArray(32) { 5 }),
+                )
+            val encoded = BridgeCodec.encode(request, BridgeExchangeRole.DONOR_REQUEST)
+            val decoded =
+                BridgeCodec.decode(ByteArrayInputStream(encoded), BridgeExchangeRole.DONOR_REQUEST)
+
+            assertTrue(decoded is BridgeResult.Success)
+            assertEquals(
+                epoch,
+                ((decoded as BridgeResult.Success).value as BridgeMessage.CertificationRequest)
+                    .profileEpoch,
+            )
+            decoded.value.close()
+            encoded.fill(0)
+            request.close()
+        }
+    }
+
     private fun publicKeyRequest(id: Long) =
         BridgeMessage.PublicKeyRequest(RequestId(id), PublicBytes.of(ByteArray(16), 64), 1)
 

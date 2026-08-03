@@ -130,7 +130,8 @@ class RkpCertification(
         require(this.keys.size in 1..RkpKeyCount.MAX)
         require(this.keys.map { it.order } == this.keys.indices.toList())
         require(this.activationBindingHash.size == 32)
-        require(profileEpoch > 0)
+        // Raw unsigned 64-bit wire value. Epoch zero is the valid bootstrap trust epoch,
+        // and high-bit epochs appear negative on the JVM.
         require(distinct(this.keys.map { it.handle.copyBytes() }))
         require(distinct(this.keys.map(RkpCertifiedKey::copyPublicHash)))
         require(distinct(this.keys.map(RkpCertifiedKey::copySpkiHash)))

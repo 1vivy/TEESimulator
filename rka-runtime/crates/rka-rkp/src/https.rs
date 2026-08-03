@@ -16,7 +16,8 @@ use crate::{
     challenge::{HttpRequest, HttpTransport},
 };
 
-const NETWORK_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Production bounded HTTPS transport with redirects and environment proxies disabled.
 #[derive(Debug)]
@@ -44,8 +45,8 @@ impl BoundedHttpsTransport {
             .tls_backend_preconfigured(tls)
             .https_only(true)
             .redirect(Policy::none())
-            .connect_timeout(NETWORK_TIMEOUT)
-            .timeout(NETWORK_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(EXCHANGE_TIMEOUT)
             .no_proxy()
             .build()
             .map_err(|_| ClientError::Transport)?;
@@ -99,7 +100,7 @@ fn connect_before_upload(url: &str) -> Result<(), ClientError> {
     let addresses = resolved_addresses((host, port).to_socket_addrs())?;
     let mut saw_refusal = false;
     for address in addresses.take(8) {
-        match TcpStream::connect_timeout(&address, NETWORK_TIMEOUT) {
+        match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
             Ok(stream) => {
                 drop(stream);
                 return Ok(());
@@ -198,6 +199,13 @@ mod tests {
 
         server.join().unwrap();
         assert_eq!(result, Err(ClientError::PostAmbiguous));
+    }
+
+    #[test]
+    fn provisioning_exchange_deadline_exceeds_the_connect_probe_deadline() {
+        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(EXCHANGE_TIMEOUT, Duration::from_secs(30));
+        assert!(EXCHANGE_TIMEOUT > CONNECT_TIMEOUT);
     }
 
     #[test]

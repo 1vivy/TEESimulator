@@ -649,15 +649,24 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 }
 
 fn fresh_request_id() -> Result<u64, ProvisioningRunError> {
-    let mut bytes = [0_u8; 8];
-    SystemRandom::new().fill(&mut bytes).map_err(|_| {
-        ProvisioningRunError::ActivationStage(ProvisioningActivationStage::RequestIdentity)
-    })?;
-    Ok(request_id_from_bytes(bytes))
+    loop {
+        let mut bytes = [0_u8; 8];
+        SystemRandom::new().fill(&mut bytes).map_err(|_| {
+            ProvisioningRunError::ActivationStage(ProvisioningActivationStage::RequestIdentity)
+        })?;
+        if let Some(request_id) = request_id_from_bytes(bytes) {
+            return Ok(request_id);
+        }
+    }
 }
 
-const fn request_id_from_bytes(bytes: [u8; 8]) -> u64 {
-    u64::from_be_bytes(bytes)
+const fn request_id_from_bytes(bytes: [u8; 8]) -> Option<u64> {
+    let request_id = u64::from_be_bytes(bytes);
+    if request_id == 0 {
+        None
+    } else {
+        Some(request_id)
+    }
 }
 
 fn chain_set_hash(chains: &[Vec<u8>]) -> Result<[u8; 32], ProvisioningRunError> {
@@ -774,9 +783,13 @@ mod tests {
     fn request_id_uses_all_kernel_entropy_bytes_in_wire_order() {
         assert_eq!(
             super::request_id_from_bytes([1, 2, 3, 4, 5, 6, 7, 8]),
-            0x0102_0304_0506_0708,
+            Some(0x0102_0304_0506_0708),
         );
-        assert_ne!(super::request_id_from_bytes([0; 8]), 1);
+        assert_eq!(
+            super::request_id_from_bytes([0x80, 0, 0, 0, 0, 0, 0, 0]),
+            Some(0x8000_0000_0000_0000),
+        );
+        assert_eq!(super::request_id_from_bytes([0; 8]), None);
     }
 
     #[test]

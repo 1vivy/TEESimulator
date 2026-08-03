@@ -126,7 +126,7 @@ class RkpCertification(
     private val activationBindingHash = activationBindingHash.copyOf()
 
     init {
-        require(requestId > 0)
+        require(requestId != 0L)
         require(this.keys.size in 1..RkpKeyCount.MAX)
         require(this.keys.map { it.order } == this.keys.indices.toList())
         require(this.activationBindingHash.size == 32)

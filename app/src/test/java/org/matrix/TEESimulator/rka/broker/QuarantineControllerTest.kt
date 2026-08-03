@@ -49,6 +49,25 @@ class QuarantineControllerTest {
     }
 
     @Test
+    fun authenticatedRequestAcceptsAHighBitWireRequestId() {
+        val handle = ByteArray(32) { 3 }
+        val batch = ByteArray(16) { 4 }
+        val controller =
+            QuarantineController(
+                exactQuarantine = { true },
+                cancel = {},
+                discard = {},
+                wipe = {},
+                expectedBatch = { batch.copyOf() },
+            )
+
+        assertEquals(
+            QuarantineResult.QUARANTINED,
+            controller.quarantine(request(Long.MIN_VALUE, batch, handle)),
+        )
+    }
+
+    @Test
     fun mismatchedHandleSetFailsClosedBeforeReuse() {
         val controller =
             QuarantineController(exactQuarantine = { false }, cancel = {}, discard = {}, wipe = {})

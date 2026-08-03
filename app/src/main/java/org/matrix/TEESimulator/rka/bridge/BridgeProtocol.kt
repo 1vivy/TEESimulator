@@ -109,6 +109,7 @@ enum class CandidateBridgeOperation(val wire: Int) {
     ABORT(9),
 }
 
+/** Raw nonzero unsigned 64-bit wire value; high-bit identifiers appear negative on the JVM. */
 @JvmInline value class RequestId(val value: Long)
 
 class PublicBytes private constructor(bytes: ByteArray) : AutoCloseable {

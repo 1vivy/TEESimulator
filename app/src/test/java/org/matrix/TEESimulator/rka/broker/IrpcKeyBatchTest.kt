@@ -120,6 +120,14 @@ class IrpcKeyBatchTest {
     }
 
     @Test
+    fun certificationAcceptsAHighBitWireRequestId() {
+        val (journal, record) = certificationFixture()
+        val certification = certification(record, Long.MIN_VALUE)
+
+        assertTrue(journal.certifyCurrent(certification))
+    }
+
+    @Test
     fun certificationMutationOrReplayQuarantinesWithoutCertifiedSuccess() {
         val (journal, record) = certificationFixture()
         val certification = certification(record, 78)

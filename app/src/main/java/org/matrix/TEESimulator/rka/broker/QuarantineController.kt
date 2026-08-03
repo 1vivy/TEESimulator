@@ -64,7 +64,7 @@ private constructor(
             batchId: BrokerBatchId,
             actionIds: List<Hash32>,
         ): AuthenticatedQuarantineRequest {
-            require(requestId.value > 0)
+            require(requestId.value != 0L)
             require(handles.isNotEmpty() && handles.size <= RkpKeyCount.MAX)
             require(handles.all { it.size == 32 })
             require(

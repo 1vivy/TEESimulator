@@ -231,7 +231,7 @@ private fun provisioningPeerMismatchCategory(
         credentials.uid != supervised.uid || credentials.gid != supervised.gid ->
             "provision_credentials"
         observed.cmdline == supervised.cmdline -> "provision_cmdline_supervised"
-        observed.cmdline.size != 2 -> "provision_cmdline_arity"
+        observed.cmdline.size != 2 -> provisioningCommandShape(observed.cmdline)
         observed.cmdline.first() != SupervisorRecordFields.FIXED_EXECUTABLE ->
             "provision_cmdline_executable"
         observed.cmdline.last() != "provision" -> "provision_cmdline_action"
@@ -240,6 +240,22 @@ private fun provisioningPeerMismatchCategory(
             observed.executableInode != supervised.executableInode -> "provision_inode"
         else -> "provision_identity"
     }
+
+private fun provisioningCommandShape(cmdline: List<String>): String {
+    val arity = cmdline.size.coerceAtMost(6)
+    val shape =
+        cmdline.take(6).joinToString(separator = "_") {
+            when (it) {
+                SupervisorRecordFields.FIXED_EXECUTABLE -> "runtime"
+                "provision" -> "provision"
+                "--role" -> "role"
+                "donor" -> "donor"
+                "candidate" -> "candidate"
+                else -> "other"
+            }
+        }
+    return "provision_cmdline_${arity}_$shape"
+}
 
 private class TrustedRecordHandle
 private constructor(

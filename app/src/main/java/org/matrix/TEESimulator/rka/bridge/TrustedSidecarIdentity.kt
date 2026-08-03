@@ -204,9 +204,10 @@ internal fun provisioningPeerSnapshot(
     ) {
         return null
     }
-    val expectedCommand = listOf(SupervisorRecordFields.FIXED_EXECUTABLE, "provision")
     if (
-        observed.cmdline != expectedCommand ||
+        observed.cmdline.size != 2 ||
+            observed.cmdline.first() != SupervisorRecordFields.FIXED_EXECUTABLE ||
+            observed.cmdline.last() !in DONOR_CONTROL_ACTIONS ||
             observed.executablePath != supervised.executablePath ||
             supervised.executableInode == null ||
             observed.executableInode != supervised.executableInode
@@ -238,9 +239,11 @@ private fun provisioningPeerMismatchCategory(
         observed.cmdline.size != 2 -> provisioningCommandShape(observed.cmdline)
         observed.cmdline.first() != SupervisorRecordFields.FIXED_EXECUTABLE ->
             "provision_cmdline_executable"
-        observed.cmdline.last() != "provision" -> "provision_cmdline_action"
+        observed.cmdline.last() !in DONOR_CONTROL_ACTIONS -> "provision_cmdline_action"
         else -> "provision_identity"
     }
+
+private val DONOR_CONTROL_ACTIONS = setOf("provision", "synthetic-lease-probe")
 
 private fun provisioningExecutableCategory(executablePath: String): String =
     when (executablePath) {

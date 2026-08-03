@@ -106,23 +106,13 @@ class TrustedSidecarIdentityTest {
             )
 
         val admitted =
-            provisioningPeerSnapshot(
-                BrokerSidecarRole.DONOR,
-                credentials,
-                supervised,
-                observed,
-            )
+            provisioningPeerSnapshot(BrokerSidecarRole.DONOR, credentials, supervised, observed)
 
         assertEquals(credentials.pid, requireNotNull(admitted).pid)
         assertEquals(observed.startTimeTicks, admitted.startTimeTicks)
         assertTrue(identityMatches(credentials, admitted, observed))
         assertNull(
-            provisioningPeerSnapshot(
-                BrokerSidecarRole.CANDIDATE,
-                credentials,
-                supervised,
-                observed,
-            )
+            provisioningPeerSnapshot(BrokerSidecarRole.CANDIDATE, credentials, supervised, observed)
         )
         assertNull(
             provisioningPeerSnapshot(
@@ -146,6 +136,44 @@ class TrustedSidecarIdentityTest {
                 credentials,
                 supervised,
                 observed.copy(executableInode = 1235),
+            )
+        )
+    }
+
+    @Test
+    fun donor_admits_the_exact_root_synthetic_lease_probe_from_the_supervised_inode() {
+        val donor = requireNotNull(SupervisorRecordTextParser.parse(validRecord()))
+        val supervised = requireNotNull(donor.snapshotFor(BrokerSidecarRole.DONOR))
+        val credentials = PeerCredentials(0, 0, 85)
+        val observed =
+            ObservedProcessIdentity(
+                startTimeTicks = 992,
+                cmdline = listOf(SupervisorRecordFields.FIXED_EXECUTABLE, "synthetic-lease-probe"),
+                executablePath = supervised.executablePath,
+                executableInode = supervised.executableInode,
+            )
+
+        val admitted =
+            provisioningPeerSnapshot(BrokerSidecarRole.DONOR, credentials, supervised, observed)
+
+        assertEquals(credentials.pid, requireNotNull(admitted).pid)
+        assertEquals(observed.startTimeTicks, admitted.startTimeTicks)
+        assertTrue(identityMatches(credentials, admitted, observed))
+        assertNull(
+            provisioningPeerSnapshot(BrokerSidecarRole.CANDIDATE, credentials, supervised, observed)
+        )
+        assertNull(
+            provisioningPeerSnapshot(
+                BrokerSidecarRole.DONOR,
+                credentials,
+                supervised,
+                observed.copy(
+                    cmdline =
+                        listOf(
+                            SupervisorRecordFields.FIXED_EXECUTABLE,
+                            "synthetic-lease-probe-extra",
+                        )
+                ),
             )
         )
     }

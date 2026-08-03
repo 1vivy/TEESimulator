@@ -213,6 +213,32 @@ class RkpJournalTest {
     }
 
     @Test
+    fun provisioningPreparationClearsAnInterruptedCsrBatch() {
+        val store = MemoryJournalStore()
+        val journal = RkpJournal(store)
+        val prepared = journal.transition(recorded(journal), RkpJournalState.CSR_PREPARED)
+
+        assertTrue(journal.prepareForProvisioning())
+
+        assertNull(store.read())
+        val next = journal.begin(count(1), identity())
+        assertFalse(next.batchId.matches(prepared.batchId))
+    }
+
+    @Test
+    fun provisioningPreparationPreservesACertifiedLease() {
+        val store = MemoryJournalStore()
+        val journal = RkpJournal(store)
+        val prepared = journal.transition(recorded(journal), RkpJournalState.CSR_PREPARED)
+        val posting = journal.transition(prepared, RkpJournalState.CSR_POSTING)
+        journal.transition(posting, RkpJournalState.RKP_CERTIFIED)
+
+        assertFalse(journal.prepareForProvisioning())
+
+        assertEquals(RkpJournalState.RKP_CERTIFIED, journal.recover()?.state)
+    }
+
+    @Test
     fun fileJournalClearDeletesTheValidatedRecordBeforeParentFsync() {
         val order = mutableListOf<String>()
         val path = Path.of("/journal/rkp")

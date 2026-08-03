@@ -22,8 +22,8 @@ use thiserror::Error;
 
 use crate::{
     bridge::{
-        BridgeMessage, BrokerCertificationMetadata, BrokerOperation, Hash32, PublicBytes,
-        RequestId, RoleExecutor, SidecarRole,
+        BridgeMessage, BrokerBatchId, BrokerCertificationMetadata, BrokerOperation, Hash32,
+        PublicBytes, RequestId, RoleExecutor, SidecarRole,
     },
     provision_activation::{ensure_validator_key, prepare},
     provisioning_io::{FileAttemptJournal, FileBaseStore, FileStateStore, ProductionConfig},
@@ -84,6 +84,7 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
         })
         .map_err(|_| ProvisioningRunError::Broker)?;
     let mut broker_handles = Vec::new();
+    let mut broker_batch_id = None;
     let result = (|| {
         let BridgeMessage::PublicKeyResponse(_, hal_csr, batch_id, irpc_identity_hash, keys) =
             response
@@ -93,6 +94,7 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
         if keys.len() != usize::from(config.key_count) {
             return Err(ProvisioningRunError::Broker);
         }
+        broker_batch_id = Some(*batch_id.as_array());
         broker_handles.extend(keys.iter().map(|key| *key.handle()));
         let expected = keys
             .iter()
@@ -137,20 +139,51 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
         && !matches!(result, Err(ProvisioningRunError::Http(_)))
         && !broker_handles.is_empty()
     {
-        let cancel = BridgeMessage::Cancel(
-            RequestId::new(request_id),
-            broker_handles
-                .into_iter()
-                .map(crate::bridge::Hash32::new)
-                .collect(),
-            None,
-        );
-        let _ = executor.dispatch(BrokerOperation::Donor {
-            socket_path: &config.socket,
-            request: &cancel,
-        });
+        let batch_id = broker_batch_id.ok_or(ProvisioningRunError::Activation)?;
+        cancel_generated_batch(
+            &executor,
+            (&config.socket, request_id),
+            (batch_id, &broker_handles),
+        )?;
     }
     result
+}
+
+fn cancel_generated_batch(
+    executor: &RoleExecutor,
+    request: (&std::path::Path, u64),
+    material: ([u8; 16], &[[u8; 32]]),
+) -> Result<(), ProvisioningRunError> {
+    let (socket, request_id) = request;
+    let (batch_id, handles) = material;
+    let mut request = [0_u8; 16];
+    request[8..].copy_from_slice(&request_id.to_be_bytes());
+    let material = AmbiguousMaterial::new(request, batch_id, handles.to_vec())
+        .map_err(|_| ProvisioningRunError::Activation)?;
+    let action_ids = material
+        .cleanup_intents()
+        .iter()
+        .map(|action| Hash32::new(*action.action_id()))
+        .collect();
+    let cancel = BridgeMessage::Cancel(
+        RequestId::new(request_id),
+        handles.iter().copied().map(Hash32::new).collect(),
+        Some((BrokerBatchId::new(batch_id), action_ids)),
+    );
+    let response = executor
+        .dispatch(BrokerOperation::Donor {
+            socket_path: socket,
+            request: &cancel,
+        })
+        .map_err(|_| ProvisioningRunError::Broker)?;
+    match response {
+        BridgeMessage::Cancel(id, handles, None)
+            if id == RequestId::new(request_id) && handles.is_empty() =>
+        {
+            Ok(())
+        }
+        _ => Err(ProvisioningRunError::Broker),
+    }
 }
 
 fn attempt_identity(

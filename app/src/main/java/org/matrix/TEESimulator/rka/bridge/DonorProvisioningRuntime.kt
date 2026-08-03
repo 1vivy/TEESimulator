@@ -145,6 +145,8 @@ object DonorProvisioningRuntime {
             val challenge =
                 AttestationChallenge.parse(request.challenge.copyBytes()) as? BrokerOutcome.Success
                     ?: return failure(request.requestId)
+            stage = "JOURNAL_RECOVER"
+            if (!journal.prepareForProvisioning()) return failure(request.requestId)
             activeRequestId = null
             activeCancellation = null
             val deadline = BrokerDeadline.at(BridgeLimits.DEADLINE_MILLIS)

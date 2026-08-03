@@ -218,6 +218,24 @@ class RkpJournal(private val store: RkpJournalStore) {
         )
     }
 
+    fun prepareForProvisioning(): Boolean {
+        val current = recover() ?: return true
+        if (
+            current.state == RkpJournalState.RKP_CERTIFIED ||
+                current.state == RkpJournalState.APP_KEY_RECORDED ||
+                current.state == RkpJournalState.EXPOSED
+        ) {
+            return false
+        }
+        val batchId = current.batchId.copyBytes()
+        return try {
+            quarantineCurrent()
+            completeQuarantine(batchId)
+        } finally {
+            batchId.fill(0)
+        }
+    }
+
     internal fun deriveEntries(
         generating: RkpJournalRecord,
         publicKeys: List<Pair<ByteArray, ByteArray>>,

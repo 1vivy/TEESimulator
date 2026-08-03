@@ -230,15 +230,28 @@ private fun provisioningPeerMismatchCategory(
         expectedRole != BrokerSidecarRole.DONOR -> "provision_role"
         credentials.uid != supervised.uid || credentials.gid != supervised.gid ->
             "provision_credentials"
+        observed.executablePath != supervised.executablePath ->
+            provisioningExecutableCategory(observed.executablePath)
+        supervised.executableInode == null ||
+            observed.executableInode != supervised.executableInode -> "provision_inode"
         observed.cmdline == supervised.cmdline -> "provision_cmdline_supervised"
         observed.cmdline.size != 2 -> provisioningCommandShape(observed.cmdline)
         observed.cmdline.first() != SupervisorRecordFields.FIXED_EXECUTABLE ->
             "provision_cmdline_executable"
         observed.cmdline.last() != "provision" -> "provision_cmdline_action"
-        observed.executablePath != supervised.executablePath -> "provision_executable"
-        supervised.executableInode == null ||
-            observed.executableInode != supervised.executableInode -> "provision_inode"
         else -> "provision_identity"
+    }
+
+private fun provisioningExecutableCategory(executablePath: String): String =
+    when (executablePath) {
+        SupervisorRecordFields.FIXED_EXECUTABLE -> "provision_executable_runtime"
+        "/system/bin/sh" -> "provision_executable_shell"
+        "/system/bin/nsenter",
+        "/system/bin/toybox" -> "provision_executable_namespace_tool"
+        "/system/bin/app_process64" -> "provision_executable_app_process64"
+        "/data/adb/ksud",
+        "/data/adb/ksu/bin/ksud" -> "provision_executable_ksud"
+        else -> "provision_executable_other"
     }
 
 private fun provisioningCommandShape(cmdline: List<String>): String {

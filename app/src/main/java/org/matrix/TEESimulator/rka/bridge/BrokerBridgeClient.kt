@@ -1,5 +1,11 @@
 package org.matrix.TEESimulator.rka.bridge
 
+import java.io.ByteArrayInputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.EOFException
+import java.io.InputStream
+import java.io.OutputStream
 import org.matrix.TEESimulator.logging.SystemLogger
 
 interface BrokerBridgeClient {
@@ -74,8 +80,7 @@ private class DefaultBrokerBridgeClient(
         try {
             val encoded = BridgeCodec.encode(request, BridgeExchangeRole.CANDIDATE_REQUEST)
             try {
-                transport.output().write(encoded)
-                transport.output().flush()
+                CandidateBridgeStreamFraming.write(transport.output(), encoded)
             } catch (_: SecurityException) {
                 return closeWith(BridgeError.SelinuxDenied)
             } catch (error: Exception) {
@@ -86,7 +91,7 @@ private class DefaultBrokerBridgeClient(
             }
             val response =
                 try {
-                    BridgeCodec.decode(transport.input(), BridgeExchangeRole.CANDIDATE_RESPONSE)
+                    CandidateBridgeStreamFraming.decode(transport.input())
                 } catch (_: SecurityException) {
                     return closeWith(BridgeError.SelinuxDenied)
                 } catch (error: Exception) {
@@ -156,6 +161,47 @@ private class DefaultBrokerBridgeClient(
         SystemLogger.warning(
             "RKA candidate bridge transport failed: stage=$stage type=${error.javaClass.simpleName}"
         )
+    }
+}
+
+internal object CandidateBridgeStreamFraming {
+    fun write(output: OutputStream, frame: ByteArray) {
+        require(frame.size in 1..BridgeLimits.MAX_FRAME_BYTES)
+        DataOutputStream(output).run {
+            writeInt(frame.size)
+            write(frame)
+            flush()
+        }
+    }
+
+    fun decode(input: InputStream): BridgeResult<BridgeMessage> {
+        val length =
+            try {
+                DataInputStream(input).readInt()
+            } catch (_: EOFException) {
+                return BridgeResult.Failure(BridgeError.Truncated)
+            }
+        if (length == 0) return BridgeResult.Failure(BridgeError.EmptyFrame)
+        if (length !in 1..BridgeLimits.MAX_FRAME_BYTES) {
+            return BridgeResult.Failure(BridgeError.FrameTooLarge)
+        }
+        val frame = ByteArray(length)
+        try {
+            try {
+                DataInputStream(input).readFully(frame)
+            } catch (_: EOFException) {
+                return BridgeResult.Failure(BridgeError.Truncated)
+            }
+            val bounded = ByteArrayInputStream(frame)
+            val decoded = BridgeCodec.decode(bounded, BridgeExchangeRole.CANDIDATE_RESPONSE)
+            if (decoded is BridgeResult.Success && bounded.available() != 0) {
+                decoded.value.close()
+                return BridgeResult.Failure(BridgeError.NonCanonical)
+            }
+            return decoded
+        } finally {
+            frame.fill(0)
+        }
     }
 }
 

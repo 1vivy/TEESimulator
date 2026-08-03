@@ -67,7 +67,7 @@ object BrokerBridgeFactory {
         val authorization = AtomicReference<ProductionPeerAuthorization?>()
         val result =
             BoundedBridgeExecution().run(
-                BridgeLimits.DEADLINE_MILLIS,
+                BridgeLimits.CANDIDATE_DEADLINE_MILLIS,
                 {
                     clientReference.get()?.peerDied()
                     authorization.get()?.close()

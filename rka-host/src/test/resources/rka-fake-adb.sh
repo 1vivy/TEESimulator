@@ -162,6 +162,8 @@ set_perm_recursive() {
   find "$1" -type f -exec chmod "$5" {} + || return 1
 }
 abort() { exit 1; }
+ui_print() { :; }
+grep_prop() { /usr/bin/sed -n "s/^$1=//p" "$2" | /usr/bin/head -n 1; }
 case "${1-} ${2-}" in
   "--version ") printf "%s\n" "3.2.5-12-g824f2f23 (uapi: 2)" ;;
   "module --help"|"sepolicy --help"|"sepolicy check"|"sepolicy apply") exit 0 ;;
@@ -170,10 +172,12 @@ case "${1-} ${2-}" in
     if [ "${RKA_FAKE_FAULT:-}" = install-only-update-parent ]; then mkdir -p /data/adb/modules_update; exit 1; fi
     rm -rf /data/adb/modules_update/tricky_store
     mkdir -p /data/adb/modules_update/tricky_store
-    /usr/bin/unzip -q "$3" -d /data/adb/modules_update/tricky_store
+    /usr/bin/unzip -q "$3" -d /data/adb/modules_update/tricky_store -x 'META-INF/*'
     set_perm_recursive /data/adb/modules_update/tricky_store 0 0 0755 0644 || exit 1
     if [ -f /data/adb/modules_update/tricky_store/customize.sh ]; then
       MODPATH=/data/adb/modules_update/tricky_store
+      BOOTMODE=true KSU=true KSU_VER_CODE=10670 ARCH=arm64 API=36
+      TMPDIR=$MODPATH ZIPFILE=$3
       . "$MODPATH/customize.sh" || exit 1
       rm -f "$MODPATH/customize.sh"
     fi
@@ -193,6 +197,8 @@ set_perm_recursive() {
   find "$1" -type f -exec chmod "$5" {} + || return 1
 }
 abort() { exit 1; }
+ui_print() { :; }
+grep_prop() { /usr/bin/sed -n "s/^$1=//p" "$2" | /usr/bin/head -n 1; }
 case "${1-} ${2-}" in
   "--version ")
     if [ "${RKA_FAKE_NEXT_MUTATION:-}" = version-drift ]; then printf '%s\n' 'ksud 3.3.1 (uapi: 2)'; else printf '%s\n' 'ksud 3.3.0 (uapi: 2)'; fi ;;
@@ -212,6 +218,8 @@ case "${1-} ${2-}" in
       rm -f /data/adb/modules_update/tricky_store/customize.sh
     elif [ -f /data/adb/modules_update/tricky_store/customize.sh ]; then
       MODPATH=/data/adb/modules_update/tricky_store
+      BOOTMODE=true KSU=true KSU_VER_CODE=10670 ARCH=arm64 API=36
+      TMPDIR=$MODPATH ZIPFILE=$3
       . "$MODPATH/customize.sh" || exit 1
       rm -f "$MODPATH/customize.sh"
     fi

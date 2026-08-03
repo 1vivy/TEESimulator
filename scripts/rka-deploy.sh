@@ -390,7 +390,11 @@ prepare_install_runner() {
 reinject_ksu_metadata() {
     [ -d "$pending" ] && [ ! -L "$pending" ] || return 1
     metadata_target="$pending/META-INF"
-    [ ! -e "$metadata_target" ] && [ ! -L "$metadata_target" ] || return 1
+    if [ -e "$metadata_target" ] || [ -L "$metadata_target" ]; then
+        [ -d "$metadata_target" ] && [ ! -L "$metadata_target" ] || return 1
+        [ -z "$(find "$metadata_target" -mindepth 1 ! -type f -print -quit)" ] || return 1
+        rm -rf "$metadata_target" || return 1
+    fi
     metadata_next="$pending/.rka-metadata-$tx"
     [ ! -e "$metadata_next" ] && [ ! -L "$metadata_next" ] || return 1
     mkdir "$metadata_next" || return 1
@@ -398,14 +402,14 @@ reinject_ksu_metadata() {
     for metadata_name in rka-artifacts.sha256 rka-source.sha256; do
         cp "$txn/metadata/$metadata_name" "$metadata_next/$metadata_name.next" || return 1
         chown 0:0 "$metadata_next/$metadata_name.next" || return 1
-        chmod 600 "$metadata_next/$metadata_name.next" || return 1
+        chmod 644 "$metadata_next/$metadata_name.next" || return 1
         cmp -s "$txn/metadata/$metadata_name" "$metadata_next/$metadata_name.next" || return 1
         mv "$metadata_next/$metadata_name.next" "$metadata_next/$metadata_name" || return 1
     done
     [ "$(find "$metadata_next" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 2 ] || return 1
     [ -z "$(find "$metadata_next" -mindepth 1 -maxdepth 1 ! -type f -print)" ] || return 1
     chown 0:0 "$metadata_next" || return 1
-    chmod 700 "$metadata_next" || return 1
+    chmod 755 "$metadata_next" || return 1
     mv "$metadata_next" "$metadata_target" || return 1
     [ -d "$metadata_target" ] && [ ! -L "$metadata_target" ] || return 1
 }
@@ -440,12 +444,8 @@ validate_installed_module_contract() {
         [ -f "$pending/$installed_file" ] && [ ! -L "$pending/$installed_file" ] || return 1
         [ "$(stat -c '%u:%g:%a' "$pending/$installed_file")" = "0:0:$installed_mode" ] || return 1
     done < "$installed_manifest"
-    installed_metadata_file_mode=600
-    installed_metadata_directory_mode=700
-    if [ "$metadata_bridge" = false ]; then
-        installed_metadata_file_mode=644
-        installed_metadata_directory_mode=755
-    fi
+    installed_metadata_file_mode=644
+    installed_metadata_directory_mode=755
     for installed_file in META-INF/rka-artifacts.sha256 META-INF/rka-source.sha256; do
         [ -f "$pending/$installed_file" ] && [ ! -L "$pending/$installed_file" ] || return 1
         [ "$(stat -c '%u:%g:%a' "$pending/$installed_file")" = "0:0:$installed_metadata_file_mode" ] || return 1
@@ -772,12 +772,6 @@ deploy)
     [ -f "$source_receipt" ] && [ ! -L "$source_receipt" ] || exit 1
     [ "$(cat "$source_receipt")" = "$expected_source_sha" ] || exit 1
     prepare_install_runner || exit 1
-    installed_ksud_version=$(ksud --version 2>/dev/null | head -n 1) || exit 1
-    if [ "$installed_ksud_version" = "$next_version" ]; then
-        metadata_bridge=true
-    else
-        metadata_bridge=false
-    fi
     printf "source_sha=%s\narchive_sha256=%s\n" "$expected_source_sha" "$expected_archive_sha" > "$txn/source.receipt"
     chmod 600 "$txn/source.receipt"
     module_layout=$(classify_ksu_module_layout) || exit 1
@@ -831,7 +825,7 @@ deploy)
     esac
     touch "$txn/snapshot.ready"
     set_phase SNAPSHOTS_READY
-    if [ "$metadata_bridge" = true ]; then prepare_ksu_metadata || exit 1; fi
+    prepare_ksu_metadata || exit 1
     if [ -e "$pending" ]; then rm -rf "$pending"; fi
     ksud_binary=$(command -v ksud) || exit 1
     [ -x "$ksud_binary" ] || exit 1
@@ -846,17 +840,15 @@ deploy)
             FIRST_INSTALL_EMPTY_LAYOUT|FIRST_INSTALL_EXISTING_PARENTS) validate_first_install_parents || exit 1 ;;
         esac
     fi
-    if [ "$metadata_bridge" = true ]; then
-        reinject_ksu_metadata || exit 1
-        [ "${RKA_FAKE_FAULT:-}" != after-metadata ] || exit 1
-    fi
+    reinject_ksu_metadata || exit 1
+    [ "${RKA_FAKE_FAULT:-}" != after-metadata ] || exit 1
     [ "${RKA_FAKE_FAULT:-}" != after-install ] || exit 1
     if ! validate_installed_module_contract; then
         printf '%s\n' RKA_INSTALLED_MODE_CONTRACT >&2
         exit 1
     fi
     (cd "$pending" && sha256sum -c META-INF/rka-artifacts.sha256) > "$txn/staged-manifest.verify" 2>&1
-    if [ "$metadata_bridge" = true ]; then discard_ksu_metadata || exit 1; fi
+    discard_ksu_metadata || exit 1
     policy="$pending/sepolicy.rule"
     probe_manifest="$pending/sepolicy.probes"
     : > "$txn/sepolicy.probes.validated"

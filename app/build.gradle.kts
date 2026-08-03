@@ -288,7 +288,11 @@ androidComponents {
                 val sourceModuleDir = rootProject.projectDir.resolve("module")
                 from(sourceModuleDir) {
                     include(
+                        "action.sh",
+                        "action_i18n.sh",
+                        "customize.sh",
                         "daemon",
+                        "keybox.xml",
                         "module.prop",
                         "rka-agent-pgp-public.gpg",
                         "rka-agent-pgp-verify",
@@ -302,13 +306,10 @@ androidComponents {
                         "sepolicy.probes",
                         "sepolicy.rule",
                         "service.sh",
+                        "target.txt",
                         "uninstall.sh",
                     )
                     exclude("module.prop")
-                }
-                from(sourceModuleDir) {
-                    include("rka-ksu-customize.sh")
-                    rename { "customize.sh" }
                 }
                 from(sourceModuleDir.resolve("webroot")) {
                     into("webroot")
@@ -371,7 +372,7 @@ androidComponents {
                             .filter(File::isFile)
                             .map { it.relativeTo(stageDirectory).invariantSeparatorsPath }
                             .filterNot { it.startsWith("META-INF/") }
-                            .filterNot { it == "customize.sh" }
+                            .filterNot { it in setOf("customize.sh", "keybox.xml", "target.txt") }
                             .sorted()
                             .toList()
                     artifactEntries.forEach { entry ->
@@ -406,7 +407,11 @@ androidComponents {
                         listOf(
                             "NOTICE",
                             "LICENSE",
+                            "module/action.sh",
+                            "module/action_i18n.sh",
+                            "module/customize.sh",
                             "module/daemon",
+                            "module/keybox.xml",
                             "module/module.prop",
                             "module/rka-agent-pgp-public.gpg",
                             "module/rka-agent-pgp-verify",
@@ -415,12 +420,12 @@ androidComponents {
                             "module/rka-profile.schema",
                             "module/rka-role.conf",
                             "module/rka-runtime.manifest",
-                            "module/rka-ksu-customize.sh",
                             "module/rka-sepolicy-probe.sh",
                             "module/rka-supervisor.sh",
                             "module/sepolicy.probes",
                             "module/sepolicy.rule",
                             "module/service.sh",
+                            "module/target.txt",
                             "module/uninstall.sh",
                         ) +
                             sourceModuleDir.resolve("webroot").walkTopDown().filter(File::isFile).map {
@@ -566,12 +571,10 @@ val verifyRkaModuleArchive by
         doLast {
             val forbiddenEntryFragments =
                 listOf(
-                    "action",
                     "companion",
                     "device-id",
                     "device_id",
                     "diag",
-                    "keybox",
                     "persistent_keys",
                     "probe",
                     "profiles/",
@@ -585,7 +588,10 @@ val verifyRkaModuleArchive by
                     "inject",
                     "libTEESimulator.so",
                     "libcertgen.so",
+                    "action.sh",
+                    "action_i18n.sh",
                     "customize.sh",
+                    "keybox.xml",
                     "rka-agent-pgp-public.gpg",
                     "rka-agent-pgp-verify",
                     "rka-sidecar",
@@ -600,6 +606,7 @@ val verifyRkaModuleArchive by
                     "sepolicy.rule",
                     "service.sh",
                     "supervisor",
+                    "target.txt",
                     "uninstall.sh",
                     "webroot/index.html",
                     "webroot/app.js",
@@ -654,11 +661,18 @@ val verifyRkaModuleArchive by
                     val sourceManifest = rootProject.projectDir.resolve("module/rka-runtime.manifest").readBytes()
                     val archiveManifest = zip.getInputStream(zip.getEntry("rka-runtime.manifest")).readBytes()
                     if (!archiveManifest.contentEquals(sourceManifest)) reject("MANIFEST_MISMATCH")
-                    val sourceCustomize =
-                        rootProject.projectDir.resolve("module/rka-ksu-customize.sh").readBytes()
-                    val archiveCustomize =
-                        zip.getInputStream(zip.getEntry("customize.sh")).readBytes()
-                    if (!archiveCustomize.contentEquals(sourceCustomize)) reject("FORBIDDEN_ENTRY")
+                    mapOf(
+                            "action.sh" to "module/action.sh",
+                            "action_i18n.sh" to "module/action_i18n.sh",
+                            "customize.sh" to "module/customize.sh",
+                            "keybox.xml" to "module/keybox.xml",
+                            "target.txt" to "module/target.txt",
+                        )
+                        .forEach { (archiveEntry, sourceEntry) ->
+                            val sourceBytes = rootProject.projectDir.resolve(sourceEntry).readBytes()
+                            val archiveBytes = zip.getInputStream(zip.getEntry(archiveEntry)).readBytes()
+                            if (!archiveBytes.contentEquals(sourceBytes)) reject("LEGACY_ASSET_MISMATCH")
+                        }
                     if (!names.containsAll(commonEntries)) reject("ENTRY_MISSING")
                     val variantEntry = if (archive.name.endsWith("-Release.zip")) "classes.dex" else "service.apk"
                     require(names.contains(variantEntry)) { "Archive $archive lacks $variantEntry." }

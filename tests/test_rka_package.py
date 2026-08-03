@@ -22,6 +22,29 @@ FIXED_EPOCH = "1785486225"
 
 
 class RkaPackageTest(unittest.TestCase):
+    def test_release_archive_preserves_the_legacy_module_surface(self) -> None:
+        release = self.current_archives()["Release"]
+        preserved_sources = {
+            "action.sh": REPOSITORY_ROOT / "module" / "action.sh",
+            "action_i18n.sh": REPOSITORY_ROOT / "module" / "action_i18n.sh",
+            "customize.sh": REPOSITORY_ROOT / "module" / "customize.sh",
+            "keybox.xml": REPOSITORY_ROOT / "module" / "keybox.xml",
+            "target.txt": REPOSITORY_ROOT / "module" / "target.txt",
+        }
+
+        with ZipFile(release) as archive:
+            for name, source in preserved_sources.items():
+                self.assertEqual(archive.read(name), source.read_bytes(), name)
+
+            installed = self.parse_hash_manifest(
+                archive.read("META-INF/rka-artifacts.sha256")
+            )
+            self.assertIn("action.sh", installed)
+            self.assertIn("action_i18n.sh", installed)
+            self.assertNotIn("customize.sh", installed)
+            self.assertNotIn("keybox.xml", installed)
+            self.assertNotIn("target.txt", installed)
+
     def test_ksu_next_policy_applies_without_rejected_legacy_targets(self) -> None:
         rules = [
             line
@@ -277,10 +300,7 @@ class RkaPackageTest(unittest.TestCase):
             "profile": ("profiles/active.conf", b"profile"),
             "trust": ("trust/transport.pem", b"trust"),
             "device_identity": ("device-id.txt", b"identity"),
-            "keybox": ("keybox.xml", b"keybox"),
             "persistent": ("persistent_keys/key", b"key"),
-            "action": ("action.sh", b"action"),
-            "customize": ("customize.sh", b"customize"),
             "diag": ("diag.sh", b"diag"),
             "probe": ("probe-service.sh", b"probe"),
             "companion": ("companion.apk", b"companion"),
@@ -292,6 +312,21 @@ class RkaPackageTest(unittest.TestCase):
                 archive = temporary_root / f"{name}-Release.zip"
                 self.copy_archive(release, archive, {entry: payload})
                 self.assert_rejected(archive, "FORBIDDEN_ENTRY", name)
+
+            for entry in (
+                "action.sh",
+                "action_i18n.sh",
+                "customize.sh",
+                "keybox.xml",
+                "target.txt",
+            ):
+                archive = temporary_root / f"legacy-{entry}-Release.zip"
+                self.copy_archive(release, archive, {entry: b"tampered\n"})
+                self.assert_rejected(
+                    archive,
+                    "LEGACY_ASSET_MISMATCH",
+                    entry,
+                )
 
             unexpected = temporary_root / "unexpected-Release.zip"
             self.copy_archive(release, unexpected, {"unexpected.txt": b"unexpected"})
@@ -407,12 +442,13 @@ class RkaPackageTest(unittest.TestCase):
                 expected_mode = 0o755 if info.filename in expected_executables else 0o644
                 self.assertEqual(info.external_attr >> 16 & 0o777, expected_mode, info.filename)
             hashes = self.parse_hash_manifest(archive.read("META-INF/rka-artifacts.sha256"))
+            installer_only_entries = {"customize.sh", "keybox.xml", "target.txt"}
             installed_entries = {
                 info.filename
                 for info in archive.infolist()
                 if not info.is_dir()
                 and not info.filename.startswith("META-INF/")
-                and info.filename != "customize.sh"
+                and info.filename not in installer_only_entries
             }
             self.assertEqual(set(hashes), installed_entries)
             for name, expected_hash in hashes.items():

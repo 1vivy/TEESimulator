@@ -6,5 +6,5 @@ direct_identity=rka-sidecar:direct-identity
 direct_probe=rka-sidecar:direct-probe
 activation=staged-by-installer
 runtime_state=external-root-only
-archive_entries=classes.dex,customize.sh,daemon,inject,libTEESimulator.so,libcertgen.so,licenses/LICENSE,licenses/NOTICE,module.prop,rka-agent-pgp-public.gpg,rka-agent-pgp-verify,rka-control.sh,rka-paths.sh,rka-profile.schema,rka-role.conf,rka-runtime.manifest,rka-sepolicy-probe.sh,rka-sidecar,rka-supervisor.sh,sepolicy.probes,sepolicy.rule,service.sh,supervisor,uninstall.sh
+archive_entries=action.sh,action_i18n.sh,classes.dex,customize.sh,daemon,inject,keybox.xml,libTEESimulator.so,libcertgen.so,licenses/LICENSE,licenses/NOTICE,module.prop,rka-agent-pgp-public.gpg,rka-agent-pgp-verify,rka-control.sh,rka-paths.sh,rka-profile.schema,rka-role.conf,rka-runtime.manifest,rka-sepolicy-probe.sh,rka-sidecar,rka-supervisor.sh,sepolicy.probes,sepolicy.rule,service.sh,supervisor,target.txt,uninstall.sh
 archive_executables=daemon,inject,rka-agent-pgp-verify,rka-control.sh,rka-paths.sh,rka-sepolicy-probe.sh,rka-sidecar,rka-supervisor.sh,service.sh,supervisor,uninstall.sh

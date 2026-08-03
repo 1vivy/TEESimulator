@@ -38,7 +38,7 @@ else
 fi
 ui_print ""
 
-# --- Helper to install files ---
+# --- Helpers to install files ---
 install_file() {
   if ! unzip -qqjo "$ZIPFILE" "$1" -d "$2"; then
     abort "! Failed to extract $1"
@@ -46,37 +46,73 @@ install_file() {
   ui_print "- Extracted $1"
 }
 
-# --- Installation ---
-ui_print "- Extracting module files"
-for file in customize.sh module.prop service.sh sepolicy.rule daemon action.sh action_i18n.sh uninstall.sh rka-supervisor.sh rka-sidecar; do
-  install_file "$file" "$MODPATH"
-done
-chmod 755 "$MODPATH/rka-supervisor.sh"
-chmod 755 "$MODPATH/rka-sidecar"
+install_module_entry() {
+  if ! unzip -qqo "$ZIPFILE" "$1" -d "$MODPATH"; then
+    abort "! Failed to extract module entry $1"
+  fi
+}
 
-# Handle service.apk or classes.dex
-if unzip -l "$ZIPFILE" | grep -q "service.apk"; then
-  install_file "service.apk" "$MODPATH"
-elif unzip -l "$ZIPFILE" | grep -q "classes.dex"; then
-  install_file "classes.dex" "$MODPATH"
+# --- Deterministic module installation ---
+# Install exactly the files authenticated by the package manifest. This keeps the
+# installed tree identical across KernelSU versions that handle META-INF differently.
+ARTIFACT_MANIFEST="$TMPDIR/rka-artifacts.sha256"
+SOURCE_MANIFEST="$TMPDIR/rka-source.sha256"
+unzip -p "$ZIPFILE" META-INF/rka-artifacts.sha256 > "$ARTIFACT_MANIFEST" || \
+  abort "! Failed to extract the artifact manifest"
+unzip -p "$ZIPFILE" META-INF/rka-source.sha256 > "$SOURCE_MANIFEST" || \
+  abort "! Failed to extract the source manifest"
+[ -s "$ARTIFACT_MANIFEST" ] || abort "! Empty artifact manifest"
+[ -s "$SOURCE_MANIFEST" ] || abort "! Empty source manifest"
+
+ui_print "- Extracting authenticated module files"
+artifact_count=0
+while IFS= read -r artifact_line || [ -n "$artifact_line" ]; do
+  artifact_digest=${artifact_line%%"  "*}
+  artifact_path=${artifact_line#*"  "}
+  [ "$artifact_digest" != "$artifact_line" ] || abort "! Invalid artifact manifest line"
+  case "$artifact_digest" in
+    *[!0-9a-f]*|"") abort "! Invalid artifact digest" ;;
+  esac
+  [ "$(printf %s "$artifact_digest" | wc -c)" -eq 64 ] || \
+    abort "! Invalid artifact digest length"
+  case "$artifact_path" in
+    ""|/*|*/|*//*|*\\*|*[!A-Za-z0-9._/-]*) abort "! Invalid artifact path" ;;
+  esac
+  artifact_remaining=$artifact_path
+  while [ -n "$artifact_remaining" ]; do
+    artifact_component=${artifact_remaining%%/*}
+    case "$artifact_component" in
+      ""|.|..) abort "! Invalid artifact path component" ;;
+    esac
+    case "$artifact_remaining" in
+      */*) artifact_remaining=${artifact_remaining#*/} ;;
+      *) artifact_remaining= ;;
+    esac
+  done
+  artifact_count=$((artifact_count + 1))
+  [ "$artifact_count" -le 256 ] || abort "! Too many artifact entries"
+  install_module_entry "$artifact_path"
+done < "$ARTIFACT_MANIFEST"
+[ "$artifact_count" -gt 0 ] || abort "! Empty artifact manifest"
+
+if [ -f "$MODPATH/classes.dex" ] && [ ! -e "$MODPATH/service.apk" ]; then
+  :
+elif [ -f "$MODPATH/service.apk" ] && [ ! -e "$MODPATH/classes.dex" ]; then
+  :
 else
-  abort "! Neither service.apk nor classes.dex found"
+  abort "! Expected exactly one of service.apk or classes.dex"
 fi
 
-chmod 755 "$MODPATH/daemon"
-ui_print ""
+(cd "$MODPATH" && sha256sum -c "$ARTIFACT_MANIFEST") >/dev/null || \
+  abort "! Installed module manifest verification failed"
 
-ui_print "- Extracting $ARCH libraries"
-install_file "lib/$ABI_DIR/libTEESimulator.so" "$MODPATH"
-install_file "lib/$ABI_DIR/libinject.so" "$MODPATH"
-install_file "lib/$ABI_DIR/libsupervisor.so" "$MODPATH"
-install_file "lib/$ABI_DIR/libcertgen.so" "$MODPATH"
+mkdir -p "$MODPATH/META-INF" || abort "! Failed to create module metadata"
+cp "$ARTIFACT_MANIFEST" "$MODPATH/META-INF/rka-artifacts.sha256" || \
+  abort "! Failed to install the artifact manifest"
+cp "$SOURCE_MANIFEST" "$MODPATH/META-INF/rka-source.sha256" || \
+  abort "! Failed to install the source manifest"
+rm -f "$ARTIFACT_MANIFEST" "$SOURCE_MANIFEST"
 ui_print ""
-
-mv "$MODPATH/libinject.so" "$MODPATH/inject"
-mv "$MODPATH/libsupervisor.so" "$MODPATH/supervisor"
-chmod 755 "$MODPATH/inject"
-chmod 755 "$MODPATH/supervisor"
 
 # Debug builds carry diag.sh (the diagnostic plane); release builds do not. Extract it when
 # present; otherwise sweep any external-storage diagnostics a prior debug install left behind,
@@ -108,6 +144,10 @@ if [ ! -f "$CONFIG_DIR/target.txt" ]; then
   install_file "target.txt" "$CONFIG_DIR"
 fi
 
+# Some KernelSU releases expand the complete zip before invoking customize.sh.
+# Configuration seeds belong in CONFIG_DIR, never in the mounted module tree.
+rm -f "$MODPATH/keybox.xml" "$MODPATH/target.txt"
+
 if [ ! -f "$CONFIG_DIR/security_patch.txt" ]; then
   ui_print "- Adding default security patch config (mirror device props)"
   printf '%s\n' \
@@ -125,3 +165,28 @@ if [ ! -f "$CONFIG_DIR/hbk" ]; then
   ui_print "- Generating device-unique hardware-bound key seed"
   head -c 32 /dev/random > "$CONFIG_DIR/hbk"
 fi
+
+set_perm_recursive "$MODPATH" 0 0 0755 0644 || abort "! Failed to assign module permissions"
+
+for file in \
+    daemon \
+    inject \
+    rka-agent-pgp-verify \
+    rka-control.sh \
+    rka-paths.sh \
+    rka-sepolicy-probe.sh \
+    rka-sidecar \
+    rka-supervisor.sh \
+    service.sh \
+    supervisor \
+    uninstall.sh; do
+  [ -f "$MODPATH/$file" ] && [ ! -L "$MODPATH/$file" ] || \
+    abort "! Invalid module executable"
+  set_perm "$MODPATH/$file" 0 0 0755 || abort "! Failed to assign executable permission"
+done
+
+set_perm "$MODPATH/META-INF" 0 0 0755 || abort "! Failed to assign metadata permission"
+set_perm "$MODPATH/META-INF/rka-artifacts.sha256" 0 0 0644 || \
+  abort "! Failed to assign artifact manifest permission"
+set_perm "$MODPATH/META-INF/rka-source.sha256" 0 0 0644 || \
+  abort "! Failed to assign source manifest permission"

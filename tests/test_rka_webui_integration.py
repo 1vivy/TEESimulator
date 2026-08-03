@@ -148,6 +148,21 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
                 "esac\n",
                 encoding="ascii",
             )
+            rkpd_preferences = base / "com.android.rkpdapp.utils.preferences.xml"
+            rkpd_preferences.write_text(
+                '<?xml version="1.0" encoding="utf-8" standalone="yes" ?>\n'
+                "<map>\n"
+                '    <int name="settings_id" value="4242" />\n'
+                "</map>\n",
+                encoding="ascii",
+            )
+            pm = commands / "pm"
+            pm.write_text(
+                "#!/bin/sh\n"
+                '[ "$*" = "list packages --show-versioncode com.android.rkpdapp" ] || exit 2\n'
+                "printf '%s\\n' 'package:com.android.rkpdapp versionCode:42'\n",
+                encoding="ascii",
+            )
             sidecar = commands / "rka-sidecar"
             sidecar.write_text(
                 "#!/bin/sh\n"
@@ -156,8 +171,14 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
                 encoding="ascii",
             )
             getprop.chmod(0o700)
+            pm.chmod(0o700)
             sidecar.chmod(0o700)
-            environment = {"RKA_GETPROP": str(getprop), "RKA_SIDECAR": str(sidecar)}
+            environment = {
+                "RKA_GETPROP": str(getprop),
+                "RKA_PM": str(pm),
+                "RKA_RKPD_PREFERENCES": str(rkpd_preferences),
+                "RKA_SIDECAR": str(sidecar),
+            }
             broker_socket = state / "run" / "sockets" / "broker.sock"
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
                 listener.bind(str(broker_socket))
@@ -185,6 +206,103 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
         self.assertEqual(values["confirmation_action"], "provision-rkp")
         self.assertEqual(applied.returncode, 0, applied.stdout)
         self.assertIn("rkp_provisioning=PROVISIONED", applied.stdout)
+
+    def test_candidate_lease_renewal_is_confirmed_persisted_and_redacted(self) -> None:
+        with TemporaryDirectory() as directory:
+            base = Path(directory)
+            root, state = base / "module", base / "state"
+            self.assertEqual(self.control(root, state, "set-role", "CANDIDATE").returncode, 0)
+            self.assertEqual(self.control(root, state, "initialize").returncode, 0)
+
+            def private(path: Path, contents: str) -> None:
+                path.write_text(contents, encoding="ascii")
+                path.chmod(0o600)
+
+            private(
+                state / "profiles" / "direct.conf",
+                "version=2\n"
+                "role=CANDIDATE\n"
+                "profile_epoch=0\n"
+                "dial_mode=CANDIDATE_DIALS\n"
+                "dial_endpoint=100.64.0.2\n"
+                "listen_interface=192.168.1.2\n"
+                f"peer_spki_sha256={'ab' * 32}\n"
+                "transport=DIRECT\n",
+            )
+            private(state / "profiles" / "pair.request", "version=1\naction=PAIR_DIRECT\n")
+            private(state / "secrets" / "transport.key", "candidate-transport-key\n")
+            private(
+                state / "trust" / "transport-trust.pem",
+                "-----BEGIN CERTIFICATE-----\nQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\n"
+                "-----END CERTIFICATE-----\n",
+            )
+            private(state / "run" / "supervisor.state", "RUNNING\n")
+            boot_id = base / "boot-id"
+            boot_id.write_text("test-boot\n", encoding="ascii")
+            private(
+                state / "run" / "boot-continuity.state",
+                "version=1\nsentinel_id=00000000000000000000000000000000\n"
+                "boot_id=test-boot\nsample_ms=1\n",
+            )
+            sidecar = base / "rka-sidecar"
+            sidecar.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = synthetic-lease-renew ]; then\n"
+                "  mkdir -p \"$RKA_STATE_ROOT/synthetic-leases\"\n"
+                "  chmod 700 \"$RKA_STATE_ROOT/synthetic-leases\"\n"
+                "  printf lease > \"$RKA_STATE_ROOT/synthetic-leases/state.bin\"\n"
+                "  chmod 600 \"$RKA_STATE_ROOT/synthetic-leases/state.bin\"\n"
+                "  printf '%s\\n' 'synthetic_lease_issue_status=READY slot=CURRENT epoch=4 lease_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa record_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb certificate_count=5 valid_until_millis=1800000000000'\n"
+                "elif [ \"$1\" = synthetic-lease-status ]; then\n"
+                "  printf '%s\\n' 'synthetic_lease_status=ACTIVE' 'lease_epoch=4' 'lease_next=EMPTY' 'lease_valid_until_millis=1800000000000' 'lease_certificate_count=5'\n"
+                "else\n"
+                "  exit 2\n"
+                "fi\n",
+                encoding="ascii",
+            )
+            sidecar.chmod(0o700)
+            environment = {
+                "RKA_RECOVERY_BOOT_ID_PATH": str(boot_id),
+                "RKA_SIDECAR": str(sidecar),
+            }
+            broker_socket = state / "run" / "sockets" / "broker.sock"
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.bind(str(broker_socket))
+                broker_socket.chmod(0o600)
+                nonce = self.control(
+                    root, state, "webui-open", environment=environment,
+                ).stdout.split("=", 1)[1].strip()
+                prepared = self.control(
+                    root,
+                    state,
+                    "webui",
+                    "renew-synthetic-lease",
+                    nonce,
+                    environment=environment,
+                )
+                values = dict(
+                    line.split("=", 1) for line in prepared.stdout.splitlines() if "=" in line
+                )
+                applied = self.control(
+                    root,
+                    state,
+                    "webui",
+                    "renew-synthetic-lease",
+                    values["next_nonce"],
+                    values["confirmation_token"],
+                    environment=environment,
+                )
+
+        self.assertEqual(prepared.returncode, 0, prepared.stdout)
+        self.assertEqual(values["confirmation_action"], "renew-synthetic-lease")
+        self.assertIn("synthetic_lease=NOT_READY", prepared.stdout)
+        self.assertEqual(applied.returncode, 0, applied.stdout)
+        self.assertIn("synthetic_lease_renewal=READY", applied.stdout)
+        self.assertIn("synthetic_lease=ACTIVE", applied.stdout)
+        self.assertIn("lease_epoch=4", applied.stdout)
+        self.assertIn("lease_next=EMPTY", applied.stdout)
+        self.assertNotIn("lease_id=", applied.stdout)
+        self.assertNotIn("record_sha256=", applied.stdout)
 
     def test_root_rotation_overlap_and_signed_no_overlap(self) -> None:
         cases = (

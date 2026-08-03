@@ -33,6 +33,11 @@ function status(role = "DONOR", hostile = false) {
     "diagnostic=DIAGNOSTIC_ONLY",
     "runtime=RUNNING",
     "sentinel=LIVE",
+    `rkp_provisioning=${role === "DONOR" ? "PROVISIONED" : "NOT_APPLICABLE"}`,
+    `synthetic_lease=${role === "CANDIDATE" ? "ACTIVE" : "NOT_APPLICABLE"}`,
+    `lease_epoch=${role === "CANDIDATE" ? "0" : "NOT_APPLICABLE"}`,
+    "lease_next=EMPTY",
+    `lease_valid_until_millis=${role === "CANDIDATE" ? "1800000000000" : "NOT_APPLICABLE"}`,
     "quarantine_count=0",
   ].join("\n") + "\n";
 }
@@ -42,6 +47,8 @@ function bridgePreload() {
     let nonce = "1".padStart(32, "0");
     let counter = 1;
     let role = "DONOR";
+    let protectedAction = "";
+    const confirmationToken = "0123456789abcdef0123456789abcdef";
     const control = ${JSON.stringify(control)};
     const status = (hostile = false) => [
       "role=" + (hostile ? "<img src=x onerror=globalThis.__hostileExecuted=true>" : role),
@@ -53,6 +60,11 @@ function bridgePreload() {
       "diagnostic=DIAGNOSTIC_ONLY",
       "runtime=RUNNING",
       "sentinel=LIVE",
+      "rkp_provisioning=" + (role === "DONOR" ? "PROVISIONED" : "NOT_APPLICABLE"),
+      "synthetic_lease=" + (role === "CANDIDATE" ? "ACTIVE" : "NOT_APPLICABLE"),
+      "lease_epoch=" + (role === "CANDIDATE" ? "0" : "NOT_APPLICABLE"),
+      "lease_next=EMPTY",
+      "lease_valid_until_millis=" + (role === "CANDIDATE" ? "1800000000000" : "NOT_APPLICABLE"),
       "quarantine_count=0",
       ""
     ].join("\\n");
@@ -85,7 +97,7 @@ function bridgePreload() {
         return;
       }
       const parts = command.split(" ");
-      if (parts.length !== 4 || parts[0] !== control || parts[1] !== "webui" || !/^[a-z0-9-]+$/.test(parts[2]) || !/^[0-9a-f]{32}$/.test(parts[3])) {
+      if ((parts.length !== 4 && parts.length !== 5) || parts[0] !== control || parts[1] !== "webui" || !/^[a-z0-9-]+$/.test(parts[2]) || !/^[0-9a-f]{32}$/.test(parts[3])) {
         callback(callbackName, 1, "");
         return;
       }
@@ -100,6 +112,20 @@ function bridgePreload() {
         return;
       }
       globalThis.__bridge.mutationNonces.push(supplied);
+      if (action === "renew-synthetic-lease" && parts.length === 4) {
+        protectedAction = action;
+        counter += 1;
+        nonce = counter.toString(16).padStart(32, "0");
+        callback(callbackName, 0, "confirmation_action=" + action + "\\nconfirmation_token=" + confirmationToken + "\\n" + status() + "next_nonce=" + nonce + "\\n");
+        return;
+      }
+      if (parts.length === 5) {
+        if (action !== protectedAction || parts[4] !== confirmationToken) {
+          callback(callbackName, 1, "");
+          return;
+        }
+        protectedAction = "";
+      }
       if (action === "role-candidate") role = "CANDIDATE";
       if (action === "role-donor") role = "DONOR";
       counter += 1;
@@ -237,6 +263,30 @@ async function main() {
         await screenshot(connection, context, 1280, 1500, `${evidenceDirectory}/browser-1280.png`);
       }
     }
+    await screenshot(connection, context, 375, 2300, `${evidenceDirectory}/visual-375.png`);
+    await screenshot(connection, context, 768, 1700, `${evidenceDirectory}/visual-768.png`);
+    await screenshot(connection, context, 1280, 1500, `${evidenceDirectory}/visual-1280.png`);
+    const renewalRequested = await click(connection, context, "renew-synthetic-lease");
+    if (renewalRequested.commandState !== "Confirmation required") throw new Error("renewal confirmation was not requested");
+    const renewalAwaiting = JSON.parse(await evaluate(connection, context, `JSON.stringify({
+      open: document.querySelector("#confirmation-dialog").open,
+      state: document.querySelector("#confirmation-state").textContent,
+      token: document.querySelector("#confirmation-token").textContent
+    })`));
+    if (!renewalAwaiting.open || renewalAwaiting.state !== "Awaiting one-time token") throw new Error("renewal confirmation was not visible");
+    await screenshot(connection, context, 375, 2300, `${evidenceDirectory}/renewal-confirmation.png`);
+    const renewalAccepted = JSON.parse(await evaluate(connection, context, `(async () => {
+      document.querySelector("#confirmation-input").value = document.querySelector("#confirmation-token").textContent;
+      document.querySelector("#confirmation-submit").click();
+      for (let index = 0; index < 8; index += 1) await Promise.resolve();
+      return JSON.stringify({
+        state: document.querySelector("#confirmation-state").textContent,
+        token: document.querySelector("#confirmation-token").textContent,
+        lease: [...document.querySelectorAll("#rka-status div")].find((box) => box.querySelector("dt").textContent === "synthetic lease")?.querySelector("dd").textContent
+      });
+    })()`));
+    if (renewalAccepted.state !== "Protected action accepted" || renewalAccepted.token !== "" || renewalAccepted.lease !== "Active") throw new Error("renewal confirmation did not settle as active");
+    await screenshot(connection, context, 375, 2300, `${evidenceDirectory}/renewal-accepted.png`);
     await evaluate(connection, context, "globalThis.__bridge.failNext = true");
     const failure = await click(connection, context, "status");
     if (failure.commandState !== "Fixed control request failed") throw new Error("command failure was not visible");
@@ -270,7 +320,7 @@ async function main() {
       return JSON.stringify({ disabled: button.disabled, commandState: document.querySelector("#command-state").textContent });
     })()`));
     if (settled.disabled || settled.commandState !== "Status refreshed") throw new Error("button did not settle after the pending bridge request");
-    await writeFile(`${evidenceDirectory}/browser-action-log.json`, JSON.stringify({ bridge, observed, escaping, failure, malformedState, busy, settled }, null, 2) + "\n");
+    await writeFile(`${evidenceDirectory}/browser-action-log.json`, JSON.stringify({ bridge, observed, escaping, renewalRequested, renewalAwaiting, renewalAccepted, failure, malformedState, busy, settled }, null, 2) + "\n");
   } finally {
     if (connection !== undefined && context !== undefined) {
       try { await connection.send("browsingContext.close", { context }); } catch {}

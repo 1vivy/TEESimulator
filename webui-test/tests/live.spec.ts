@@ -87,6 +87,105 @@ test("live fixed controls expose stable accessible state", async ({ page }) => {
   await expect(page.getByLabel("rka-start")).toBeVisible();
   await expect(page.getByLabel("rka-stop")).toBeVisible();
   await expect(provision).toBeDisabled();
+  const renewal = page.getByRole("button", { name: "Issue / renew candidate lease" });
+  await page.route("/api/exec", async (route) => {
+    await route.fulfill({
+      body: JSON.stringify({
+        errno: 0,
+        stdout: [
+          "role=CANDIDATE",
+          "phone_role=PHONE_B_CANDIDATE",
+          "profile_epoch=0",
+          "direct_profile=DIRECT_NETWORK",
+          "direct_readiness=READY",
+          "pairing=PAIRED",
+          "diagnostic=DIAGNOSTIC_ONLY",
+          "runtime=RUNNING",
+          "sentinel=LIVE",
+          "rkp_provisioning=NOT_APPLICABLE",
+          "synthetic_lease=NOT_READY",
+          "lease_epoch=NOT_APPLICABLE",
+          "lease_next=EMPTY",
+          "lease_valid_until_millis=NOT_APPLICABLE",
+          "quarantine_count=0",
+        ].join("\n"),
+      }),
+      contentType: "application/json",
+      status: 200,
+    });
+  }, { times: 1 });
+  await page.getByRole("button", { name: "Refresh status" }).click();
+  await expect(renewal).toBeEnabled();
+
+  const renewalToken = "0123456789abcdef0123456789abcdef";
+  await page.route("/api/exec", async (route) => {
+    await route.fulfill({
+      body: JSON.stringify({
+        errno: 0,
+        stdout: [
+          "confirmation_action=renew-synthetic-lease",
+          `confirmation_token=${renewalToken}`,
+          "role=CANDIDATE",
+          "phone_role=PHONE_B_CANDIDATE",
+          "profile_epoch=0",
+          "direct_profile=DIRECT_NETWORK",
+          "direct_readiness=READY",
+          "pairing=PAIRED",
+          "diagnostic=DIAGNOSTIC_ONLY",
+          "runtime=RUNNING",
+          "sentinel=LIVE",
+          "rkp_provisioning=NOT_APPLICABLE",
+          "synthetic_lease=NOT_READY",
+          "lease_epoch=NOT_APPLICABLE",
+          "lease_next=EMPTY",
+          "lease_valid_until_millis=NOT_APPLICABLE",
+          "quarantine_count=0",
+          "next_nonce=11111111111111111111111111111111",
+        ].join("\n"),
+      }),
+      contentType: "application/json",
+      status: 200,
+    });
+  }, { times: 1 });
+  await renewal.click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.locator("#confirmation-state")).toHaveText("Awaiting one-time token");
+  await page.screenshot({ path: `${evidence}/task-26-renew-awaiting.png` });
+  await page.locator("#confirmation-input").fill(renewalToken);
+  await page.route("/api/exec", async (route) => {
+    await route.fulfill({
+      body: JSON.stringify({
+        errno: 0,
+        stdout: [
+          "synthetic_lease_renewal=READY",
+          "role=CANDIDATE",
+          "phone_role=PHONE_B_CANDIDATE",
+          "profile_epoch=0",
+          "direct_profile=DIRECT_NETWORK",
+          "direct_readiness=READY",
+          "pairing=PAIRED",
+          "diagnostic=DIAGNOSTIC_ONLY",
+          "runtime=RUNNING",
+          "sentinel=LIVE",
+          "rkp_provisioning=NOT_APPLICABLE",
+          "synthetic_lease=ACTIVE",
+          "lease_epoch=0",
+          "lease_next=EMPTY",
+          "lease_valid_until_millis=1800000000000",
+          "quarantine_count=0",
+          "next_nonce=22222222222222222222222222222222",
+        ].join("\n"),
+      }),
+      contentType: "application/json",
+      status: 200,
+    });
+  }, { times: 1 });
+  await page.getByRole("button", { name: "Confirm action" }).click();
+  await expect(page.locator("#confirmation-state")).toHaveText("Protected action accepted");
+  await expect(page.getByText("Active", { exact: true })).toBeVisible();
+  await expect(page.getByText("1,800,000,000,000", { exact: true })).toHaveCount(0);
+  await page.screenshot({ path: `${evidence}/task-26-renew-accepted.png` });
+  await page.getByRole("button", { name: "Close" }).click();
   const profileTarget = await page.locator("#profile-file").boundingBox();
   if (profileTarget === null || profileTarget.height < 44) {
     throw new Error("profile file target is smaller than 44px");

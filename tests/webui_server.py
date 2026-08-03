@@ -113,6 +113,18 @@ def initialize(root: Path) -> tuple[Path, Path, dict[str, str]]:
         "  printf '%s\\n' 'role=donor status=READY' 'RESULT=PROVISIONED'\n"
         "  exit 0\n"
         "fi\n"
+        "if [ \"$1\" = synthetic-lease-renew ]; then\n"
+        "  mkdir -p \"$RKA_STATE_ROOT/synthetic-leases\"\n"
+        "  chmod 700 \"$RKA_STATE_ROOT/synthetic-leases\"\n"
+        "  printf synthetic-lease-test > \"$RKA_STATE_ROOT/synthetic-leases/state.bin\"\n"
+        "  chmod 600 \"$RKA_STATE_ROOT/synthetic-leases/state.bin\"\n"
+        "  printf '%s\\n' 'synthetic_lease_issue_status=READY slot=CURRENT epoch=0 lease_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa record_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb certificate_count=5 valid_until_millis=1800000000000'\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$1\" = synthetic-lease-status ]; then\n"
+        "  printf '%s\\n' 'synthetic_lease_status=ACTIVE' 'lease_epoch=0' 'lease_next=EMPTY' 'lease_valid_until_millis=1800000000000' 'lease_certificate_count=5'\n"
+        "  exit 0\n"
+        "fi\n"
         "[ \"$1\" = --role ] || exit 2\n"
         "profile_sha=$(sha256sum \"$RKA_PROFILE_PATH\" | awk '{print $1}') || exit 1\n"
         "pin=$(sed -n '7s/^peer_spki_sha256=//p' \"$RKA_PROFILE_PATH\") || exit 1\n"
@@ -135,10 +147,30 @@ def initialize(root: Path) -> tuple[Path, Path, dict[str, str]]:
         encoding="utf-8",
     )
     getprop.chmod(0o700)
+    rkpd_preferences = root / "com.android.rkpdapp.utils.preferences.xml"
+    rkpd_preferences.write_text(
+        '<?xml version="1.0" encoding="utf-8" standalone="yes" ?>\n'
+        "<map>\n"
+        '    <int name="settings_id" value="4242" />\n'
+        "</map>\n",
+        encoding="ascii",
+    )
+    pm = root / "fake-pm.sh"
+    pm.write_text(
+        "#!/bin/sh\n"
+        '[ "$*" = "list packages --show-versioncode com.android.rkpdapp" ] || exit 2\n'
+        "printf '%s\\n' 'package:com.android.rkpdapp versionCode:42'\n",
+        encoding="ascii",
+    )
+    pm.chmod(0o700)
     return module_root, state_root, {
         "RKA_DAEMON": str(daemon),
         "RKA_GETPROP": str(getprop),
+        "RKA_PM": str(pm),
+        "RKA_RKPD_PREFERENCES": str(rkpd_preferences),
         "RKA_SIDECAR": str(sidecar),
+        "RKA_SOCKET_DIRECTORY_CONTEXT": "?",
+        "RKA_SOCKET_CONTEXT": "?",
         "RKA_STABLE_SECONDS": "60",
     }
 

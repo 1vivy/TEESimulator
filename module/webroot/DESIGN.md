@@ -37,7 +37,7 @@ The 4px layout scale uses 8px, 12px, 16px, 24px, and 32px steps. Component measu
 - **Structure**: native modal dialog, one-time token output, labelled input, fixed confirm button.
 - **States**: closed, awaiting exact token, mismatch, busy, accepted, refused.
 - **Accessibility**: native focus trapping, explicit heading and label, live operation result.
-- **Protected operations**: subsystem recovery, trust rotation, cleanup, and donor RKP provisioning use this confirmation cycle.
+- **Protected operations**: subsystem recovery, trust rotation, cleanup, donor RKP provisioning, and candidate synthetic-lease renewal use this confirmation cycle.
 
 ## 6. Motion & Interaction
 

@@ -11,6 +11,7 @@
     "pair-direct": "pair-direct",
     "rotate-pairing": "rotate-pairing",
     "provision-rkp": "provision-rkp",
+    "renew-synthetic-lease": "renew-synthetic-lease",
     "rotate-attestation-roots": "rotate-attestation-roots",
     start: "start",
     stop: "stop",
@@ -32,14 +33,20 @@
     "runtime",
     "sentinel",
     "rkp_provisioning",
+    "synthetic_lease",
+    "lease_epoch",
+    "lease_next",
+    "lease_valid_until_millis",
     "quarantine_count",
   ]);
   const labels = Object.freeze({
     CANDIDATE: "Candidate",
+    ACTIVE: "Active",
     DISABLED: "Disabled",
     DIAGNOSTIC_ONLY: "Diagnostic only",
     DIRECT_NETWORK: "Direct network",
     DONOR: "Donor",
+    EMPTY: "Empty",
     FAILED_CRASH_CAP: "Stopped · crash limit reached",
     INERT: "Inert",
     LIVE: "Live",
@@ -74,7 +81,11 @@
   const input = document.querySelector("#confirmation-input");
   const submit = document.querySelector("#confirmation-submit");
   const provision = document.querySelector('button[data-action="provision-rkp"]');
+  const renew = document.querySelector('button[data-action="renew-synthetic-lease"]');
   let currentRole = "";
+  let directReadiness = "";
+  let syntheticLease = "";
+  let leaseNext = "";
 
   function parse(stdout) {
     const values = new Map();
@@ -86,19 +97,44 @@
   }
 
   function readable(value) {
+    if (/^STAGED_[0-9]+$/.test(value)) return `Staged · epoch ${value.slice(7)}`;
     return labels[value] ?? value;
+  }
+
+  function readableStatus(name, value) {
+    if (name !== "lease_valid_until_millis" || !/^[0-9]{1,16}$/.test(value)) {
+      return readable(value);
+    }
+    const millis = Number(value);
+    const date = new Date(millis);
+    return Number.isSafeInteger(millis) && !Number.isNaN(date.valueOf())
+      ? date.toLocaleString()
+      : "Unavailable";
+  }
+
+  function updateRoleControls() {
+    provision.disabled = currentRole !== "DONOR";
+    renew.disabled = !(
+      currentRole === "CANDIDATE" &&
+      directReadiness === "READY" &&
+      (syntheticLease === "NOT_READY" || syntheticLease === "ACTIVE") &&
+      leaseNext === "EMPTY"
+    );
   }
 
   function render(values) {
     currentRole = values.get("role") ?? "";
-    provision.disabled = currentRole !== "DONOR";
+    directReadiness = values.get("direct_readiness") ?? "";
+    syntheticLease = values.get("synthetic_lease") ?? "";
+    leaseNext = values.get("lease_next") ?? "";
+    updateRoleControls();
     status.replaceChildren();
     for (const name of displayed) {
       const box = document.createElement("div");
       const dt = document.createElement("dt");
       const dd = document.createElement("dd");
       dt.textContent = name.replaceAll("_", " ");
-      dd.textContent = readable(values.get(name) ?? "UNAVAILABLE");
+      dd.textContent = readableStatus(name, values.get(name) ?? "UNAVAILABLE");
       if (name === "role") dd.setAttribute("aria-label", "rka-role-value");
       if (name === "direct_readiness") dd.setAttribute("aria-label", "rka-connection-value");
       box.append(dt, dd);
@@ -190,7 +226,8 @@
     } catch (error) {
       operation.textContent = error instanceof Error ? error.message : "WebUI request failed";
     } finally {
-      button.disabled = button === provision && currentRole !== "DONOR";
+      button.disabled = false;
+      updateRoleControls();
     }
   }
 
@@ -212,10 +249,14 @@
       try {
         await invoke(action, input.value);
         pending = "";
+        token.textContent = "";
+        input.value = "";
         submit.textContent = "Close";
         setConfirmationState("accepted", "Protected action accepted");
       } catch (error) {
         pending = "";
+        token.textContent = "";
+        input.value = "";
         submit.textContent = "Close";
         setConfirmationState("refused", "Protected action refused");
         operation.textContent = error instanceof Error ? error.message : "WebUI request failed";

@@ -89,6 +89,11 @@ class RkaWebUiTest(unittest.TestCase):
         os.chmod(path, 0o600)
 
     def write_live_transport_sources(self, state_root: Path) -> None:
+        role = next(
+            line.removeprefix("role=")
+            for line in (state_root / "profiles" / "active.conf").read_text(encoding="utf-8").splitlines()
+            if line.startswith("role=")
+        )
         self.write_private(
             state_root / "secrets" / "transport.key", "test-transport-key-material\n"
         )
@@ -98,11 +103,46 @@ class RkaWebUiTest(unittest.TestCase):
             "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\n"
             "-----END CERTIFICATE-----\n",
         )
+        self.write_private(
+            state_root / "trust" / "transport-identity.commit",
+            f"version=1\nspki_sha256={'cd' * 32}\n",
+        )
+        self.write_private(
+            state_root / "profiles" / "direct.conf",
+            "version=2\n"
+            f"role={role}\n"
+            "profile_epoch=0\n"
+            "dial_mode=DONOR_DIALS\n"
+            "dial_endpoint=100.64.0.2\n"
+            "listen_interface=192.168.1.2\n"
+            f"peer_spki_sha256={'ab' * 32}\n"
+            "transport=DIRECT\n",
+        )
 
     def write_fake_runtime(self, temporary_root: Path) -> Path:
         runtime = temporary_root / "fake-runtime.sh"
-        runtime.write_text("#!/bin/sh\nwhile :; do sleep 60; done\n", encoding="utf-8")
+        runtime.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = --role ]; then\n"
+            "  profile_sha=$(sha256sum \"$RKA_PROFILE_PATH\" | awk '{print $1}') || exit 1\n"
+            "  pin=$(sed -n '7s/^peer_spki_sha256=//p' \"$RKA_PROFILE_PATH\") || exit 1\n"
+            "  pin_sha=$(printf %s \"$pin\" | xxd -r -p | sha256sum | awk '{print $1}') || exit 1\n"
+            "  printf 'version=1\\nprofile_sha256=%s\\nprofile_epoch=%s\\npeer_pin_sha256=%s\\ndial_mode=DONOR_DIALS\\ntransport=DIRECT\\n' \"$profile_sha\" \"$RKA_EXPECTED_PROFILE_EPOCH\" \"$pin_sha\" > \"$RKA_PROFILE_RECEIPT_PATH\"\n"
+            "  chmod 600 \"$RKA_PROFILE_RECEIPT_PATH\"\n"
+            "fi\n"
+            "while :; do sleep 60; done\n",
+            encoding="utf-8",
+        )
         os.chmod(runtime, 0o700)
+        supervisor = temporary_root / "fake-supervisor.sh"
+        supervisor.write_text(
+            "#!/bin/sh\n"
+            '[ "$1" = --detach ] || exit 64\n'
+            "shift\n"
+            "RKA_INTERNAL_CHILD_LOOP=1 sh \"$@\" </dev/null >/dev/null 2>&1 &\n",
+            encoding="utf-8",
+        )
+        os.chmod(supervisor, 0o700)
         return runtime
 
     def test_status_derives_ready_pairing_from_production_sources_without_secret_or_path(self) -> None:
@@ -118,7 +158,10 @@ class RkaWebUiTest(unittest.TestCase):
             fake_runtime = self.write_fake_runtime(temporary_root)
             runtime_environment = {
                 "RKA_DAEMON": str(fake_runtime),
+                "RKA_NATIVE_SUPERVISOR": str(fake_runtime.with_name("fake-supervisor.sh")),
                 "RKA_SIDECAR": str(fake_runtime),
+                "RKA_SOCKET_DIRECTORY_CONTEXT": "?",
+                "RKA_SOCKET_CONTEXT": "?",
                 "RKA_STABLE_SECONDS": "60",
             }
             result, nonce = self.mutate(
@@ -231,7 +274,10 @@ class RkaWebUiTest(unittest.TestCase):
             fake_runtime = self.write_fake_runtime(temporary_root)
             runtime_environment = {
                 "RKA_DAEMON": str(fake_runtime),
+                "RKA_NATIVE_SUPERVISOR": str(fake_runtime.with_name("fake-supervisor.sh")),
                 "RKA_SIDECAR": str(fake_runtime),
+                "RKA_SOCKET_DIRECTORY_CONTEXT": "?",
+                "RKA_SOCKET_CONTEXT": "?",
                 "RKA_STABLE_SECONDS": "60",
             }
             start, nonce = self.mutate(

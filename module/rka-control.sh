@@ -638,6 +638,7 @@ webui_status() {
     webui_sentinel_status
     webui_status_state || return 1
     webui_rkp_provisioning_status || return 1
+    webui_synthetic_lease_status
     printf 'role=%s\n' "$webui_role"
     printf 'phone_role=%s\n' "$(webui_phone_role "$webui_role")"
     printf 'profile_epoch=%s\n' "$webui_profile_epoch"
@@ -648,6 +649,10 @@ webui_status() {
     printf 'runtime=%s\n' "$webui_runtime"
     printf 'sentinel=%s\n' "$webui_sentinel"
     printf 'rkp_provisioning=%s\n' "$webui_rkp_provisioning"
+    printf 'synthetic_lease=%s\n' "$webui_synthetic_lease"
+    printf 'lease_epoch=%s\n' "$webui_lease_epoch"
+    printf 'lease_next=%s\n' "$webui_lease_next"
+    printf 'lease_valid_until_millis=%s\n' "$webui_lease_valid_until_millis"
     printf 'quarantine_count=%s\n' "$(webui_quarantine_count)"
 }
 
@@ -665,6 +670,135 @@ status=PROVISIONED
 profile_epoch=$webui_profile_epoch
 key_count=1" ] || return 1
     webui_rkp_provisioning=PROVISIONED
+}
+
+webui_synthetic_lease_status() {
+    webui_synthetic_lease=NOT_APPLICABLE
+    webui_lease_epoch=NOT_APPLICABLE
+    webui_lease_next=EMPTY
+    webui_lease_valid_until_millis=NOT_APPLICABLE
+    [ "$webui_role" = CANDIDATE ] || return 0
+    webui_synthetic_lease=NOT_READY
+    webui_lease_state=$rka_state_root/synthetic-leases/state.bin
+    if [ ! -e "$webui_lease_state" ] && [ ! -L "$webui_lease_state" ]; then
+        return 0
+    fi
+    webui_lease_directory=${webui_lease_state%/*}
+    if ! rka_path_is_private_directory "$webui_lease_directory" ||
+        ! rka_private_file_is_valid "$webui_lease_state"; then
+        webui_synthetic_lease=UNAVAILABLE
+        return 0
+    fi
+    webui_lease_sidecar=${RKA_SIDECAR:-$rka_state_root/bin/rka-sidecar}
+    if [ ! -f "$webui_lease_sidecar" ] || [ -L "$webui_lease_sidecar" ] ||
+        [ ! -x "$webui_lease_sidecar" ] ||
+        [ "$(stat -c '%u:%g:%a' "$webui_lease_sidecar")" != "$(id -u):$(id -g):700" ]; then
+        webui_synthetic_lease=UNAVAILABLE
+        return 0
+    fi
+    webui_lease_output=$(
+        RKA_STATE_ROOT="$rka_state_root" \
+        RKA_PROFILE_PATH="$rka_state_root/profiles/direct.conf" \
+        RKA_EXPECTED_PROFILE_EPOCH="$webui_profile_epoch" \
+            "$webui_lease_sidecar" synthetic-lease-status 2>/dev/null
+    ) || {
+        webui_synthetic_lease=UNAVAILABLE
+        return 0
+    }
+    [ "$(printf '%s' "$webui_lease_output" | wc -c)" -le 256 ] || {
+        webui_synthetic_lease=UNAVAILABLE
+        return 0
+    }
+    webui_lease_status_value=
+    webui_lease_epoch_value=
+    webui_lease_next_value=
+    webui_lease_valid_value=
+    webui_lease_count_value=
+    webui_lease_lines=0
+    while IFS= read -r webui_lease_line || [ -n "$webui_lease_line" ]; do
+        webui_lease_lines=$((webui_lease_lines + 1))
+        case $webui_lease_line in
+            synthetic_lease_status=*)
+                [ -z "$webui_lease_status_value" ] || webui_lease_lines=99
+                webui_lease_status_value=${webui_lease_line#synthetic_lease_status=}
+                ;;
+            lease_epoch=*)
+                [ -z "$webui_lease_epoch_value" ] || webui_lease_lines=99
+                webui_lease_epoch_value=${webui_lease_line#lease_epoch=}
+                ;;
+            lease_next=*)
+                [ -z "$webui_lease_next_value" ] || webui_lease_lines=99
+                webui_lease_next_value=${webui_lease_line#lease_next=}
+                ;;
+            lease_valid_until_millis=*)
+                [ -z "$webui_lease_valid_value" ] || webui_lease_lines=99
+                webui_lease_valid_value=${webui_lease_line#lease_valid_until_millis=}
+                ;;
+            lease_certificate_count=*)
+                [ -z "$webui_lease_count_value" ] || webui_lease_lines=99
+                webui_lease_count_value=${webui_lease_line#lease_certificate_count=}
+                ;;
+            *) webui_lease_lines=99 ;;
+        esac
+    done <<EOF
+$webui_lease_output
+EOF
+    case $webui_lease_epoch_value in ''|*[!0-9]*) webui_lease_lines=99 ;; esac
+    case $webui_lease_valid_value in ''|*[!0-9]*) webui_lease_lines=99 ;; esac
+    case $webui_lease_count_value in ''|*[!0-9]*) webui_lease_lines=99 ;; esac
+    case $webui_lease_next_value in
+        EMPTY) ;;
+        STAGED_*)
+            webui_lease_next_epoch=${webui_lease_next_value#STAGED_}
+            case $webui_lease_next_epoch in ''|*[!0-9]*) webui_lease_lines=99 ;; esac
+            ;;
+        *) webui_lease_lines=99 ;;
+    esac
+    if [ "$webui_lease_lines" -ne 5 ] || [ "$webui_lease_status_value" != ACTIVE ] ||
+        [ "$webui_lease_count_value" -lt 2 ] || [ "$webui_lease_count_value" -gt 8 ]; then
+        webui_synthetic_lease=UNAVAILABLE
+        webui_lease_epoch=NOT_APPLICABLE
+        webui_lease_next=EMPTY
+        webui_lease_valid_until_millis=NOT_APPLICABLE
+        return 0
+    fi
+    webui_synthetic_lease=ACTIVE
+    webui_lease_epoch=$webui_lease_epoch_value
+    webui_lease_next=$webui_lease_next_value
+    webui_lease_valid_until_millis=$webui_lease_valid_value
+}
+
+synthetic_lease_renew_inputs() {
+    [ "$(read_role)" = CANDIDATE ] || return 1
+    rka_layout_is_valid && rka_profile_is_valid || return 1
+    webui_read_active_profile || return 1
+    [ "$webui_profile_role" = CANDIDATE ] || return 1
+    webui_runtime_state || return 1
+    [ "$webui_runtime" = RUNNING ] || return 1
+    webui_sentinel_status
+    webui_status_state || return 1
+    [ "$webui_direct_readiness" = READY ] || return 1
+    synthetic_lease_socket=$rka_state_root/run/sockets/broker.sock
+    [ -S "$synthetic_lease_socket" ] && [ ! -L "$synthetic_lease_socket" ] || return 1
+    [ "$(stat -c '%u:%g:%a' "$synthetic_lease_socket")" = "$(id -u):$(id -g):600" ] || return 1
+    synthetic_lease_sidecar=${RKA_SIDECAR:-$rka_state_root/bin/rka-sidecar}
+    [ -f "$synthetic_lease_sidecar" ] && [ ! -L "$synthetic_lease_sidecar" ] &&
+        [ -x "$synthetic_lease_sidecar" ] &&
+        [ "$(stat -c '%u:%g:%a' "$synthetic_lease_sidecar")" = "$(id -u):$(id -g):700" ] ||
+        return 1
+}
+
+synthetic_lease_renew() {
+    synthetic_lease_renew_inputs || return 1
+    synthetic_lease_output=$(
+        RKA_STATE_ROOT="$rka_state_root" \
+        RKA_PROFILE_PATH="$rka_state_root/profiles/direct.conf" \
+        RKA_EXPECTED_PROFILE_EPOCH="$webui_profile_epoch" \
+            "$synthetic_lease_sidecar" synthetic-lease-renew 2>/dev/null
+    ) || return 1
+    printf '%s\n' "$synthetic_lease_output" | grep -Eq \
+        '^synthetic_lease_issue_status=READY slot=CURRENT epoch=[0-9]+ lease_id=[0-9a-f]{64} record_sha256=[0-9a-f]{64} certificate_count=[2-8] valid_until_millis=[0-9]+$' || return 1
+    printf '%s\n' synthetic_lease_renewal=READY
 }
 
 webui_record_request() {
@@ -928,7 +1062,7 @@ profile_epoch=$webui_next_epoch
 
 webui_action_is_valid() {
     case $1 in
-        status|role-donor|role-candidate|profile-validate-donor|profile-validate-candidate|profile-apply-donor|profile-apply-candidate|pair-direct|rotate-pairing|provision-rkp|rotate-attestation-roots|start|stop|recover-keystore2|recover-rkpd|export-audit|export-evidence|cleanup|quarantine) return 0 ;;
+        status|role-donor|role-candidate|profile-validate-donor|profile-validate-candidate|profile-apply-donor|profile-apply-candidate|pair-direct|rotate-pairing|provision-rkp|renew-synthetic-lease|rotate-attestation-roots|start|stop|recover-keystore2|recover-rkpd|export-audit|export-evidence|cleanup|quarantine) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -958,7 +1092,7 @@ action=ROTATE_PAIRING
         profile-validate-candidate) webui_validate_profile CANDIDATE && printf '%s\n' profile_validation=VALID && webui_request_ok=true ;;
         profile-apply-donor) webui_apply_profile DONOR && printf '%s\n' profile_apply=VALIDATED && webui_request_ok=true ;;
         profile-apply-candidate) webui_apply_profile CANDIDATE && printf '%s\n' profile_apply=VALIDATED && webui_request_ok=true ;;
-        recover-keystore2|recover-rkpd|provision-rkp|cleanup|rotate-attestation-roots)
+        recover-keystore2|recover-rkpd|provision-rkp|renew-synthetic-lease|cleanup|rotate-attestation-roots)
             if [ -z "$webui_confirmation" ]; then
                 webui_confirmation_ready=true
                 case $webui_action in
@@ -968,6 +1102,9 @@ action=ROTATE_PAIRING
                         ;;
                     provision-rkp)
                         provision_rkp_inputs || webui_confirmation_ready=false
+                        ;;
+                    renew-synthetic-lease)
+                        synthetic_lease_renew_inputs || webui_confirmation_ready=false
                         ;;
                 esac
                 if [ "$webui_action" = rotate-attestation-roots ] &&
@@ -998,6 +1135,9 @@ action=ROTATE_PAIRING
                         provision_rkp &&
                             printf '%s\n' rkp_provisioning=PROVISIONED &&
                             webui_request_ok=true
+                        ;;
+                    renew-synthetic-lease)
+                        synthetic_lease_renew && webui_request_ok=true
                         ;;
                     cleanup) rka_wipe_runtime && webui_request_ok=true ;;
                     rotate-attestation-roots)

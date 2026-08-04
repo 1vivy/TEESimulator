@@ -370,7 +370,7 @@ esac'
 write_shim ip '
 case "$RKA_FAKE_SERIAL" in
   DONOR_A) endpoint=192.168.50.9; interface=wlan0 ;;
-  *) endpoint=100.88.0.2; interface=tun0 ;;
+  *) endpoint=192.168.50.10; interface=wlan0 ;;
 esac
 case "${RKA_FAKE_IP_MODE:-}" in
   donor-wlan-candidate-tun)
@@ -388,14 +388,14 @@ case "${RKA_FAKE_IP_MODE:-}" in
     fi
     ;;
   suffix) printf "7: %s@if8    inet %s/32 scope global %s\\n" "$interface" "$endpoint" "$interface" ;;
-  multiple) printf "7: tun0    inet %s/32 scope global tun0\\n8: tun1    inet 100.88.0.3/32 scope global tun1\\n" "$endpoint" ;;
-  special) printf "7: tun0    inet 127.0.0.1/32 scope global tun0\\n" ;;
-  unspecified) printf "7: tun0    inet 0.0.0.0/32 scope global tun0\\n" ;;
-  link-local) printf "7: tun0    inet 169.254.1.2/16 scope global tun0\\n" ;;
-  multicast) printf "7: tun0    inet 224.0.0.1/32 scope global tun0\\n" ;;
-  broadcast) printf "7: tun0    inet 255.255.255.255/32 scope global tun0\\n" ;;
-  whitespace) printf "7: tun0    inet %s /32 scope global tun0\\n" "$endpoint" ;;
-  malformed) printf "7: tun0    inet %s/32;touch /tmp/rka-network-pwn scope global tun0\\n" "$endpoint" ;;
+  multiple) printf "7: wlan0    inet %s/24 scope global wlan0\\n8: wlan1    inet 192.168.51.10/24 scope global wlan1\\n" "$endpoint" ;;
+  special) printf "7: wlan0    inet 127.0.0.1/32 scope global wlan0\\n" ;;
+  unspecified) printf "7: wlan0    inet 0.0.0.0/32 scope global wlan0\\n" ;;
+  link-local) printf "7: wlan0    inet 169.254.1.2/16 scope global wlan0\\n" ;;
+  multicast) printf "7: wlan0    inet 224.0.0.1/32 scope global wlan0\\n" ;;
+  broadcast) printf "7: wlan0    inet 255.255.255.255/32 scope global wlan0\\n" ;;
+  whitespace) printf "7: wlan0    inet %s /24 scope global wlan0\\n" "$endpoint" ;;
+  malformed) printf "7: wlan0    inet %s/24;touch /tmp/rka-network-pwn scope global wlan0\\n" "$endpoint" ;;
   *) printf "7: %s    inet %s/32 scope global %s\\n" "$interface" "$endpoint" "$interface" ;;
 esac'
 write_shim ping 'exit 0'

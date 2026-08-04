@@ -55,6 +55,17 @@ class NoRebootDeployCommandContractTest {
     }
 
     @Test
+    fun directAutoDiscoversBothEndsOnTheProvenWifiPath() {
+        val network = script.substringAfter("network)\n").substringBefore("    ;;\nidentity-public)")
+
+        assertTrue(network.contains("DONOR_DIALS:DONOR:SOURCE) interface_class='wlan|wifi'"))
+        assertTrue(
+            network.contains("DONOR_DIALS:CANDIDATE:TARGET) interface_class='wlan|wifi'")
+        )
+        assertFalse(network.contains("DONOR_DIALS:CANDIDATE:TARGET) interface_class='tun'"))
+    }
+
+    @Test
     fun snapshotsRestoreEachSourceSelinuxContextBeforeIntegrityChecks() {
         val snapshot =
             script.substringAfter("snapshot_tree() {\n").substringBefore("\n}\nset_phase()")

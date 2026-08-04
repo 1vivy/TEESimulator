@@ -708,7 +708,7 @@ network)
     network_purpose=${3-}
     case "$network_mode:$network_side:$network_purpose" in
         DONOR_DIALS:DONOR:SOURCE) interface_class='wlan|wifi' ;;
-        DONOR_DIALS:CANDIDATE:TARGET) interface_class='tun' ;;
+        DONOR_DIALS:CANDIDATE:TARGET) interface_class='wlan|wifi' ;;
         CANDIDATE_DIALS:*) interface_class='tailscale|wlan|wifi' ;;
         *) exit 2 ;;
     esac

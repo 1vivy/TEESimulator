@@ -82,17 +82,17 @@ internal enum class FixtureMutation {
     OFFLINE_DURING_CANDIDATE_VERIFY,
     HOSTILE_LOGCAT,
     FAIL_CANDIDATE_NETWORK,
-    DONOR_WLAN_CANDIDATE_TUN,
+    CANDIDATE_TUN_ONLY,
     NETWORK_SIDE_SWAP,
-    TUN_SUFFIX,
-    TUN_MULTIPLE,
-    TUN_SPECIAL,
-    TUN_UNSPECIFIED,
-    TUN_LINK_LOCAL,
-    TUN_MULTICAST,
-    TUN_BROADCAST,
-    TUN_WHITESPACE,
-    TUN_MALFORMED,
+    WIFI_SUFFIX,
+    WIFI_MULTIPLE,
+    WIFI_SPECIAL,
+    WIFI_UNSPECIFIED,
+    WIFI_LINK_LOCAL,
+    WIFI_MULTICAST,
+    WIFI_BROADCAST,
+    WIFI_WHITESPACE,
+    WIFI_MALFORMED,
     MISMATCH_CANDIDATE_PIN,
     ROLLBACK_BUSY_BIND_SAFE,
     ROLLBACK_BUSY_BIND_NESTED,
@@ -218,18 +218,18 @@ internal fun applyFixtureMutation(
         FixtureMutation.HOSTILE_LOGCAT -> environment["RKA_FAKE_HOSTILE_LOGCAT"] = "true"
         FixtureMutation.FAIL_CANDIDATE_NETWORK ->
             environment["RKA_FAKE_FAIL_NETWORK"] = "CANDIDATE_B"
-        FixtureMutation.DONOR_WLAN_CANDIDATE_TUN ->
+        FixtureMutation.CANDIDATE_TUN_ONLY ->
             environment["RKA_FAKE_IP_MODE"] = "donor-wlan-candidate-tun"
         FixtureMutation.NETWORK_SIDE_SWAP -> environment["RKA_FAKE_IP_MODE"] = "network-side-swap"
-        FixtureMutation.TUN_SUFFIX -> environment["RKA_FAKE_IP_MODE"] = "suffix"
-        FixtureMutation.TUN_MULTIPLE -> environment["RKA_FAKE_IP_MODE"] = "multiple"
-        FixtureMutation.TUN_SPECIAL -> environment["RKA_FAKE_IP_MODE"] = "special"
-        FixtureMutation.TUN_UNSPECIFIED -> environment["RKA_FAKE_IP_MODE"] = "unspecified"
-        FixtureMutation.TUN_LINK_LOCAL -> environment["RKA_FAKE_IP_MODE"] = "link-local"
-        FixtureMutation.TUN_MULTICAST -> environment["RKA_FAKE_IP_MODE"] = "multicast"
-        FixtureMutation.TUN_BROADCAST -> environment["RKA_FAKE_IP_MODE"] = "broadcast"
-        FixtureMutation.TUN_WHITESPACE -> environment["RKA_FAKE_IP_MODE"] = "whitespace"
-        FixtureMutation.TUN_MALFORMED -> environment["RKA_FAKE_IP_MODE"] = "malformed"
+        FixtureMutation.WIFI_SUFFIX -> environment["RKA_FAKE_IP_MODE"] = "suffix"
+        FixtureMutation.WIFI_MULTIPLE -> environment["RKA_FAKE_IP_MODE"] = "multiple"
+        FixtureMutation.WIFI_SPECIAL -> environment["RKA_FAKE_IP_MODE"] = "special"
+        FixtureMutation.WIFI_UNSPECIFIED -> environment["RKA_FAKE_IP_MODE"] = "unspecified"
+        FixtureMutation.WIFI_LINK_LOCAL -> environment["RKA_FAKE_IP_MODE"] = "link-local"
+        FixtureMutation.WIFI_MULTICAST -> environment["RKA_FAKE_IP_MODE"] = "multicast"
+        FixtureMutation.WIFI_BROADCAST -> environment["RKA_FAKE_IP_MODE"] = "broadcast"
+        FixtureMutation.WIFI_WHITESPACE -> environment["RKA_FAKE_IP_MODE"] = "whitespace"
+        FixtureMutation.WIFI_MALFORMED -> environment["RKA_FAKE_IP_MODE"] = "malformed"
         FixtureMutation.MISMATCH_CANDIDATE_PIN ->
             environment["RKA_FAKE_MISMATCH_SERIAL"] = "CANDIDATE_B"
         FixtureMutation.ROLLBACK_BUSY_BIND_SAFE,

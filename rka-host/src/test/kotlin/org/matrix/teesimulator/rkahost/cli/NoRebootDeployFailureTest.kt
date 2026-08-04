@@ -161,26 +161,23 @@ class NoRebootDeployFailureTest {
             val result = fixture.run()
 
             assertEquals(result.stderr, 0, result.exitCode)
-            assertTrue(fixture.directProfile("DONOR_A").contains("dial_endpoint=100.88.0.2\n"))
+            assertTrue(fixture.directProfile("DONOR_A").contains("dial_endpoint=192.168.50.10\n"))
             assertTrue(fixture.directProfile("DONOR_A").contains("listen_interface=192.168.50.9\n"))
-            assertTrue(fixture.directProfile("CANDIDATE_B").contains("dial_endpoint=100.88.0.2\n"))
+            assertTrue(fixture.directProfile("CANDIDATE_B").contains("dial_endpoint=192.168.50.10\n"))
             assertTrue(
-                fixture.directProfile("CANDIDATE_B").contains("listen_interface=100.88.0.2\n")
+                fixture.directProfile("CANDIDATE_B").contains("listen_interface=192.168.50.10\n")
             )
         }
     }
 
     @Test
-    fun donorWlanSourceAndCandidateTunTargetAreDiscoveredByRole() {
-        Fixture(FixtureMutation.DONOR_WLAN_CANDIDATE_TUN).use { fixture ->
+    fun candidateTunWithoutWifiFailsBeforeUpload() {
+        Fixture(FixtureMutation.CANDIDATE_TUN_ONLY).use { fixture ->
             val result = fixture.run()
 
-            assertEquals(result.stderr, 0, result.exitCode)
-            assertTrue(fixture.directProfile("DONOR_A").contains("dial_endpoint=100.88.0.2\n"))
-            assertTrue(fixture.directProfile("DONOR_A").contains("listen_interface=192.168.50.9\n"))
-            assertTrue(
-                fixture.directProfile("CANDIDATE_B").contains("listen_interface=100.88.0.2\n")
-            )
+            assertEquals(3, result.exitCode)
+            assertTrue(result.stderr.contains("RESULT=DIRECT_PATH_UNAVAILABLE"))
+            assertTrue(fixture.trace().none { " push " in " $it " || " deploy " in " $it " })
         }
     }
 
@@ -196,20 +193,20 @@ class NoRebootDeployFailureTest {
     }
 
     @Test
-    fun tunInterfaceSuffixIsNormalizedWithoutAcceptingMalformedCandidates() {
-        Fixture(FixtureMutation.TUN_SUFFIX).use { fixture ->
+    fun wifiInterfaceSuffixIsNormalizedWithoutAcceptingMalformedCandidates() {
+        Fixture(FixtureMutation.WIFI_SUFFIX).use { fixture ->
             val result = fixture.run()
             assertEquals(result.stderr, 0, result.exitCode)
         }
         listOf(
-                FixtureMutation.TUN_MULTIPLE,
-                FixtureMutation.TUN_SPECIAL,
-                FixtureMutation.TUN_UNSPECIFIED,
-                FixtureMutation.TUN_LINK_LOCAL,
-                FixtureMutation.TUN_MULTICAST,
-                FixtureMutation.TUN_BROADCAST,
-                FixtureMutation.TUN_WHITESPACE,
-                FixtureMutation.TUN_MALFORMED,
+                FixtureMutation.WIFI_MULTIPLE,
+                FixtureMutation.WIFI_SPECIAL,
+                FixtureMutation.WIFI_UNSPECIFIED,
+                FixtureMutation.WIFI_LINK_LOCAL,
+                FixtureMutation.WIFI_MULTICAST,
+                FixtureMutation.WIFI_BROADCAST,
+                FixtureMutation.WIFI_WHITESPACE,
+                FixtureMutation.WIFI_MALFORMED,
             )
             .forEach { mutation ->
                 Fixture(mutation).use { fixture ->

@@ -2,7 +2,7 @@
   <h1 align="center">TEESimulator-RS</h1>
   <p align="center"><b>Pass hardware security checks on a rooted Android phone</b></p>
   <p align="center">
-    <a href="https://github.com/Enginex0/TEESimulator-RS/actions/workflows/build.yml"><img src="https://github.com/Enginex0/TEESimulator-RS/actions/workflows/build.yml/badge.svg" alt="Build"></a>
+    <a href="https://github.com/1vivy/TEESimulator/actions/workflows/build.yml"><img src="https://github.com/1vivy/TEESimulator/actions/workflows/build.yml/badge.svg" alt="Build"></a>
     <img src="https://img.shields.io/badge/Android-10%2B-green?logo=android" alt="Android 10+">
     <a href="https://t.me/superpowers9"><img src="https://img.shields.io/badge/Telegram-community-blue?logo=telegram" alt="Telegram"></a>
   </p>
@@ -11,7 +11,7 @@
 ---
 
 > [!NOTE]
-> This is a fork of [JingMatrix/TEESimulator](https://github.com/JingMatrix/TEESimulator). It adds certificate generation written in Rust, generated keys that survive reboots, and attestation behavior that matches stock Android. See the upstream repo for the original project.
+> This beta continues [Enginex0/TEESimulator-RS](https://github.com/Enginex0/TEESimulator-RS), itself based on [JingMatrix/TEESimulator](https://github.com/JingMatrix/TEESimulator). It adds certificate generation written in Rust, persistent keys, and two-device RKA.
 
 ## What it does
 
@@ -19,20 +19,21 @@ Some Android apps refuse to run on a rooted phone. They ask the phone to prove i
 
 TEESimulator makes it pass. Android runs a system process named `keystore2` that answers these proof requests. TEESimulator sits in front of `keystore2`, watches for the requests apps make to create keys and read their certificates, and builds the proof itself: a full chain of certificates signed by your `keybox.xml`. To the app, the phone looks genuine.
 
-It replaces TrickyStore and its forks completely. It reads config from the same files, so you can switch without moving anything, but the internals are rewritten: certificates are generated in Rust, keys are saved across reboots, and each app gets its own limit on how fast it can request hardware-backed keys.
+The module keeps the `tricky_store` module ID and its familiar configuration files. Installing it therefore upgrades an existing TrickyStore/TEESimulator installation in place instead of creating a second colliding module. The added KernelSU WebUI exposes RKA controls while the original Action button and local configuration remain available.
 
 ## Requirements
 
 > [!IMPORTANT]
-> You need a valid `keybox.xml`. This is the file used to sign the proof. Without it, TEESimulator can only produce software-only certificates, which strict apps reject.
+> Local mode needs a valid `keybox.xml`. Experimental RKA mode can instead obtain a short-lived attestation lease from a separate, valid donor device.
 
 1. Android 10 or newer
 2. A root manager: KernelSU, Magisk, or APatch
-3. A `keybox.xml` file at `/data/adb/tricky_store/keybox.xml`
+3. Zygisk for the keystore interception path
+4. Either a local `keybox.xml` or the two-device RKA setup described below
 
-## Quick start
+## Local keybox quick start
 
-1. Download the latest ZIP from [Releases](https://github.com/Enginex0/TEESimulator-RS/releases).
+1. Download the latest ZIP from [Releases](https://github.com/1vivy/TEESimulator/releases).
 2. Install it with your root manager, then reboot.
 3. Put your `keybox.xml` at `/data/adb/tricky_store/keybox.xml`.
 4. List the apps you want to cover in `/data/adb/tricky_store/target.txt`.
@@ -70,41 +71,39 @@ It replaces TrickyStore and its forks completely. It reads config from the same 
 
 ## Two-device RKA mode
 
-RKA mode is additive to the original TEESimulator-RS path and its KernelSU
-WebUI. A paired candidate can route a narrowly allowed KeyMint request to a
-donor instead of using a local keybox:
+The experimental RKA beta uses two rooted arm64 devices running the same
+role-neutral module ZIP:
 
 ```text
-candidate app UID -> candidate keystore2 hook -> candidate RKA sidecar
-  -> TLS 1.3 mutual-authenticated channel -> donor RKA sidecar
-  -> donor KeyMint + a newly RKP-certified attestation key
+Phone A (donor)                 Phone B (candidate)
+fresh Google RKP key      <---  fresh candidate lease key
+        |
+        +-- TEE imports and certifies the lease key
+        +-- temporary imported blob is deleted
+        |
+        +====== pinned TLS 1.3 ======> persistent synthetic lease
+                                       local attestation while A is offline
 ```
 
-The donor retains every private key and opaque KeyMint blob. The candidate
-receives the public certificate chain and opaque RKA handles, then proxies
-`begin`, `update`, `finish`, and `abort` back to the donor. Unsupported callers,
-StrongBox, algorithms other than EC P-256 with SHA-256, and purposes other than
-signing remain on the normal platform path. Once a request selects RKA there is
-no software or keybox fallback.
+Phone B creates the synthetic lease key and sends its bounded PKCS#8 material to
+Phone A over mutually authenticated TLS. Phone A imports it as a TEE
+`ATTEST_KEY`, certifies it beneath a freshly provisioned RKP key, deletes the
+temporary imported KeyMint blob, and returns the chain. Phone B validates and
+stores the resulting lease. The donor is needed for issuance and renewal, not
+for each application operation. Current leases are valid for seven days.
 
-Direct LAN or Tailscale routing is preferred. When the donor cannot route to
-the candidate but both are reachable from the host, the repository includes a
-byte-blind ADB stream relay:
+On Phone B, an explicit `?` entry in `target.txt` selects the active synthetic
+lease. Add or remove applications locally without re-pairing the two phones.
+The candidate preserves its native application key and signature operations;
+the lease supplies the attestation chain. StrongBox, unlisted callers, and
+unsupported requests stay on the normal platform path.
 
-```bash
-chmod 600 /path/to/device-pair.json
-scripts/rka-adb-stream-relay.py --pair /path/to/device-pair.json
-```
-
-The relay discovers the candidate address from its installed `direct.conf` and
-does not log device serials, addresses, certificates, or payload bytes. TLS
-authentication and encryption remain end to end between the two devices.
-
-### Task25 command-trace trust boundary
-
-The trace-completeness guarantee covers every ADB command issued by the exact hash-bound standard Task25 deploy source, HostCli, and traced adapter while their cooperative exclusive pair transaction is active. Source attestation fixes that code boundary, the pair lock fixes the transaction boundary, and the owner-only journal plus hash chain detects omission, tampering, and crashes inside it. The receipt binds the Agent-PGP-verified source SHA and the trace genesis, head, and event count; the commit signature and receipt binding do not extend that guarantee beyond the approved surface.
-
-This mechanism is not an OS sandbox. It cannot observe arbitrary out-of-band `adb` started by the same trusted host owner outside the approved wrapper. Such a command is outside the trusted-host threat model and invalidates the evidence session.
+The beta's automatic network path uses direct routed Wi-Fi: Phone A dials Phone
+B on TCP 37373. ADB is used to install and configure the pair but is not the RKA
+data path. See the [RKA beta guide](docs/RKA_BETA_GUIDE.md) for installation,
+pairing, renewal, verification, and recovery, and the
+[beta release notes](docs/RKA_BETA_RELEASE_NOTES.md) for validated scope and
+known limitations.
 
 ## Configuration
 
@@ -163,8 +162,8 @@ In `auto`, Oplus-family devices (OnePlus/OPPO/realme/Oplus) skip boot-state prop
 You need JDK 21, the Android SDK and NDK 29, Rust (stable) with the `aarch64-linux-android` target, and `cargo-ndk`.
 
 ```bash
-git clone --recursive https://github.com/Enginex0/TEESimulator-RS.git
-cd TEESimulator-RS
+git clone --recursive https://github.com/1vivy/TEESimulator.git
+cd TEESimulator
 ./gradlew zipRelease zipDebug
 ```
 
@@ -177,6 +176,9 @@ The ZIPs land in `out/`. Gradle runs `cargo ndk` for you to cross-compile `libce
 | KernelSU | Tested, including the Action button and lifecycle scripts |
 | Magisk | Supported |
 | APatch | Supported |
+
+The RKA beta is physically validated on KernelSU/Zygisk only. The compatibility
+table otherwise describes the original local module path.
 
 ## Community
 

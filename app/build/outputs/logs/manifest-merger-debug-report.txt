@@ -1,0 +1,25 @@
+-- Merging decision tree log ---
+manifest
+ADDED from /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/main/AndroidManifest.xml:2:1-13
+INJECTED from /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/main/AndroidManifest.xml:2:1-13
+INJECTED from /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/main/AndroidManifest.xml:2:1-13
+INJECTED from /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/main/AndroidManifest.xml:2:1-13
+	package
+		INJECTED from /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/main/AndroidManifest.xml
+	android:versionName
+		INJECTED from /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/main/AndroidManifest.xml
+	android:versionCode
+		INJECTED from /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/main/AndroidManifest.xml
+application
+INJECTED from /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/main/AndroidManifest.xml reason: application injection requested
+INJECTED from /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/main/AndroidManifest.xml
+	android:extractNativeLibs
+		INJECTED from /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/main/AndroidManifest.xml
+uses-sdk
+INJECTED from /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/main/AndroidManifest.xml reason: use-sdk injection requested
+INJECTED from /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/main/AndroidManifest.xml
+INJECTED from /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/main/AndroidManifest.xml
+	android:targetSdkVersion
+		INJECTED from /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/main/AndroidManifest.xml
+	android:minSdkVersion
+		INJECTED from /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/main/AndroidManifest.xml

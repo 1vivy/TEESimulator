@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.bridge.BrokerUdsContractTest" tests="10" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:57.157Z" hostname="cachyos-x8664" time="0.004">
+  <properties/>
+  <testcase name="identity_rechecked_before_dispatch_blocks_pid_reuse" classname="org.matrix.TEESimulator.rka.bridge.BrokerUdsContractTest" time="0.0"/>
+  <testcase name="selinux_denial_is_typed_and_logs_are_redacted" classname="org.matrix.TEESimulator.rka.bridge.BrokerUdsContractTest" time="0.001"/>
+  <testcase name="frame_bounds_and_canonical_header_are_enforced_before_body_allocation" classname="org.matrix.TEESimulator.rka.bridge.BrokerUdsContractTest" time="0.0"/>
+  <testcase name="rejects_oversize" classname="org.matrix.TEESimulator.rka.bridge.BrokerUdsContractTest" time="0.0"/>
+  <testcase name="root_uid_alone_never_authenticates_and_socket_policy_is_exact" classname="org.matrix.TEESimulator.rka.bridge.BrokerUdsContractTest" time="0.0"/>
+  <testcase name="defensive_copy_and_golden_bytes_are_stable" classname="org.matrix.TEESimulator.rka.bridge.BrokerUdsContractTest" time="0.001"/>
+  <testcase name="proc_stat_parser_handles_parenthesized_comm_and_rejects_bad_values" classname="org.matrix.TEESimulator.rka.bridge.BrokerUdsContractTest" time="0.001"/>
+  <testcase name="accepts_expected_peer" classname="org.matrix.TEESimulator.rka.bridge.BrokerUdsContractTest" time="0.0"/>
+  <testcase name="rejects_pid_start_mismatch" classname="org.matrix.TEESimulator.rka.bridge.BrokerUdsContractTest" time="0.001"/>
+  <testcase name="fifth_inflight_and_saturated_queue_fail_closed" classname="org.matrix.TEESimulator.rka.bridge.BrokerUdsContractTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

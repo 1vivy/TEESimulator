@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.bridge.BrokerBridgeThirdFollowupTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:57.151Z" hostname="cachyos-x8664" time="0.005">
+  <properties/>
+  <testcase name="socket_metadata_label_and_removal_are_anchored_to_held_node_and_directory_handles" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeThirdFollowupTest" time="0.0"/>
+  <testcase name="supervisor_record_is_read_only_through_a_held_nofollow_descriptor" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeThirdFollowupTest" time="0.0"/>
+  <testcase name="production_contains_no_forgeable_identity_test_or_configurable_source_api" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeThirdFollowupTest" time="0.005"/>
+  <testcase name="public_production_factory_has_only_fixed_role_operations" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeThirdFollowupTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

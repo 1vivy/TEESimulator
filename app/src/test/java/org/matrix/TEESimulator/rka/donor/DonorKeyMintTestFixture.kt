@@ -30,6 +30,7 @@ import org.matrix.TEESimulator.rka.broker.IrpcGeneratedKey
 import org.matrix.TEESimulator.rka.broker.IrpcKeyBatch
 import org.matrix.TEESimulator.rka.broker.IrpcResolvedIdentity
 import org.matrix.TEESimulator.rka.broker.RkpKeyCount
+import org.matrix.TEESimulator.rka.candidate.IdentityHash
 import org.matrix.TEESimulator.rka.journal.RkpCertification
 import org.matrix.TEESimulator.rka.journal.RkpCertifiedKey
 import org.matrix.TEESimulator.rka.journal.RkpIrpcIdentity
@@ -38,6 +39,31 @@ import org.matrix.TEESimulator.rka.journal.RkpJournalRecord
 import org.matrix.TEESimulator.rka.journal.RkpJournalState
 import org.matrix.TEESimulator.rka.journal.RkpJournalStore
 import org.matrix.TEESimulator.rka.journal.RkpOpaqueHandle
+
+internal val donorTestCandidate = IdentityHash.of(ByteArray(32) { 0x2a })
+
+internal fun DonorKeyMintBackend.generate(request: DonorGenerateRequest) =
+    generate(donorTestCandidate, request)
+
+internal fun DonorKeyMintBackend.get(handle: DonorKeyHandle) = get(donorTestCandidate, handle)
+
+internal fun DonorKeyMintBackend.list() = list(donorTestCandidate)
+
+internal fun DonorKeyMintBackend.delete(handle: DonorKeyHandle) = delete(donorTestCandidate, handle)
+
+internal fun DonorKeyMintBackend.begin(handle: DonorKeyHandle) = begin(donorTestCandidate, handle)
+
+internal fun DonorKeyMintBackend.updateAad(handle: DonorOperationHandle, input: ByteArray) =
+    updateAad(donorTestCandidate, handle, input)
+
+internal fun DonorKeyMintBackend.update(handle: DonorOperationHandle, input: ByteArray) =
+    update(donorTestCandidate, handle, input)
+
+internal fun DonorKeyMintBackend.finish(handle: DonorOperationHandle, input: ByteArray) =
+    finish(donorTestCandidate, handle, input)
+
+internal fun DonorKeyMintBackend.abort(handle: DonorOperationHandle) =
+    abort(donorTestCandidate, handle)
 
 internal class DonorFixture {
     val challenge = ByteArray(32) { (it + 1).toByte() }

@@ -13,6 +13,7 @@ import org.bouncycastle.asn1.ASN1TaggedObject
 import org.matrix.TEESimulator.attestation.ATTESTATION_OID
 import org.matrix.TEESimulator.attestation.AttestationConstants
 import org.matrix.TEESimulator.logging.SystemLogger
+import org.matrix.TEESimulator.rka.candidate.IdentityHash
 import org.matrix.TEESimulator.rka.journal.RkpJournal
 import org.matrix.TEESimulator.rka.journal.RkpJournalRecord
 import org.matrix.TEESimulator.rka.journal.RkpJournalState
@@ -84,8 +85,8 @@ internal constructor(
     private val journal: RkpJournal,
     private val random: SecureRandom = SecureRandom(),
 ) {
-    private val keys = linkedMapOf<String, RetainedApplicationKey>()
-    private var liveOperation: LiveDonorOperation? = null
+    private val keys = linkedMapOf<IdentityHash, MutableMap<String, RetainedApplicationKey>>()
+    private val liveOperations = linkedMapOf<IdentityHash, LiveDonorOperation>()
 
     @Synchronized
     fun reconcile() {
@@ -100,13 +101,16 @@ internal constructor(
     }
 
     @Synchronized
-    fun generate(request: DonorGenerateRequest): DonorResult<DonorPublicKey> {
+    fun generate(
+        candidate: IdentityHash,
+        request: DonorGenerateRequest,
+    ): DonorResult<DonorPublicKey> {
         val certified = journal.recover() ?: return failure(DonorError.STALE_HANDLE)
         if (certified.state != RkpJournalState.RKP_CERTIFIED) {
             generateFailure("JOURNAL_NOT_CERTIFIED")
             return failure(DonorError.QUARANTINED)
         }
-        if (keys.containsKey(request.aliasHandle.key())) return failure(DonorError.STALE_HANDLE)
+        if (key(candidate, request.aliasHandle) != null) return failure(DonorError.STALE_HANDLE)
         val rkpCertificate =
             validateCertifiedChain(certified, request)
                 ?: run {
@@ -156,19 +160,19 @@ internal constructor(
                 generated.characteristics,
                 ByteArray(0),
             )
-        keys[request.aliasHandle.key()] = retained
+        retain(candidate, retained)
         val recorded =
             runCatching { journal.transition(generating, RkpJournalState.APP_KEY_RECORDED) }
                 .getOrElse {
                     generateFailure("JOURNAL_RECORDED")
-                    keys.remove(request.aliasHandle.key())
+                    removeKey(candidate, request.aliasHandle)
                     runCatching { device.delete(retained.keyBlob) }
                     return quarantine(generating, DonorError.QUARANTINED)
                 }
         val transcriptSignature =
             signAndVerify(retained, request.transcript)
                 ?: run {
-                    keys.remove(request.aliasHandle.key())
+                    removeKey(candidate, request.aliasHandle)
                     runCatching { device.delete(retained.keyBlob) }
                     journal.quarantineCurrent()
                     return failure(DonorError.QUARANTINED)
@@ -182,11 +186,11 @@ internal constructor(
                 retained.characteristics,
                 transcriptSignature,
             )
-        keys[request.aliasHandle.key()] = exposedKey
+        retain(candidate, exposedKey)
         runCatching { journal.transition(recorded, RkpJournalState.EXPOSED) }
             .getOrElse {
                 generateFailure("JOURNAL_EXPOSED")
-                keys.remove(request.aliasHandle.key())
+                removeKey(candidate, request.aliasHandle)
                 runCatching { device.delete(retained.keyBlob) }
                 journal.quarantineCurrent()
                 return failure(DonorError.QUARANTINED)
@@ -200,19 +204,22 @@ internal constructor(
     }
 
     @Synchronized
-    fun get(handle: DonorKeyHandle): DonorResult<DonorPublicKey> =
-        keys[handle.key()]?.let { DonorResult.Success(it.publicResult()) }
+    fun get(candidate: IdentityHash, handle: DonorKeyHandle): DonorResult<DonorPublicKey> =
+        key(candidate, handle)?.let { DonorResult.Success(it.publicResult()) }
             ?: failure(DonorError.STALE_HANDLE)
 
-    @Synchronized fun list(): List<DonorKeyHandle> = keys.values.map(RetainedApplicationKey::handle)
+    @Synchronized
+    fun list(candidate: IdentityHash): List<DonorKeyHandle> =
+        keys[candidate]?.values?.map(RetainedApplicationKey::handle).orEmpty()
 
     @Synchronized
-    fun delete(handle: DonorKeyHandle): DonorResult<DonorDeleteResult> {
-        if (liveOperation?.key == handle) {
-            runCatching { liveOperation?.endpoint?.abort() }
-            liveOperation = null
+    fun delete(candidate: IdentityHash, handle: DonorKeyHandle): DonorResult<DonorDeleteResult> {
+        val operation = liveOperations[candidate]
+        if (operation?.key == handle) {
+            runCatching { operation.endpoint.abort() }
+            liveOperations.remove(candidate)
         }
-        val key = keys.remove(handle.key()) ?: return failure(DonorError.STALE_HANDLE)
+        val key = removeKey(candidate, handle) ?: return failure(DonorError.STALE_HANDLE)
         return try {
             device.delete(key.keyBlob)
             var current = requireNotNull(journal.recover())
@@ -231,85 +238,106 @@ internal constructor(
     }
 
     @Synchronized
-    fun begin(handle: DonorKeyHandle): DonorResult<DonorBeginResult> {
-        if (liveOperation != null) return failure(DonorError.CAPACITY)
-        val key = keys[handle.key()] ?: return failure(DonorError.STALE_HANDLE)
+    fun begin(candidate: IdentityHash, handle: DonorKeyHandle): DonorResult<DonorBeginResult> {
+        if (candidate in liveOperations) return failure(DonorError.CAPACITY)
+        val key = key(candidate, handle) ?: return failure(DonorError.STALE_HANDLE)
         return try {
             val operationHandle = DonorOperationHandle.fresh(random)
-            liveOperation = LiveDonorOperation(operationHandle, handle, device.begin(key.keyBlob))
+            liveOperations[candidate] =
+                LiveDonorOperation(operationHandle, handle, device.begin(key.keyBlob))
             DonorResult.Success(DonorBeginResult(operationHandle))
         } catch (_: Exception) {
-            operationFailure(key)
+            operationFailure(candidate, key)
         }
     }
 
     @Synchronized
-    fun updateAad(handle: DonorOperationHandle, input: ByteArray): DonorResult<DonorUpdateResult> {
+    fun updateAad(
+        candidate: IdentityHash,
+        handle: DonorOperationHandle,
+        input: ByteArray,
+    ): DonorResult<DonorUpdateResult> {
         if (input.size > 65_536) return failure(DonorError.INVALID_REQUEST)
-        val operation = operation(handle) ?: return failure(DonorError.OPERATION_LOST)
+        val operation = operation(candidate, handle) ?: return failure(DonorError.OPERATION_LOST)
         return try {
             operation.endpoint.updateAad(input)
             DonorResult.Success(DonorUpdateResult(input.size, DonorPublicBytes.of(ByteArray(0))))
         } catch (_: Exception) {
-            operationFailure(keys[operation.key.key()])
+            operationFailure(candidate, key(candidate, operation.key))
         }
     }
 
     @Synchronized
-    fun update(handle: DonorOperationHandle, input: ByteArray): DonorResult<DonorUpdateResult> {
+    fun update(
+        candidate: IdentityHash,
+        handle: DonorOperationHandle,
+        input: ByteArray,
+    ): DonorResult<DonorUpdateResult> {
         if (input.size > 65_536) return failure(DonorError.INVALID_REQUEST)
-        val operation = operation(handle) ?: return failure(DonorError.OPERATION_LOST)
+        val operation = operation(candidate, handle) ?: return failure(DonorError.OPERATION_LOST)
         return try {
             val output = operation.endpoint.update(input)
             operation.append(input)
             DonorResult.Success(DonorUpdateResult(input.size, DonorPublicBytes.of(output)))
         } catch (_: Exception) {
-            operationFailure(keys[operation.key.key()])
+            operationFailure(candidate, key(candidate, operation.key))
         }
     }
 
     @Synchronized
-    fun finish(handle: DonorOperationHandle, input: ByteArray): DonorResult<DonorFinishResult> {
+    fun finish(
+        candidate: IdentityHash,
+        handle: DonorOperationHandle,
+        input: ByteArray,
+    ): DonorResult<DonorFinishResult> {
         if (input.size > 65_536) return failure(DonorError.INVALID_REQUEST)
-        val operation = operation(handle) ?: return failure(DonorError.OPERATION_LOST)
-        val key = keys[operation.key.key()] ?: return failure(DonorError.STALE_HANDLE)
+        val operation = operation(candidate, handle) ?: return failure(DonorError.OPERATION_LOST)
+        val key = key(candidate, operation.key) ?: return failure(DonorError.STALE_HANDLE)
         return try {
             val signature = operation.endpoint.finish(input)
             val verifier = Signature.getInstance("SHA256withECDSA")
             verifier.initVerify(key.leaf.publicKey)
             verifier.update(operation.completeInput(input))
             if (!verifier.verify(signature)) throw IllegalArgumentException("signature")
-            liveOperation = null
+            liveOperations.remove(candidate)
             DonorResult.Success(DonorFinishResult(DonorPublicBytes.of(signature)))
         } catch (_: Exception) {
-            operationFailure(key)
+            operationFailure(candidate, key)
         }
     }
 
     @Synchronized
-    fun abort(handle: DonorOperationHandle): DonorResult<DonorAbortResult> {
-        val operation = operation(handle) ?: return failure(DonorError.OPERATION_LOST)
+    fun abort(
+        candidate: IdentityHash,
+        handle: DonorOperationHandle,
+    ): DonorResult<DonorAbortResult> {
+        val operation = operation(candidate, handle) ?: return failure(DonorError.OPERATION_LOST)
         return try {
             operation.endpoint.abort()
-            liveOperation = null
+            liveOperations.remove(candidate)
             DonorResult.Success(DonorAbortResult(true))
         } catch (_: Exception) {
-            operationFailure(keys[operation.key.key()])
+            operationFailure(candidate, key(candidate, operation.key))
         }
     }
 
     @Synchronized
     fun binderDied() {
-        liveOperation = null
-        keys.values.forEach { it.keyBlob.fill(0) }
+        liveOperations.clear()
+        keys.values.flatMap { it.values }.forEach { it.keyBlob.fill(0) }
         keys.clear()
         journal.quarantineCurrent()
     }
 
     @Synchronized
     fun peerDied() {
-        val operation = liveOperation ?: return
-        operationFailure(keys[operation.key.key()])
+        liveOperations.keys.toList().forEach { candidate -> peerDied(candidate) }
+    }
+
+    @Synchronized
+    fun peerDied(candidate: IdentityHash) {
+        val operation = liveOperations[candidate] ?: return
+        operationFailure(candidate, key(candidate, operation.key))
     }
 
     private fun validateCertifiedChain(
@@ -418,8 +446,27 @@ internal constructor(
             }
             .getOrNull()
 
-    private fun operation(handle: DonorOperationHandle): LiveDonorOperation? =
-        liveOperation?.takeIf { it.handle.matches(handle) }
+    private fun operation(
+        candidate: IdentityHash,
+        handle: DonorOperationHandle,
+    ): LiveDonorOperation? = liveOperations[candidate]?.takeIf { it.handle.matches(handle) }
+
+    private fun key(candidate: IdentityHash, handle: DonorKeyHandle): RetainedApplicationKey? =
+        keys[candidate]?.get(handle.key())
+
+    private fun retain(candidate: IdentityHash, key: RetainedApplicationKey) {
+        keys.getOrPut(candidate, ::linkedMapOf)[key.handle.key()] = key
+    }
+
+    private fun removeKey(
+        candidate: IdentityHash,
+        handle: DonorKeyHandle,
+    ): RetainedApplicationKey? {
+        val candidateKeys = keys[candidate] ?: return null
+        val removed = candidateKeys.remove(handle.key())
+        if (candidateKeys.isEmpty()) keys.remove(candidate)
+        return removed
+    }
 
     private fun RetainedApplicationKey.publicResult(): DonorPublicKey =
         DonorPublicKey(
@@ -439,10 +486,13 @@ internal constructor(
         return quarantine(record, DonorError.QUARANTINED)
     }
 
-    private fun operationFailure(key: RetainedApplicationKey?): DonorResult.Failure {
-        liveOperation = null
+    private fun operationFailure(
+        candidate: IdentityHash,
+        key: RetainedApplicationKey?,
+    ): DonorResult.Failure {
+        liveOperations.remove(candidate)
         key?.let {
-            keys.remove(it.handle.key())
+            removeKey(candidate, it.handle)
             runCatching { device.delete(it.keyBlob) }
             it.keyBlob.fill(0)
         }

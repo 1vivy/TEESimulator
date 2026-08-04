@@ -13,8 +13,45 @@ import org.matrix.TEESimulator.rka.bridge.BridgeResult
 import org.matrix.TEESimulator.rka.bridge.CandidateBridgeOperation
 import org.matrix.TEESimulator.rka.bridge.PublicBytes
 import org.matrix.TEESimulator.rka.bridge.RequestId
+import org.matrix.TEESimulator.rka.candidate.IdentityHash
 
 class DonorKeyMintBridgeTest {
+    @Test
+    fun liveOperationsAndRetainedKeysArePartitionedByCandidate() {
+        // Given
+        val fixture = DonorFixture()
+        val backend = DonorKeyMintBackend(FakeDonorKeyMintDevice(fixture), fixture.journal)
+        val candidateA = IdentityHash.of(ByteArray(32) { 1 })
+        val candidateB = IdentityHash.of(ByteArray(32) { 2 })
+        assertTrue(
+            invokeCandidate(backend, "generate", candidateA, fixture.request())
+                is DonorResult.Success
+        )
+        mirrorRetainedKey(backend, candidateA, candidateB, fixture.alias)
+
+        // When
+        val begunA = invokeCandidate(backend, "begin", candidateA, fixture.alias)
+        val begunB = invokeCandidate(backend, "begin", candidateB, fixture.alias)
+
+        // Then
+        assertTrue(begunA is DonorResult.Success)
+        assertTrue(begunB is DonorResult.Success)
+        val handleA = (begunA as DonorResult.Success<*>).value as DonorBeginResult
+        val handleB = (begunB as DonorResult.Success<*>).value as DonorBeginResult
+        assertTrue(
+            invokeCandidate(backend, "abort", candidateA, handleA.handle) is DonorResult.Success
+        )
+        assertTrue(
+            invokeCandidate(backend, "abort", candidateB, handleB.handle) is DonorResult.Success
+        )
+        assertTrue(
+            invokeCandidate(backend, "delete", candidateA, fixture.alias) is DonorResult.Success
+        )
+        assertTrue(
+            invokeCandidate(backend, "get", candidateB, fixture.alias) is DonorResult.Success
+        )
+    }
+
     @Test
     fun authenticatedDonorDispatcherSupportsEveryLifecycleCommand() {
         // Given
@@ -153,7 +190,7 @@ class DonorKeyMintBridgeTest {
                 PublicBytes.of(payload, BridgeLimits.MAX_FRAME_BYTES - 5),
             )
         return try {
-            val response = DonorBridgeDispatcher.dispatch(command, backend)
+            val response = DonorBridgeDispatcher.dispatch(command, backend, donorTestCandidate)
             try {
                 require(response is BridgeMessage.CandidateReply) { response.toString() }
                 response.payload.copyBytes()
@@ -179,7 +216,7 @@ class DonorKeyMintBridgeTest {
             )
         payload.fill(0)
         return try {
-            DonorBridgeDispatcher.dispatch(command, backend)
+            DonorBridgeDispatcher.dispatch(command, backend, donorTestCandidate)
         } finally {
             command.close()
         }
@@ -195,4 +232,34 @@ class DonorKeyMintBridgeTest {
             start + candidate.size <= size &&
                 candidate.indices.all { offset -> this[start + offset] == candidate[offset] }
         }
+}
+
+private fun invokeCandidate(
+    backend: DonorKeyMintBackend,
+    name: String,
+    candidate: IdentityHash,
+    vararg arguments: Any,
+): DonorResult<*> {
+    val methods = backend.javaClass.methods.filter { it.name == name }
+    val candidateAware =
+        methods.singleOrNull {
+            it.parameterCount == arguments.size + 1 &&
+                it.parameterTypes.firstOrNull() == IdentityHash::class.java
+        }
+    val method = candidateAware ?: methods.single { it.parameterCount == arguments.size }
+    val inputs = if (candidateAware == null) arguments else arrayOf(candidate, *arguments)
+    return method.invoke(backend, *inputs) as DonorResult<*>
+}
+
+@Suppress("UNCHECKED_CAST")
+private fun mirrorRetainedKey(
+    backend: DonorKeyMintBackend,
+    source: IdentityHash,
+    destination: IdentityHash,
+    alias: DonorKeyHandle,
+) {
+    val field = backend.javaClass.getDeclaredField("keys").apply { isAccessible = true }
+    val keys = field.get(backend) as MutableMap<Any, Any>
+    val sourceKeys = keys[source] as? Map<String, Any> ?: return
+    keys[destination] = linkedMapOf(alias.key() to sourceKeys.getValue(alias.key()))
 }

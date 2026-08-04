@@ -40,7 +40,7 @@ class RemoteCandidateParcelEntrypointTest {
     fun keyMintTransactionParsesRoutesAndReturnsDrivableOperation() {
         // Given a published candidate runtime and real platform Parcel transactions.
         val fixture = ProductionFixture()
-        publishRuntime(fixture.runtime)
+        publishRuntime(fixture.identity, fixture.runtime)
         val interceptor =
             KeyMintSecurityLevelInterceptor(
                 fakeInterface(IKeystoreSecurityLevel::class.java),
@@ -138,17 +138,13 @@ class RemoteCandidateParcelEntrypointTest {
             it.getInt(null)
         }
 
-    private fun publishRuntime(runtime: CandidateRuntime) {
-        val stateClass =
-            Class.forName(
-                "org.matrix.TEESimulator.rka.candidate.CandidateRuntimeRegistry\$State\$Authorized"
-            )
-        val constructor = stateClass.getDeclaredConstructor(CandidateRuntime::class.java)
-        constructor.isAccessible = true
-        val state = constructor.newInstance(runtime)
+    private fun publishRuntime(
+        identity: org.matrix.TEESimulator.rka.candidate.IdentityHash,
+        runtime: CandidateRuntime,
+    ) {
         CandidateRuntimeRegistry::class.java.getDeclaredField("state").let {
             it.isAccessible = true
-            it.set(CandidateRuntimeRegistry, state)
+            it.set(CandidateRuntimeRegistry, mapOf(identity to runtime))
         }
     }
 

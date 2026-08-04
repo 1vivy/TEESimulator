@@ -210,7 +210,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         callingUid: Int,
         countOnly: Boolean,
     ): TransactionResult? {
-        val runtime = CandidateRuntimeRegistry.current() ?: return null
+        val runtime = CandidateRuntimeRegistry.current(callingUid) ?: return null
         if (!runtime.admits(callingUid)) return null
         return when (val route = runtime.list(callingUid)) {
             CandidateRoute.PassThrough -> null
@@ -237,7 +237,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         callingUid: Int,
         descriptor: KeyDescriptor,
     ): TransactionResult? {
-        val runtime = CandidateRuntimeRegistry.current() ?: return null
+        val runtime = CandidateRuntimeRegistry.current(callingUid) ?: return null
         if (!runtime.admits(callingUid)) return null
         val id = candidateId(runtime, callingUid, descriptor) ?: return null
         val route =
@@ -276,7 +276,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         descriptor: KeyDescriptor,
         granteeUid: Int,
     ): TransactionResult? {
-        val runtime = CandidateRuntimeRegistry.current() ?: return null
+        val runtime = CandidateRuntimeRegistry.current(callingUid) ?: return null
         if (!runtime.admits(callingUid)) return null
         val id = candidateId(runtime, callingUid, descriptor) ?: return null
         return when (val route = runtime.grant(callingUid, id, granteeUid)) {

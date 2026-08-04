@@ -1,0 +1,3 @@
+ksu ksu unix_stream_socket create,bind,connect,listen,accept,read,write,getattr,getopt,setopt,shutdown
+ksu teesimulator_rka_socket_dir dir search,open,read,getattr,write,add_name,remove_name,setattr
+ksu teesimulator_rka_socket sock_file create,open,read,write,getattr,setattr,unlink

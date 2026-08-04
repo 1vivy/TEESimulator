@@ -8,46 +8,40 @@ import org.matrix.TEESimulator.rka.bridge.BrokerSidecarRole
 import org.matrix.TEESimulator.rka.bridge.captureProductionPeerAuthorization
 
 object CandidateRuntimeRegistry {
-    private sealed interface State {
-        data object PassThrough : State
-
-        class Authorized(val runtime: CandidateRuntime) : State
-    }
-
-    @Volatile private var state: State = State.PassThrough
+    @Volatile private var state = emptyMap<IdentityHash, CandidateRuntime>()
 
     fun initializeLifecycle() {
-        state = State.PassThrough
+        state = emptyMap()
         val captured = captureProductionPeerAuthorization(BrokerSidecarRole.CANDIDATE)
         if (captured !is BridgeResult.Success) {
             SystemLogger.warning("RKA candidate runtime unavailable: stage=SIDECAR_IDENTITY")
             return
         }
         captured.value.use {
-            val target =
-                ConfigurationManager.configuredCandidateIdentity()
-                    ?: run {
-                        SystemLogger.warning(
-                            "RKA candidate runtime unavailable: stage=TARGET_IDENTITY"
+            val targets = ConfigurationManager.configuredCandidateIdentities()
+            if (targets.isEmpty()) {
+                SystemLogger.warning("RKA candidate runtime unavailable: stage=TARGET_IDENTITY")
+                return
+            }
+            state =
+                targets.associate { target ->
+                    val identityHash = IdentityHash.of(target.identityHash)
+                    val service =
+                        RemoteCandidateService(
+                            identityHash,
+                            BridgeRemoteCandidateBackend(),
+                            FileRemoteCandidateStore(
+                                Path.of("/data/adb/teesimulator-rka/candidate-keystore")
+                            ),
+                            target.aaidDer,
                         )
-                        return
-                    }
-            val identityHash = IdentityHash.of(target.identityHash)
-            val service =
-                RemoteCandidateService(
-                    identityHash,
-                    BridgeRemoteCandidateBackend(),
-                    FileRemoteCandidateStore(
-                        Path.of("/data/adb/teesimulator-rka/candidate-keystore")
-                    ),
-                    target.aaidDer,
-                )
-            state = State.Authorized(InstalledRuntime(target.uid, identityHash, service))
-            SystemLogger.info("RKA candidate runtime state=AUTHORIZED")
+                    identityHash to InstalledRuntime(target.uid, identityHash, service)
+                }
+            SystemLogger.info("RKA candidate runtime state=AUTHORIZED count=${state.size}")
         }
     }
 
-    fun current(): CandidateRuntime? = (state as? State.Authorized)?.runtime
+    fun current(uid: Int): CandidateRuntime? = state.values.firstOrNull { it.admits(uid) }
 
     private class InstalledRuntime(
         private val admittedUid: Int,
@@ -63,15 +57,17 @@ object CandidateRuntimeRegistry {
             if (admits(id.uid)) service.generate(CandidateGenerateRequest(id, identityHash, shape))
             else CandidateRoute.PassThrough
 
-        override fun get(uid: Int, id: CandidateKeyId) = service.get(uid, id)
+        override fun get(uid: Int, id: CandidateKeyId) =
+            if (admits(uid)) service.get(uid, id) else CandidateRoute.PassThrough
 
         override fun list(uid: Int) =
             if (admits(uid)) service.list(uid, identityHash) else CandidateRoute.PassThrough
 
-        override fun delete(uid: Int, id: CandidateKeyId) = service.delete(uid, id)
+        override fun delete(uid: Int, id: CandidateKeyId) =
+            if (admits(uid)) service.delete(uid, id) else CandidateRoute.PassThrough
 
         override fun grant(uid: Int, id: CandidateKeyId, granteeUid: Int) =
-            service.grant(uid, id, granteeUid)
+            if (admits(uid)) service.grant(uid, id, granteeUid) else CandidateRoute.PassThrough
 
         override fun begin(uid: Int, id: CandidateKeyId) = service.begin(uid, id)
 

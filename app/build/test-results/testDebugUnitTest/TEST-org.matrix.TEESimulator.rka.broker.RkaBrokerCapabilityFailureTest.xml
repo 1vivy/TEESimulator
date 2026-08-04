@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityFailureTest" tests="11" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:58.225Z" hostname="cachyos-x8664" time="0.029">
+  <properties/>
+  <testcase name="accessDeniedIsTypedWithoutLeakingPlatformMessage" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityFailureTest" time="0.001"/>
+  <testcase name="missingServiceIsTypedAndNeverFallsBack" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityFailureTest" time="0.0"/>
+  <testcase name="cancellationDeadlineAndDeathAreDistinctTypedFailures" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityFailureTest" time="0.0"/>
+  <testcase name="serviceSpecificCodesMapExhaustivelyAndRedactMessages" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityFailureTest" time="0.0"/>
+  <testcase name="deathDuringAnIrpcOperationDiscardsTheResult" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityFailureTest" time="0.0"/>
+  <testcase name="inFlightCancellationInterruptsTheBoundedCall" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityFailureTest" time="0.025"/>
+  <testcase name="keyMintFailuresUseTheKeyMintTypedDomain" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityFailureTest" time="0.001"/>
+  <testcase name="publicSurfaceContainsNoBinderParcelBlobOrSerializableTypes" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityFailureTest" time="0.0"/>
+  <testcase name="brokerSourcesCannotActivateLegacyInterceptors" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityFailureTest" time="0.001"/>
+  <testcase name="versionThreeIgnoresTheDeprecatedEekCurveField" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityFailureTest" time="0.0"/>
+  <testcase name="saturatedCallRunnerFailsWithTypedCapacity" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityFailureTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

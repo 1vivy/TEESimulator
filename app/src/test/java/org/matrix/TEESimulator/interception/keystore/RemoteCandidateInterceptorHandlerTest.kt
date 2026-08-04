@@ -24,7 +24,7 @@ class RemoteCandidateInterceptorHandlerTest {
             .generate(CandidateGenerateRequest(fixture.id, fixture.identity, fixture.shape))
             .remoteSuccess()
         fixture.backend.calls.clear()
-        publishRuntime(fixture.runtime)
+        publishRuntime(fixture.identity, fixture.runtime)
 
         val list =
             privateMethod(
@@ -104,17 +104,13 @@ class RemoteCandidateInterceptorHandlerTest {
             blob = null
         }
 
-    private fun publishRuntime(runtime: CandidateRuntime) {
-        val stateClass =
-            Class.forName(
-                "org.matrix.TEESimulator.rka.candidate.CandidateRuntimeRegistry\$State\$Authorized"
-            )
-        val constructor = stateClass.getDeclaredConstructor(CandidateRuntime::class.java)
-        constructor.isAccessible = true
-        val state = constructor.newInstance(runtime)
+    private fun publishRuntime(
+        identity: org.matrix.TEESimulator.rka.candidate.IdentityHash,
+        runtime: CandidateRuntime,
+    ) {
         CandidateRuntimeRegistry::class.java.getDeclaredField("state").let {
             it.isAccessible = true
-            it.set(CandidateRuntimeRegistry, state)
+            it.set(CandidateRuntimeRegistry, mapOf(identity to runtime))
         }
     }
 }

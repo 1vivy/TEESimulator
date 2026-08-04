@@ -1,13 +1,72 @@
 package org.matrix.TEESimulator.rka.candidate
 
+import java.lang.reflect.Proxy
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.interception.keystore.LocalCandidateKeyMint
 import org.matrix.TEESimulator.interception.keystore.RemoteCandidateRouteAdapter
+import org.matrix.TEESimulator.rka.donor.DonorFixture
+import org.matrix.TEESimulator.rka.identity.AuthoritativeIdentity
+import org.matrix.TEESimulator.rka.identity.CandidateIdentityAuthority
+import org.matrix.TEESimulator.rka.identity.RawPackageIdentity
 
 class RemoteCandidateLifecycleTest {
+    @Test
+    fun twoConfiguredCandidateUidsBothProduceAdmittedRuntimes() {
+        // Given
+        val configured = linkedMapOf(10_123 to "candidate.first", 10_124 to "candidate.second")
+        val authority = candidateAuthority(configured)
+        val registryState = registryStateField().get(CandidateRuntimeRegistry)
+
+        try {
+            // When
+            val identities =
+                ConfigurationManager.configuredCandidateIdentities(
+                    configured.keys.toList(),
+                    authority,
+                )
+            val runtimes =
+                identities.associate { identity ->
+                    IdentityHash.of(identity.identityHash) to runtimeFor(identity.uid)
+                }
+            runCatching { registryStateField().set(CandidateRuntimeRegistry, runtimes) }
+            val first = currentRuntime(10_123)
+            val second = currentRuntime(10_124)
+
+            // Then
+            assertEquals(2, identities.size)
+            assertNotNull(first)
+            assertNotNull(second)
+            assertNotSame(first, second)
+        } finally {
+            registryStateField().set(CandidateRuntimeRegistry, registryState)
+        }
+    }
+
+    @Test
+    fun getDeleteAndGrantRejectAnUnadmittedUid() {
+        // Given
+        val fixture = CandidateFixture()
+        val key = fixture.adapter.generate(fixture.request).success()
+        val runtime = installedRuntime(fixture.uid, fixture.identity, fixture.service)
+        val foreignUid = fixture.uid + 1
+
+        // When
+        val fetched = runtime.get(foreignUid, key.id)
+        val deleted = runtime.delete(foreignUid, key.id)
+        val granted = runtime.grant(foreignUid, key.id, foreignUid + 1)
+
+        // Then
+        assertEquals(CandidateRoute.PassThrough, fetched)
+        assertEquals(CandidateRoute.PassThrough, deleted)
+        assertEquals(CandidateRoute.PassThrough, granted)
+    }
+
     @Test
     fun generateBeginUpdateAadFinishDelete() {
         val fixture = CandidateFixture()
@@ -103,6 +162,58 @@ class RemoteCandidateLifecycleTest {
     }
 }
 
+private fun candidateAuthority(candidates: Map<Int, String>): CandidateIdentityAuthority {
+    val signer = DonorFixture().rootCertificate.encoded
+    return object : CandidateIdentityAuthority {
+        override fun snapshot(uid: Int, epoch: Long) =
+            AuthoritativeIdentity(
+                0,
+                uid,
+                listOf(
+                    RawPackageIdentity(candidates.getValue(uid), 1u, listOf(signer), listOf(signer))
+                ),
+            )
+    }
+}
+
+private fun runtimeFor(uid: Int): CandidateRuntime =
+    Proxy.newProxyInstance(
+        CandidateRuntime::class.java.classLoader,
+        arrayOf(CandidateRuntime::class.java),
+    ) { _, method, arguments ->
+        if (method.name == "admits") arguments?.single() == uid
+        else throw UnsupportedOperationException(method.name)
+    } as CandidateRuntime
+
+private fun currentRuntime(uid: Int): CandidateRuntime? =
+    CandidateRuntimeRegistry::class
+        .java
+        .methods
+        .singleOrNull { it.name == "current" && it.parameterCount == 1 }
+        ?.invoke(CandidateRuntimeRegistry, uid) as? CandidateRuntime
+
+private fun installedRuntime(
+    uid: Int,
+    identity: IdentityHash,
+    service: RemoteCandidateService,
+): CandidateRuntime {
+    val type =
+        CandidateRuntimeRegistry::class.java.declaredClasses.single {
+            it.simpleName == "InstalledRuntime"
+        }
+    val constructor =
+        type.getDeclaredConstructor(
+            Int::class.javaPrimitiveType,
+            IdentityHash::class.java,
+            RemoteCandidateService::class.java,
+        )
+    constructor.isAccessible = true
+    return constructor.newInstance(uid, identity, service) as CandidateRuntime
+}
+
+private fun registryStateField() =
+    CandidateRuntimeRegistry::class.java.getDeclaredField("state").apply { isAccessible = true }
+
 class FailClosedRouteTest {
     @Test
     fun remoteFailureNeverFallsBack() {
@@ -176,13 +287,9 @@ private class CandidateFixture(failGenerate: CandidateError? = null) {
     val store = FileRemoteCandidateStore(storePath)
     val backend = FakeRemoteCandidateBackend(failGenerate)
     val local = CountingLocalKeyMint()
-    val adapter =
-        RemoteCandidateRouteAdapter(
-            RemoteCandidateService(identity, backend, store) {
-                RemoteKeyHandle.of(ByteArray(16) { 5 })
-            },
-            local,
-        )
+    val service =
+        RemoteCandidateService(identity, backend, store) { RemoteKeyHandle.of(ByteArray(16) { 5 }) }
+    val adapter = RemoteCandidateRouteAdapter(service, local)
     val request =
         CandidateGenerateRequest(
             CandidateKeyId(uid, uid.toLong(), "foreground"),

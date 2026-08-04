@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.bridge.BridgeExecutionTest" tests="2" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:56.306Z" hostname="cachyos-x8664" time="0.052">
+  <properties/>
+  <testcase name="four_active_four_queued_and_ninth_rejected_use_the_production_executor" classname="org.matrix.TEESimulator.rka.bridge.BridgeExecutionTest" time="0.001"/>
+  <testcase name="timeout_aborts_exact_work_and_leaves_no_active_or_queued_task" classname="org.matrix.TEESimulator.rka.bridge.BridgeExecutionTest" time="0.051"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

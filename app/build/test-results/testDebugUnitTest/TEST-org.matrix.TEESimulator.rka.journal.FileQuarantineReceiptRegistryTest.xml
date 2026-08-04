@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.journal.FileQuarantineReceiptRegistryTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:58.371Z" hostname="cachyos-x8664" time="0.039">
+  <properties/>
+  <testcase name="registryRejectsSymlinksWeakModesAndCapacityOverflow" classname="org.matrix.TEESimulator.rka.journal.FileQuarantineReceiptRegistryTest" time="0.039"/>
+  <testcase name="startupDeterministicallyRemovesOnlyValidatedStaleTemps" classname="org.matrix.TEESimulator.rka.journal.FileQuarantineReceiptRegistryTest" time="0.0"/>
+  <testcase name="keyedReceiptsCoexistAndCreateNeverOverwrites" classname="org.matrix.TEESimulator.rka.journal.FileQuarantineReceiptRegistryTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

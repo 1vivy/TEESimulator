@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.bridge.BrokerBridgeLifecycleTest" tests="5" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:56.733Z" hostname="cachyos-x8664" time="0.106">
+  <properties/>
+  <testcase name="peer_identity_checks_every_credential_and_process_field" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeLifecycleTest" time="0.0"/>
+  <testcase name="candidate_client_performs_encoded_correlated_exchange" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeLifecycleTest" time="0.001"/>
+  <testcase name="cancellingOneCandidateProvisioningLeavesTheOtherActive" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeLifecycleTest" time="0.003"/>
+  <testcase name="aggregate_deadline_includes_authentication_io_and_dispatch" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeLifecycleTest" time="0.101"/>
+  <testcase name="no_state_lock_is_held_across_peer_io_procfs_or_dispatch" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeLifecycleTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

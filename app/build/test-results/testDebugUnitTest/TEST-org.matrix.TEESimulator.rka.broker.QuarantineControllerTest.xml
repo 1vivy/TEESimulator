@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.broker.QuarantineControllerTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:58.221Z" hostname="cachyos-x8664" time="0.003">
+  <properties/>
+  <testcase name="tamperedReceiptCannotCompleteTheActiveJournal" classname="org.matrix.TEESimulator.rka.broker.QuarantineControllerTest" time="0.001"/>
+  <testcase name="twoDistinctValidBatchesEachExecuteOnceAndKeepIndependentReceipts" classname="org.matrix.TEESimulator.rka.broker.QuarantineControllerTest" time="0.001"/>
+  <testcase name="authenticatedRequestAcceptsAHighBitWireRequestId" classname="org.matrix.TEESimulator.rka.broker.QuarantineControllerTest" time="0.0"/>
+  <testcase name="durableReceiptSurvivesControllerRestartAndTamperingIsRejected" classname="org.matrix.TEESimulator.rka.broker.QuarantineControllerTest" time="0.001"/>
+  <testcase name="mismatchedHandleSetFailsClosedBeforeReuse" classname="org.matrix.TEESimulator.rka.broker.QuarantineControllerTest" time="0.0"/>
+  <testcase name="authenticatedRequestCancelsDiscardsAndWipesEachHandleExactlyOnce" classname="org.matrix.TEESimulator.rka.broker.QuarantineControllerTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

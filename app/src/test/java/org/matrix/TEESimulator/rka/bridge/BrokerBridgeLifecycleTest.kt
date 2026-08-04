@@ -6,8 +6,34 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.matrix.TEESimulator.rka.broker.BrokerCancellation
+import org.matrix.TEESimulator.rka.candidate.IdentityHash
 
 class BrokerBridgeLifecycleTest {
+    @Test
+    fun cancellingOneCandidateProvisioningLeavesTheOtherActive() {
+        // Given
+        val candidateA = IdentityHash.of(ByteArray(32) { 1 })
+        val candidateB = IdentityHash.of(ByteArray(32) { 2 })
+        val requestA = RequestId(101)
+        val requestB = RequestId(102)
+        val cancellationA = BrokerCancellation.active()
+        val cancellationB = BrokerCancellation.active()
+        registerProvisioning(candidateA, requestA, cancellationA)
+        registerProvisioning(candidateB, requestB, cancellationB)
+
+        try {
+            // When
+            cancelProvisioning(candidateA)
+
+            // Then
+            assertTrue(provisioningIsActive(candidateB, requestB))
+            assertFalse(cancellationB.isCancelled())
+        } finally {
+            resetProvisioningState()
+        }
+    }
+
     @Test
     fun candidate_client_performs_encoded_correlated_exchange() {
         val snapshot = snapshot()
@@ -211,3 +237,70 @@ class BrokerBridgeLifecycleTest {
         }
     }
 }
+
+private fun registerProvisioning(
+    candidate: IdentityHash,
+    requestId: RequestId,
+    cancellation: BrokerCancellation,
+) {
+    val method =
+        DonorProvisioningRuntime::class.java.declaredMethods.singleOrNull {
+            it.name.startsWith("registerActiveProvisioning") && it.parameterCount == 3
+        }
+    if (method != null) {
+        method.isAccessible = true
+        val encodedRequestId =
+            if (method.parameterTypes[1] == Long::class.javaPrimitiveType) requestId.value
+            else requestId
+        method.invoke(DonorProvisioningRuntime, candidate, encodedRequestId, cancellation)
+        return
+    }
+    provisioningField("activeRequestId").set(DonorProvisioningRuntime, requestId)
+    provisioningField("activeCancellation").set(DonorProvisioningRuntime, cancellation)
+}
+
+private fun cancelProvisioning(candidate: IdentityHash) {
+    val method =
+        DonorProvisioningRuntime::class.java.declaredMethods.singleOrNull {
+            it.name.startsWith("cancelActiveProvisioning") && it.parameterCount == 1
+        }
+    if (method != null) {
+        method.isAccessible = true
+        method.invoke(DonorProvisioningRuntime, candidate)
+        return
+    }
+    (provisioningField("activeCancellation").get(DonorProvisioningRuntime) as? BrokerCancellation)
+        ?.cancel()
+    provisioningField("activeCancellation").set(DonorProvisioningRuntime, null)
+    provisioningField("activeRequestId").set(DonorProvisioningRuntime, null)
+}
+
+private fun provisioningIsActive(candidate: IdentityHash, requestId: RequestId): Boolean {
+    val method =
+        DonorProvisioningRuntime::class.java.declaredMethods.singleOrNull {
+            it.name.startsWith("activeProvisioningMatches") && it.parameterCount == 2
+        }
+    if (method != null) {
+        method.isAccessible = true
+        val encodedRequestId =
+            if (method.parameterTypes[1] == Long::class.javaPrimitiveType) requestId.value
+            else requestId
+        return method.invoke(DonorProvisioningRuntime, candidate, encodedRequestId) as Boolean
+    }
+    return provisioningField("activeRequestId").get(DonorProvisioningRuntime) == requestId
+}
+
+@Suppress("UNCHECKED_CAST")
+private fun resetProvisioningState() {
+    listOf("activeRequestIds", "activeCancellations", "quarantineControllers").forEach { name ->
+        runCatching {
+            (provisioningField(name).get(DonorProvisioningRuntime) as MutableMap<Any, Any>).clear()
+        }
+    }
+    listOf("activeRequestId", "activeCancellation").forEach { name ->
+        runCatching { provisioningField(name).set(DonorProvisioningRuntime, null) }
+    }
+}
+
+private fun provisioningField(name: String) =
+    DonorProvisioningRuntime::class.java.getDeclaredField(name).apply { isAccessible = true }

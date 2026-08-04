@@ -407,7 +407,7 @@ class KeyMintSecurityLevelInterceptor(
     ): TransactionResult? {
         if (securityLevel != SecurityLevel.TRUSTED_ENVIRONMENT) return null
         if (ConfigurationManager.shouldUseSyntheticLease(callingUid)) return null
-        val runtime = CandidateRuntimeRegistry.current() ?: return null
+        val runtime = CandidateRuntimeRegistry.current(callingUid) ?: return null
         if (!runtime.admits(callingUid)) return null
         val id =
             when (descriptor.domain) {
@@ -440,7 +440,7 @@ class KeyMintSecurityLevelInterceptor(
         if (securityLevel != SecurityLevel.TRUSTED_ENVIRONMENT) return null
         if (ConfigurationManager.shouldUseSyntheticLease(callingUid)) return null
         val runtime =
-            CandidateRuntimeRegistry.current()
+            CandidateRuntimeRegistry.current(callingUid)
                 ?: run {
                     if (!ConfigurationManager.shouldSkipUid(callingUid)) {
                         SystemLogger.warning("RKA candidate route unavailable: stage=RUNTIME")

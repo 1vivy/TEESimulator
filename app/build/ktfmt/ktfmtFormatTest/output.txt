@@ -1,0 +1,5 @@
+Ktfmt Summary:
+  - Valid formatted files: 47
+  - Invalid formatted files: 10
+  - Skipped files: 0
+  - Failed files: 0

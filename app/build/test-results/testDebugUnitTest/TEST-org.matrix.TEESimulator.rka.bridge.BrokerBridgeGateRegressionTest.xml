@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.bridge.BrokerBridgeGateRegressionTest" tests="11" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:56.423Z" hostname="cachyos-x8664" time="0.309">
+  <properties/>
+  <testcase name="donor_rechecks_so_peercred_immediately_before_successful_write" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeGateRegressionTest" time="0.001"/>
+  <testcase name="blocked_read_is_closed_by_the_one_absolute_deadline" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeGateRegressionTest" time="0.1"/>
+  <testcase name="late_dispatch_result_after_timeout_is_destroyed_and_never_written" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeGateRegressionTest" time="0.1"/>
+  <testcase name="donor_reauthenticates_after_dispatch_before_writing_response" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeGateRegressionTest" time="0.001"/>
+  <testcase name="donor_bind_establishes_missing_socket_directory_before_platform_bind" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeGateRegressionTest" time="0.002"/>
+  <testcase name="known_tag_in_wrong_direction_and_wrong_matching_response_are_rejected" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeGateRegressionTest" time="0.001"/>
+  <testcase name="nine_maximum_certificates_exceed_the_aggregate_chain_limit" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeGateRegressionTest" time="0.001"/>
+  <testcase name="blocked_accept_or_connect_is_aborted_inside_the_same_deadline" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeGateRegressionTest" time="0.101"/>
+  <testcase name="candidate_reauthenticates_after_read_before_exposing_response" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeGateRegressionTest" time="0.0"/>
+  <testcase name="closing_public_bytes_zeroes_the_actual_backing_array" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeGateRegressionTest" time="0.001"/>
+  <testcase name="cancel_interrupts_the_exact_in_flight_worker_and_closes_its_transport" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeGateRegressionTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

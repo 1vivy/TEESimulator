@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.bridge.BrokerBridgeSecondFollowupTest" tests="5" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:56.840Z" hostname="cachyos-x8664" time="0.304">
+  <properties/>
+  <testcase name="production_identity_cannot_be_supplied_by_public_callback" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeSecondFollowupTest" time="0.0"/>
+  <testcase name="blocking_accept_and_connect_are_not_public" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeSecondFollowupTest" time="0.001"/>
+  <testcase name="sepolicy_uses_only_dedicated_rka_socket_types" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeSecondFollowupTest" time="0.001"/>
+  <testcase name="success_transfers_live_response_ownership_to_caller" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeSecondFollowupTest" time="0.0"/>
+  <testcase name="external_consumer_cannot_compile_a_blocking_or_forgeable_bypass" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeSecondFollowupTest" time="0.302"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

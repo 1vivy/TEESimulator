@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:58.255Z" hostname="cachyos-x8664" time="0.001">
+  <properties/>
+  <testcase name="generatedPublicMaterialIsDefensivelyOwnedAndOpaqueBlobIsRedacted" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityTest" time="0.0"/>
+  <testcase name="challengeEdgesAreParsedOnceAndDefensivelyOwned" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityTest" time="0.0"/>
+  <testcase name="selfCallsBypassBeforeAnyServiceLookup" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityTest" time="0.0"/>
+  <testcase name="resolvesOnlyDefaultTeeV3Capability" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityTest" time="0.0"/>
+  <testcase name="keyCountEdgesAreBounded" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityTest" time="0.0"/>
+  <testcase name="rejectsEveryNonV3IrpcVersion" classname="org.matrix.TEESimulator.rka.broker.RkaBrokerCapabilityTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

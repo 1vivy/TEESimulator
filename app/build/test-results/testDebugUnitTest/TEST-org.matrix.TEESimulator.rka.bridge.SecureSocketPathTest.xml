@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.bridge.SecureSocketPathTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:57.163Z" hostname="cachyos-x8664" time="0.001">
+  <properties/>
+  <testcase name="cleanup_unlinks_only_the_exact_still_named_bound_socket" classname="org.matrix.TEESimulator.rka.bridge.SecureSocketPathTest" time="0.0"/>
+  <testcase name="bind_failure_never_deletes_a_competing_socket" classname="org.matrix.TEESimulator.rka.bridge.SecureSocketPathTest" time="0.0"/>
+  <testcase name="ancestor_or_leaf_swap_between_each_phase_is_rejected_without_competitor_deletion" classname="org.matrix.TEESimulator.rka.bridge.SecureSocketPathTest" time="0.001"/>
+  <testcase name="directory_and_bound_socket_failures_stay_typed" classname="org.matrix.TEESimulator.rka.bridge.SecureSocketPathTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

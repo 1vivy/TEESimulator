@@ -10,55 +10,61 @@ import org.matrix.TEESimulator.rka.bridge.BridgeMessage
 import org.matrix.TEESimulator.rka.bridge.CandidateBridgeOperation
 import org.matrix.TEESimulator.rka.bridge.Hash32
 import org.matrix.TEESimulator.rka.bridge.PublicBytes
+import org.matrix.TEESimulator.rka.candidate.IdentityHash
 import org.matrix.TEESimulator.rka.journal.RkpOpaqueHandle
 
 internal object DonorBridgeDispatcher {
     fun dispatch(
         command: BridgeMessage.CandidateCommand,
         backend: DonorKeyMintBackend,
+        candidate: IdentityHash,
     ): BridgeMessage {
         val payload = command.payload.copyBytes()
         return try {
             val result =
                 when (command.operation) {
                     CandidateBridgeOperation.GENERATE ->
-                        backend.generate(DonorBridgeCodec.decodeGenerate(payload)).map {
+                        backend.generate(candidate, DonorBridgeCodec.decodeGenerate(payload)).map {
                             DonorBridgeCodec.keyReply(it)
                         }
                     CandidateBridgeOperation.GET ->
-                        backend.get(DonorBridgeCodec.decodeKeyHandle(payload)).map {
+                        backend.get(candidate, DonorBridgeCodec.decodeKeyHandle(payload)).map {
                             DonorBridgeCodec.keyReply(it)
                         }
                     CandidateBridgeOperation.LIST -> {
                         if (payload.isNotEmpty()) failure(DonorError.INVALID_REQUEST)
-                        else success(DonorBridgeCodec.listReply(backend.list()))
+                        else success(DonorBridgeCodec.listReply(backend.list(candidate)))
                     }
                     CandidateBridgeOperation.DELETE ->
-                        backend.delete(DonorBridgeCodec.decodeKeyHandle(payload)).map {
+                        backend.delete(candidate, DonorBridgeCodec.decodeKeyHandle(payload)).map {
                             ByteArray(0)
                         }
                     CandidateBridgeOperation.BEGIN ->
-                        backend.begin(DonorBridgeCodec.decodeKeyHandle(payload)).map {
+                        backend.begin(candidate, DonorBridgeCodec.decodeKeyHandle(payload)).map {
                             it.handle.copyBytes()
                         }
                     CandidateBridgeOperation.UPDATE_AAD -> {
                         val (handle, input) = DonorBridgeCodec.decodeOperation(payload)
-                        backend.updateAad(handle, input).map { DonorBridgeCodec.updateReply(it) }
+                        backend.updateAad(candidate, handle, input).map {
+                            DonorBridgeCodec.updateReply(it)
+                        }
                     }
                     CandidateBridgeOperation.UPDATE -> {
                         val (handle, input) = DonorBridgeCodec.decodeOperation(payload)
-                        backend.update(handle, input).map { DonorBridgeCodec.updateReply(it) }
+                        backend.update(candidate, handle, input).map {
+                            DonorBridgeCodec.updateReply(it)
+                        }
                     }
                     CandidateBridgeOperation.FINISH -> {
                         val (handle, input) = DonorBridgeCodec.decodeOperation(payload)
-                        backend.finish(handle, input).map {
+                        backend.finish(candidate, handle, input).map {
                             DonorBridgeCodec.bounded(it.signature.copyBytes())
                         }
                     }
                     CandidateBridgeOperation.ABORT -> {
                         val (handle, input) = DonorBridgeCodec.decodeOperation(payload)
                         if (input.isNotEmpty()) failure(DonorError.INVALID_REQUEST)
-                        else backend.abort(handle).map { ByteArray(0) }
+                        else backend.abort(candidate, handle).map { ByteArray(0) }
                     }
                 }
             when (result) {

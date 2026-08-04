@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.bridge.BrokerBridgeStaticPolicyTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:57.145Z" hostname="cachyos-x8664" time="0.005">
+  <properties/>
+  <testcase name="bridge_sources_exclude_forbidden_platform_and_secret_material" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeStaticPolicyTest" time="0.002"/>
+  <testcase name="production_app_has_no_companion_dependency" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeStaticPolicyTest" time="0.002"/>
+  <testcase name="sepolicy_is_exact_and_not_broad" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeStaticPolicyTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

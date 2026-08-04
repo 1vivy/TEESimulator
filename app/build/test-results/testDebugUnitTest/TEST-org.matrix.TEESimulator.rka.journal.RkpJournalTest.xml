@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.journal.RkpJournalTest" tests="14" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:58.415Z" hostname="cachyos-x8664" time="0.004">
+  <properties/>
+  <testcase name="batchRecordedBeforeCsr" classname="org.matrix.TEESimulator.rka.journal.RkpJournalTest" time="0.001"/>
+  <testcase name="terminalDeleteClearsBrokerOwnerBeforeReturn" classname="org.matrix.TEESimulator.rka.journal.RkpJournalTest" time="0.0"/>
+  <testcase name="rejectsTransitionSkip" classname="org.matrix.TEESimulator.rka.journal.RkpJournalTest" time="0.0"/>
+  <testcase name="writeFailurePreventsHardware" classname="org.matrix.TEESimulator.rka.journal.RkpJournalTest" time="0.001"/>
+  <testcase name="fileJournalClearDeletesTheValidatedRecordBeforeParentFsync" classname="org.matrix.TEESimulator.rka.journal.RkpJournalTest" time="0.0"/>
+  <testcase name="writeFailurePreventsNextState" classname="org.matrix.TEESimulator.rka.journal.RkpJournalTest" time="0.0"/>
+  <testcase name="crashRecoveryIsDurableAndIdempotent" classname="org.matrix.TEESimulator.rka.journal.RkpJournalTest" time="0.0"/>
+  <testcase name="rejectsDuplicateTransition" classname="org.matrix.TEESimulator.rka.journal.RkpJournalTest" time="0.0"/>
+  <testcase name="persistsGeneratingBeforeRecordingOrderedResults" classname="org.matrix.TEESimulator.rka.journal.RkpJournalTest" time="0.0"/>
+  <testcase name="completedQuarantineDeletesOnlyTheActiveRecordAndAdmitsAFreshBatch" classname="org.matrix.TEESimulator.rka.journal.RkpJournalTest" time="0.0"/>
+  <testcase name="appGeneratingCrashBecomesQuarantined" classname="org.matrix.TEESimulator.rka.journal.RkpJournalTest" time="0.001"/>
+  <testcase name="postingCrashBecomesAmbiguousWithoutRetry" classname="org.matrix.TEESimulator.rka.journal.RkpJournalTest" time="0.0"/>
+  <testcase name="provisioningPreparationClearsAnInterruptedCsrBatch" classname="org.matrix.TEESimulator.rka.journal.RkpJournalTest" time="0.0"/>
+  <testcase name="provisioningPreparationPreservesACertifiedLease" classname="org.matrix.TEESimulator.rka.journal.RkpJournalTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

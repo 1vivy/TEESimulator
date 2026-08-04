@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.bridge.BrokerBridgeFourthFollowupTest" tests="5" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:56.417Z" hostname="cachyos-x8664" time="0.005">
+  <properties/>
+  <testcase name="custom_socket_policy_has_only_the_exact_runtime_access_rules" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeFourthFollowupTest" time="0.004"/>
+  <testcase name="donor_listener_stays_bound_while_idle_and_only_connected_io_is_deadline_bounded" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeFourthFollowupTest" time="0.0"/>
+  <testcase name="production_uses_the_arm64_directory_open_flag" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeFourthFollowupTest" time="0.0"/>
+  <testcase name="production_relabels_only_the_anchored_bound_socket" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeFourthFollowupTest" time="0.001"/>
+  <testcase name="public_factory_binds_expected_role_before_any_socket_operation" classname="org.matrix.TEESimulator.rka.bridge.BrokerBridgeFourthFollowupTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

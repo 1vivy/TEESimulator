@@ -24,7 +24,11 @@ class DonorKeyMintProductionReachabilityTest {
         assertTrue(adapter.contains("attestKeyParams = emptyArray()"))
         assertTrue(backend.contains("rkpCertificate.subjectX500Principal.encoded"))
         assertTrue(backend.contains("RkpJournalState.APP_KEY_GENERATING"))
-        assertTrue(runtime.contains("DonorDispatchAdapter.dispatch(message, donorBackend.value)"))
+        assertTrue(
+            runtime.contains(
+                "DonorDispatchAdapter.dispatch(message, donorBackend.value, candidate)"
+            )
+        )
         assertFalse(adapter.contains("android.system.keystore2"))
         assertFalse(adapter.contains("IKeystoreSecurityLevel"))
     }

@@ -11,6 +11,7 @@ import org.matrix.TEESimulator.attestation.DeviceAttestationService
 import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.pki.KeyBoxManager
 import org.matrix.TEESimulator.rka.identity.AndroidCandidateIdentityAuthority
+import org.matrix.TEESimulator.rka.identity.CandidateIdentityAuthority
 import org.matrix.TEESimulator.rka.identity.CandidateIdentityGate
 
 /**
@@ -104,9 +105,9 @@ object ConfigurationManager {
     fun shouldUseSyntheticLease(uid: Int): Boolean =
         getPackagesForUid(uid).any { packageModes[it] == Mode.PATCH }
 
-    fun configuredCandidateIdentity(): ConfiguredCandidateIdentity? =
+    fun configuredCandidateIdentities(): List<ConfiguredCandidateIdentity> =
         runCatching {
-                val packageManager = getPackageManager() ?: return null
+                val packageManager = getPackageManager() ?: return emptyList()
                 val installed =
                     if (Build.VERSION.SDK_INT >= 33) {
                         packageManager.getInstalledPackages(0L, 0).list
@@ -118,17 +119,21 @@ object ConfigurationManager {
                         .filter { it.packageName in packageModes }
                         .mapNotNull { it.applicationInfo?.uid }
                         .distinct()
-                if (candidateUids.size != 1) return null
-                val uid = candidateUids.single()
-                val admission =
-                    CandidateIdentityGate(
-                            { uid },
-                            AndroidCandidateIdentityAuthority(packageManager),
-                        )
-                        .admitRemote()
-                ConfiguredCandidateIdentity(uid, admission.identityHash(), admission.aaidDer())
+                configuredCandidateIdentities(
+                    candidateUids,
+                    AndroidCandidateIdentityAuthority(packageManager),
+                )
             }
-            .getOrNull()
+            .getOrDefault(emptyList())
+
+    internal fun configuredCandidateIdentities(
+        candidateUids: List<Int>,
+        authority: CandidateIdentityAuthority,
+    ): List<ConfiguredCandidateIdentity> =
+        candidateUids.distinct().map { uid ->
+            val admission = CandidateIdentityGate({ uid }, authority).admitRemote()
+            ConfiguredCandidateIdentity(uid, admission.identityHash(), admission.aaidDer())
+        }
 
     fun isAutoMode(uid: Int): Boolean {
         for (pkg in getPackagesForUid(uid)) {

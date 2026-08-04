@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.donor.DonorKeyMintFailureTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:58.337Z" hostname="cachyos-x8664" time="0.011">
+  <properties/>
+  <testcase name="wrongAaidIssuerSpkiOrCharacteristicsDeletesWithoutExposure" classname="org.matrix.TEESimulator.rka.donor.DonorKeyMintFailureTest" time="0.007"/>
+  <testcase name="appKeyGeneratingCrashCallsHardwareOnceWithoutRetryOrExposure" classname="org.matrix.TEESimulator.rka.donor.DonorKeyMintFailureTest" time="0.001"/>
+  <testcase name="wrongChallengeDeletesQuarantinesAndNeverExposesOrRetries" classname="org.matrix.TEESimulator.rka.donor.DonorKeyMintFailureTest" time="0.001"/>
+  <testcase name="operationFailureDeletesAndQuarantinesWithoutSignature" classname="org.matrix.TEESimulator.rka.donor.DonorKeyMintFailureTest" time="0.002"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.bridge.BridgeProtocolMappingTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:56.415Z" hostname="cachyos-x8664" time="0.002">
+  <properties/>
+  <testcase name="certification_epoch_preserves_the_complete_unsigned_wire_domain" classname="org.matrix.TEESimulator.rka.bridge.BridgeProtocolMappingTest" time="0.001"/>
+  <testcase name="task8_golden_remains_the_exact_donor_request_mapping" classname="org.matrix.TEESimulator.rka.bridge.BridgeProtocolMappingTest" time="0.0"/>
+  <testcase name="every_request_has_one_response_tag_and_error_is_the_only_alternative" classname="org.matrix.TEESimulator.rka.bridge.BridgeProtocolMappingTest" time="0.001"/>
+  <testcase name="role_direction_allowlists_reject_every_known_wrong_tag_before_body_decode" classname="org.matrix.TEESimulator.rka.bridge.BridgeProtocolMappingTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

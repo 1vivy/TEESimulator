@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.config.LegacyModeBaselineTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:54.298Z" hostname="cachyos-x8664" time="0.018">
+  <properties/>
+  <testcase name="firstConfiguredPackageKeepsModePrecedence" classname="org.matrix.TEESimulator.config.LegacyModeBaselineTest" time="0.004"/>
+  <testcase name="autoRemainsAutoBeforeHardwareResolution" classname="org.matrix.TEESimulator.config.LegacyModeBaselineTest" time="0.013"/>
+  <testcase name="explicitPatchRemainsPatch" classname="org.matrix.TEESimulator.config.LegacyModeBaselineTest" time="0.001"/>
+  <testcase name="unselectedUidRemainsPlatformPassThrough" classname="org.matrix.TEESimulator.config.LegacyModeBaselineTest" time="0.0"/>
+  <testcase name="configuredKeyboxAndDefaultResolutionRemainStable" classname="org.matrix.TEESimulator.config.LegacyModeBaselineTest" time="0.0"/>
+  <testcase name="explicitGenerateRemainsGenerate" classname="org.matrix.TEESimulator.config.LegacyModeBaselineTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

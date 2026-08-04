@@ -15,9 +15,11 @@ class DonorDispatchProductionReachabilityTest {
 
         // When
         val runtimeCallsAdapter =
-            runtime.contains("DonorDispatchAdapter.dispatch(message, donorBackend.value)")
+            runtime.contains(
+                "DonorDispatchAdapter.dispatch(message, donorBackend.value, candidate)"
+            )
         val adapterCallsDispatcher =
-            adapter.contains("DonorBridgeDispatcher.dispatch(command, backend)")
+            adapter.contains("DonorBridgeDispatcher.dispatch(command, backend, candidate)")
 
         // Then
         assertTrue(runtimeCallsAdapter)

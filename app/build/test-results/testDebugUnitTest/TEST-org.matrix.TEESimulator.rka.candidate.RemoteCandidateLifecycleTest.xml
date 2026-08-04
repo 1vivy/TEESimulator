@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.candidate.RemoteCandidateLifecycleTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:58.278Z" hostname="cachyos-x8664" time="0.031">
+  <properties/>
+  <testcase name="persistenceRestartListGetAndLostReconciliation" classname="org.matrix.TEESimulator.rka.candidate.RemoteCandidateLifecycleTest" time="0.001"/>
+  <testcase name="getDeleteAndGrantRejectAnUnadmittedUid" classname="org.matrix.TEESimulator.rka.candidate.RemoteCandidateLifecycleTest" time="0.001"/>
+  <testcase name="twoConfiguredCandidateUidsBothProduceAdmittedRuntimes" classname="org.matrix.TEESimulator.rka.candidate.RemoteCandidateLifecycleTest" time="0.027"/>
+  <testcase name="generateBeginUpdateAadFinishDelete" classname="org.matrix.TEESimulator.rka.candidate.RemoteCandidateLifecycleTest" time="0.001"/>
+  <testcase name="abortDoesNotConsumeKeyAndGrantIsUnsupported" classname="org.matrix.TEESimulator.rka.candidate.RemoteCandidateLifecycleTest" time="0.001"/>
+  <testcase name="persistenceRoundTripsExactCharacteristics" classname="org.matrix.TEESimulator.rka.candidate.RemoteCandidateLifecycleTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

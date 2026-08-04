@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.bridge.TrustedSidecarIdentityTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:57.164Z" hostname="cachyos-x8664" time="0.001">
+  <properties/>
+  <testcase name="donor_admits_the_exact_root_synthetic_lease_probe_from_the_supervised_inode" classname="org.matrix.TEESimulator.rka.bridge.TrustedSidecarIdentityTest" time="0.001"/>
+  <testcase name="fixed_schema_rejects_missing_reordered_or_noncanonical_fields" classname="org.matrix.TEESimulator.rka.bridge.TrustedSidecarIdentityTest" time="0.0"/>
+  <testcase name="role_record_snapshot_rejects_a_live_process_with_mismatched_role_argv" classname="org.matrix.TEESimulator.rka.bridge.TrustedSidecarIdentityTest" time="0.0"/>
+  <testcase name="donor_admits_only_the_exact_root_provisioning_process_from_the_supervised_inode" classname="org.matrix.TEESimulator.rka.bridge.TrustedSidecarIdentityTest" time="0.0"/>
+  <testcase name="role_binding_rejects_both_cross_role_records" classname="org.matrix.TEESimulator.rka.bridge.TrustedSidecarIdentityTest" time="0.0"/>
+  <testcase name="fixed_schema_parses_exact_root_launch_identity" classname="org.matrix.TEESimulator.rka.bridge.TrustedSidecarIdentityTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

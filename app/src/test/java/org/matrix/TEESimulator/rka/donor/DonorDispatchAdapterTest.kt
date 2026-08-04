@@ -3,8 +3,8 @@ package org.matrix.TEESimulator.rka.donor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import org.matrix.TEESimulator.rka.bridge.BridgeMessage
 import org.matrix.TEESimulator.rka.bridge.BridgeLimits
+import org.matrix.TEESimulator.rka.bridge.BridgeMessage
 import org.matrix.TEESimulator.rka.bridge.CandidateBridgeOperation
 import org.matrix.TEESimulator.rka.bridge.PublicBytes
 import org.matrix.TEESimulator.rka.bridge.RequestId
@@ -23,7 +23,7 @@ class DonorDispatchAdapterTest {
             )
 
         // When
-        val response = DonorDispatchAdapter.dispatch(command, backend)
+        val response = DonorDispatchAdapter.dispatch(command, backend, donorTestCandidate)
 
         // Then
         assertTrue(response is BridgeMessage.CandidateReply)

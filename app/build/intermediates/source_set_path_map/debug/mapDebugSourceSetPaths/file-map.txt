@@ -1,0 +1,8 @@
+org.matrix.TEESimulator.app-pngs-0 /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/build/generated/res/pngs/debug
+org.matrix.TEESimulator.app-resValues-1 /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/build/generated/res/resValues/debug
+org.matrix.TEESimulator.app-updated_navigation_xml-2 /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/build/generated/updated_navigation_xml/debug
+org.matrix.TEESimulator.app-packageDebugResources-3 /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/build/intermediates/incremental/debug/packageDebugResources/merged.dir
+org.matrix.TEESimulator.app-packageDebugResources-4 /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/build/intermediates/incremental/debug/packageDebugResources/stripped.dir
+org.matrix.TEESimulator.app-debug-5 /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/build/intermediates/merged_res/debug/mergeDebugResources
+org.matrix.TEESimulator.app-debug-6 /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/debug/res
+org.matrix.TEESimulator.app-main-7 /home/vivy/.paseo/worktrees/3rxln21n/tearful-turkey/app/src/main/res

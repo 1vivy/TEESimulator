@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.bridge.ProvisioningBridgeDeadlineTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:57.162Z" hostname="cachyos-x8664" time="0.0">
+  <properties/>
+  <testcase name="directCandidateAndProvisioningBudgetsRemainSeparatelyBounded" classname="org.matrix.TEESimulator.rka.bridge.ProvisioningBridgeDeadlineTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

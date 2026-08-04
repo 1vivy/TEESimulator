@@ -31,7 +31,7 @@ class RemoteCandidateProductionIntegrationTest {
     fun registryPassesThroughWithoutCandidateAuthorization() {
         CandidateRuntimeRegistry.initializeLifecycle()
 
-        assertNull(CandidateRuntimeRegistry.current())
+        assertNull(CandidateRuntimeRegistry.current(10_123))
     }
 }
 

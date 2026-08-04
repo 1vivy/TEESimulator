@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.candidate.BridgeRemoteCandidateBackendTest" tests="2" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:58.264Z" hostname="cachyos-x8664" time="0.004">
+  <properties/>
+  <testcase name="candidateCommandCodecIsCanonicalBoundedAndCorrelated" classname="org.matrix.TEESimulator.rka.candidate.BridgeRemoteCandidateBackendTest" time="0.001"/>
+  <testcase name="productionBackendExchangesEveryRemoteOperationSuccessfully" classname="org.matrix.TEESimulator.rka.candidate.BridgeRemoteCandidateBackendTest" time="0.003"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

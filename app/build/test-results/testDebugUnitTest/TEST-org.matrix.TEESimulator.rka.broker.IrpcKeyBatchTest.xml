@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.broker.IrpcKeyBatchTest" tests="10" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:57.208Z" hostname="cachyos-x8664" time="0.01">
+  <properties/>
+  <testcase name="retainedBlobIsWipedAndRemovedOnClear" classname="org.matrix.TEESimulator.rka.broker.IrpcKeyBatchTest" time="0.002"/>
+  <testcase name="certificationAcceptsZeroAndHighBitWireEpochs" classname="org.matrix.TEESimulator.rka.broker.IrpcKeyBatchTest" time="0.001"/>
+  <testcase name="rejectsDuplicatePublicKeys" classname="org.matrix.TEESimulator.rka.broker.IrpcKeyBatchTest" time="0.0"/>
+  <testcase name="mutatedHandleRejectsAndQuarantinesRetainedBlobs" classname="org.matrix.TEESimulator.rka.broker.IrpcKeyBatchTest" time="0.001"/>
+  <testcase name="exactOrderedHandlesResolveRetainedBlobsBeforeQuarantine" classname="org.matrix.TEESimulator.rka.broker.IrpcKeyBatchTest" time="0.001"/>
+  <testcase name="preservesHardwareOrderAndRedactsBlobs" classname="org.matrix.TEESimulator.rka.broker.IrpcKeyBatchTest" time="0.0"/>
+  <testcase name="certificationMutationOrReplayQuarantinesWithoutCertifiedSuccess" classname="org.matrix.TEESimulator.rka.broker.IrpcKeyBatchTest" time="0.002"/>
+  <testcase name="certificationResolvesEveryRetainedBlobAndCommitsCertifiedAtomically" classname="org.matrix.TEESimulator.rka.broker.IrpcKeyBatchTest" time="0.001"/>
+  <testcase name="authenticatedCleanupDetachesThenWipesTheExactOwnedBlobOnce" classname="org.matrix.TEESimulator.rka.broker.IrpcKeyBatchTest" time="0.001"/>
+  <testcase name="certificationAcceptsAHighBitWireRequestId" classname="org.matrix.TEESimulator.rka.broker.IrpcKeyBatchTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

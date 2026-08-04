@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.bridge.BridgeMaterialLifetimeTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:56.359Z" hostname="cachyos-x8664" time="0.054">
+  <properties/>
+  <testcase name="every_owned_byte_type_zeroes_its_actual_backing_storage" classname="org.matrix.TEESimulator.rka.bridge.BridgeMaterialLifetimeTest" time="0.001"/>
+  <testcase name="truncated_frame_zeroes_header_and_partial_body_allocations" classname="org.matrix.TEESimulator.rka.bridge.BridgeMaterialLifetimeTest" time="0.001"/>
+  <testcase name="timeout_closes_decoded_request_storage_and_exact_transport" classname="org.matrix.TEESimulator.rka.bridge.BridgeMaterialLifetimeTest" time="0.052"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

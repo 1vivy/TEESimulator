@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.broker.FreshBatchQuarantineLifecycleTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:57.166Z" hostname="cachyos-x8664" time="0.035">
+  <properties/>
+  <testcase name="crashBeforeFirstActionLeavesActiveBatchAndResumeRunsEachEffectOnce" classname="org.matrix.TEESimulator.rka.broker.FreshBatchQuarantineLifecycleTest" time="0.011"/>
+  <testcase name="crashMatrixResumesWithoutRepeatingAnyExternalEffect" classname="org.matrix.TEESimulator.rka.broker.FreshBatchQuarantineLifecycleTest" time="0.009"/>
+  <testcase name="tombstoneBeforeJournalClearResumesClearWithoutRepeatingEffects" classname="org.matrix.TEESimulator.rka.broker.FreshBatchQuarantineLifecycleTest" time="0.002"/>
+  <testcase name="missingCompletionTombstoneKeepsJournalAndBlocksFreshBegin" classname="org.matrix.TEESimulator.rka.broker.FreshBatchQuarantineLifecycleTest" time="0.002"/>
+  <testcase name="crashAfterCancelEffectBeforeDurableActionAckDoesNotRepeatCancel" classname="org.matrix.TEESimulator.rka.broker.FreshBatchQuarantineLifecycleTest" time="0.001"/>
+  <testcase name="twoPostAmbiguousBatchesCompleteIndependentlyAndExactReplaysHaveNoEffects" classname="org.matrix.TEESimulator.rka.broker.FreshBatchQuarantineLifecycleTest" time="0.004"/>
+  <testcase name="crashesAfterEachActionAckResumeAtTheNextUnacknowledgedAction" classname="org.matrix.TEESimulator.rka.broker.FreshBatchQuarantineLifecycleTest" time="0.004"/>
+  <testcase name="missingOrTamperedActionAckWithCompletionTombstoneKeepsJournalBlocking" classname="org.matrix.TEESimulator.rka.broker.FreshBatchQuarantineLifecycleTest" time="0.002"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

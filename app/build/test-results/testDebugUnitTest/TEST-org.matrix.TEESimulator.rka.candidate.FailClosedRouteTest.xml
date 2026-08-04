@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.matrix.TEESimulator.rka.candidate.FailClosedRouteTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-08-04T10:00:58.268Z" hostname="cachyos-x8664" time="0.009">
+  <properties/>
+  <testcase name="nonTargetPassesThroughButExactRemoteShapesFailClosed" classname="org.matrix.TEESimulator.rka.candidate.FailClosedRouteTest" time="0.001"/>
+  <testcase name="remoteFailureNeverFallsBack" classname="org.matrix.TEESimulator.rka.candidate.FailClosedRouteTest" time="0.002"/>
+  <testcase name="everyPostAdmissionStageAndErrorClassNeverFallsBack" classname="org.matrix.TEESimulator.rka.candidate.FailClosedRouteTest" time="0.006"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

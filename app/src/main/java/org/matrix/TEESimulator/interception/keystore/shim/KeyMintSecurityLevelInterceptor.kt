@@ -89,7 +89,7 @@ class KeyMintSecurityLevelInterceptor(
                 notAfter,
             )
         }
-        val lease = SyntheticLeaseRegistry.current()
+        val lease = SyntheticLeaseRegistry.current(callingUid)
         SystemLogger.info(
             "RKA synthetic lease selected: epoch=${lease.epoch} validUntil=${lease.validUntilMillis}"
         )

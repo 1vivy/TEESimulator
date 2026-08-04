@@ -32,24 +32,30 @@ internal class SyntheticLeaseKeyBox(
 
 /** Production entry point. Every read revalidates the atomically replaced record. */
 internal object SyntheticLeaseRegistry {
-    private val store =
-        FileSyntheticLeaseStore(Path.of("/data/adb/teesimulator-rka/synthetic-leases/state.bin"))
+    @Volatile private var stores = emptyMap<Int, FileSyntheticLeaseStore>()
+
+    internal fun replaceStores(candidateStores: Map<Int, FileSyntheticLeaseStore>) {
+        stores = candidateStores.toMap()
+    }
+
+    fun current(callingUid: Int, nowMillis: Long = System.currentTimeMillis()): SyntheticLeaseKeyBox =
+        requireNotNull(stores[callingUid]).loadCurrent(nowMillis)
 
     fun current(nowMillis: Long = System.currentTimeMillis()): SyntheticLeaseKeyBox =
-        store.loadCurrent(nowMillis)
+        stores.values.single().loadCurrent(nowMillis)
 }
 
 internal class FileSyntheticLeaseStore(
-    private val path: Path,
-    private val activationPath: Path =
-        Path.of(
-            "/data/adb/teesimulator-rka/records/" +
-                "7061697265642d61637469766174696f6e2d7631"
-        ),
+    baseRoot: Path,
+    identityHash: IdentityHash,
 ) {
+    private val paths = CandidateStatePaths(baseRoot, identityHash)
+    internal val leaseStatePath = paths.leaseStatePath
+    internal val pairedActivationRecordPath = paths.pairedActivationRecordPath
+
     fun loadCurrent(nowMillis: Long): SyntheticLeaseKeyBox {
-        val encoded = readSecureRecord(path, MAX_STATE_BYTES)
-        val activation = readSecureRecord(activationPath, ACTIVATION_BYTES)
+        val encoded = readSecureRecord(leaseStatePath, MAX_STATE_BYTES)
+        val activation = readSecureRecord(pairedActivationRecordPath, ACTIVATION_BYTES)
         return try {
             SyntheticLeaseCodec.decodeCurrent(encoded, nowMillis).also {
                 SyntheticLeaseActivationCodec.requireMatch(

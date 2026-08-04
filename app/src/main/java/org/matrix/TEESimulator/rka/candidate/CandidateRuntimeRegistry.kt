@@ -1,6 +1,5 @@
 package org.matrix.TEESimulator.rka.candidate
 
-import java.nio.file.Path
 import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.rka.bridge.BridgeResult
@@ -12,6 +11,7 @@ object CandidateRuntimeRegistry {
 
     fun initializeLifecycle() {
         state = emptyMap()
+        SyntheticLeaseRegistry.replaceStores(emptyMap())
         val captured = captureProductionPeerAuthorization(BrokerSidecarRole.CANDIDATE)
         if (captured !is BridgeResult.Success) {
             SystemLogger.warning("RKA candidate runtime unavailable: stage=SIDECAR_IDENTITY")
@@ -23,20 +23,23 @@ object CandidateRuntimeRegistry {
                 SystemLogger.warning("RKA candidate runtime unavailable: stage=TARGET_IDENTITY")
                 return
             }
-            state =
+            val leaseStores = linkedMapOf<Int, FileSyntheticLeaseStore>()
+            val runtimes =
                 targets.associate { target ->
                     val identityHash = IdentityHash.of(target.identityHash)
+                    leaseStores[target.uid] =
+                        FileSyntheticLeaseStore(PRODUCTION_RKA_STATE_ROOT, identityHash)
                     val service =
                         RemoteCandidateService(
                             identityHash,
                             BridgeRemoteCandidateBackend(),
-                            FileRemoteCandidateStore(
-                                Path.of("/data/adb/teesimulator-rka/candidate-keystore")
-                            ),
+                            FileRemoteCandidateStore(PRODUCTION_RKA_STATE_ROOT, identityHash),
                             target.aaidDer,
                         )
                     identityHash to InstalledRuntime(target.uid, identityHash, service)
                 }
+            SyntheticLeaseRegistry.replaceStores(leaseStores)
+            state = runtimes
             SystemLogger.info("RKA candidate runtime state=AUTHORIZED count=${state.size}")
         }
     }

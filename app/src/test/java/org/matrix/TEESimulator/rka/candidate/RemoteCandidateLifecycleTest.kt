@@ -87,7 +87,7 @@ class RemoteCandidateLifecycleTest {
     fun persistenceRestartListGetAndLostReconciliation() {
         val fixture = CandidateFixture()
         val key = fixture.adapter.generate(fixture.request).success()
-        val reopenedStore = FileRemoteCandidateStore(fixture.storePath)
+        val reopenedStore = FileRemoteCandidateStore(fixture.storePath, fixture.identity)
         val restarted =
             RemoteCandidateRouteAdapter(
                 RemoteCandidateService(fixture.identity, fixture.backend, reopenedStore),
@@ -105,7 +105,7 @@ class RemoteCandidateLifecycleTest {
                 RemoteCandidateService(
                     fixture.identity,
                     fixture.backend,
-                    FileRemoteCandidateStore(fixture.storePath),
+                    FileRemoteCandidateStore(fixture.storePath, fixture.identity),
                 ),
                 fixture.local,
             )
@@ -141,7 +141,7 @@ class RemoteCandidateLifecycleTest {
             )
 
         fixture.store.replace(record)
-        val reopened = FileRemoteCandidateStore(fixture.storePath).find(record.id)!!
+        val reopened = FileRemoteCandidateStore(fixture.storePath, fixture.identity).find(record.id)!!
 
         assertEquals(characteristics, reopened.characteristics)
     }
@@ -284,7 +284,7 @@ private class CandidateFixture(failGenerate: CandidateError? = null) {
     val uid = 10123
     val identity = IdentityHash.of(ByteArray(32) { 3 })
     val storePath = Files.createTempDirectory("remote-candidate-store-")
-    val store = FileRemoteCandidateStore(storePath)
+    val store = FileRemoteCandidateStore(storePath, identity)
     val backend = FakeRemoteCandidateBackend(failGenerate)
     val local = CountingLocalKeyMint()
     val service =

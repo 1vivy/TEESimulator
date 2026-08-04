@@ -13,19 +13,21 @@ import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 
-class FileRemoteCandidateStore(private val root: Path) : RemoteCandidateStore {
+class FileRemoteCandidateStore(baseRoot: Path, identityHash: IdentityHash) : RemoteCandidateStore {
+    private val paths = CandidateStatePaths(baseRoot, identityHash)
+    private val root = paths.keyStoreRoot
+
     init {
         Files.createDirectories(root)
-        require(!Files.isSymbolicLink(root))
-        runCatching {
-            Files.setPosixFilePermissions(
-                root,
-                setOf(
-                    java.nio.file.attribute.PosixFilePermission.OWNER_READ,
-                    java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
-                    java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE,
-                ),
+        val ownerPermissions =
+            setOf(
+                java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+                java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
+                java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE,
             )
+        listOf(paths.candidatesRoot, paths.candidateRoot, root).forEach { directory ->
+            require(!Files.isSymbolicLink(directory))
+            runCatching { Files.setPosixFilePermissions(directory, ownerPermissions) }
         }
     }
 

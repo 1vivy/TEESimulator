@@ -37,12 +37,10 @@ pub(super) fn preflight(
             let root = runtime.state_root.as_deref().ok_or(DonorError::Storage)?;
             let chain = load_verified_chain(root, lease)?;
             let chain_refs = chain.iter().map(Vec::as_slice).collect::<Vec<_>>();
-            let mut generate_context = context;
-            generate_context.candidate_identity_hash = identity.identity_hash;
             service.preflight_generate(&GenerateRequest::new(
                 GenerateCoordinates {
                     request_id: frame.request_id.bytes(),
-                    context: generate_context,
+                    context,
                     alias: request.alias_handle,
                 },
                 GenerateEvidence {

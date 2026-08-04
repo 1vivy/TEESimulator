@@ -19,6 +19,8 @@ const HANDLE: [u8; 32] = [0xb1; 32];
 const PHASES: [[u8; 32]; 5] = [[0x92; 32], [0x93; 32], [0x94; 32], [0x95; 32], [0x96; 32]];
 const CHAIN: [u8; 6] = [0x30, 1, 0, 0x30, 1, 1];
 const AAID: &[u8] = b"authoritative-aaid";
+const PAIRED_LINEAGE: [u8; 32] = [0x22; 32];
+pub(crate) const FOREIGN_LINEAGE: [u8; 32] = [0x23; 32];
 
 #[allow(
     clippy::redundant_pub_crate,
@@ -65,11 +67,21 @@ impl Fixture {
     }
 
     pub(crate) fn generate_frame(&self, ordinal: u8, prior: [u8; 32]) -> Vec<u8> {
+        self.generate_frame_with_lineage(ordinal, prior, PAIRED_LINEAGE)
+    }
+
+    /// Self-consistent identity built from `lineage`; the persisted pair keeps its own.
+    pub(crate) fn generate_frame_with_lineage(
+        &self,
+        ordinal: u8,
+        prior: [u8; 32],
+        lineage: [u8; 32],
+    ) -> Vec<u8> {
         let request_id = [ordinal; 16];
         let sequence = u32::from(ordinal).saturating_mul(2).saturating_sub(1);
-        let without = self.frame(request_id, sequence, ordinal, None);
+        let without = self.frame(request_id, sequence, ordinal, None, lineage);
         let current = transcript_hash(&prior, &without);
-        self.frame(request_id, sequence, ordinal, Some(current))
+        self.frame(request_id, sequence, ordinal, Some(current), lineage)
     }
 
     pub(crate) fn serve_broker(listener: &UnixListener, ordinal: u8) -> Result<Vec<u8>, String> {
@@ -124,6 +136,7 @@ impl Fixture {
         sequence: u32,
         ordinal: u8,
         transcript: Option<[u8; 32]>,
+        identity: [u8; 32],
     ) -> Vec<u8> {
         let mut writer = CborWriter::with_capacity(1400);
         writer.map(if transcript.is_some() { 8 } else { 7 });
@@ -142,7 +155,7 @@ impl Fixture {
         writer.unsigned(6);
         writer.map(3);
         writer.unsigned(0);
-        encode_identity(&mut writer, self.identity_hash);
+        encode_identity(&mut writer, identity);
         writer.unsigned(1);
         foreground(&mut writer, [0xa0 | ordinal; 16]);
         writer.unsigned(2);
@@ -168,19 +181,23 @@ fn foreground(writer: &mut CborWriter, alias: [u8; 16]) {
 }
 
 fn identity_hash() -> [u8; 32] {
+    identity_hash_for(PAIRED_LINEAGE)
+}
+
+fn identity_hash_for(lineage: [u8; 32]) -> [u8; 32] {
     let mut unsigned = CborWriter::with_capacity(256);
     identity_prefix(&mut unsigned, 5);
     unsigned.unsigned(5);
-    unsigned.bytes(&[0x22; 32]);
+    unsigned.bytes(&lineage);
     hash_cbor(HashDomain::Identity, &unsigned.finish())
 }
 
-fn encode_identity(writer: &mut CborWriter, identity_hash: [u8; 32]) {
+fn encode_identity(writer: &mut CborWriter, lineage: [u8; 32]) {
     identity_prefix(writer, 6);
     writer.unsigned(4);
-    writer.bytes(&identity_hash);
+    writer.bytes(&identity_hash_for(lineage));
     writer.unsigned(5);
-    writer.bytes(&[0x22; 32]);
+    writer.bytes(&lineage);
 }
 
 fn identity_prefix(writer: &mut CborWriter, size: usize) {

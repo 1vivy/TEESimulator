@@ -140,6 +140,29 @@ fn canonical_generate_crosses_live_ingress_and_advances_through_each_result()
     Ok(())
 }
 
+#[test]
+fn generate_carrying_a_foreign_candidate_identity_is_rejected_before_any_broker_exchange()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given: durable pairing state and a generate frame whose identity is not the paired identity.
+    let fixture = support::Fixture::new()?;
+    let mut runtime = fixture.runtime(0)?;
+    assert!(runtime.is_active());
+    let request = fixture.generate_frame_with_lineage(
+        1,
+        fixture.initial_transcript,
+        support::FOREIGN_LINEAGE,
+    );
+
+    // When: the donor dispatches that frame.
+    let rejected = runtime.dispatch_frame(&request);
+
+    // Then: the trusted paired identity governs and the broker was never reached.
+    assert_eq!(rejected, Err(DonorError::IdentityDrift));
+    assert_eq!(support::Fixture::authenticated_exchanges(&runtime), 0);
+    fixture.cleanup()?;
+    Ok(())
+}
+
 fn root() -> PathBuf {
     std::env::temp_dir().join(format!("rka-donor-preflight-{}", std::process::id()))
 }

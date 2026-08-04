@@ -164,13 +164,12 @@ fn dispatch_body(
 fn generate(
     runtime: &mut DonorRuntime,
     request_id: RequestId,
-    mut context: AccessContext,
+    context: AccessContext,
     identity: &rka_protocol::CandidateIdentity<'_>,
     request: &rka_protocol::ForegroundRequest<'_>,
     envelope: &rka_protocol::Envelope<'_>,
     previous: [u8; 32],
 ) -> Result<Vec<u8>, DonorError> {
-    context.candidate_identity_hash = identity.identity_hash;
     let identity_bytes = encode_identity(identity);
     let envelope_bytes = encode_envelope(envelope)?;
     let trust = runtime.trust.as_ref().ok_or(DonorError::Unpaired)?;

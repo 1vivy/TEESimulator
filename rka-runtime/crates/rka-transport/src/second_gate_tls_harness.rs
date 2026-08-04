@@ -72,6 +72,53 @@ fn candidate_exchange_types_admission_failure_as_pre_dispatch()
 }
 
 #[test]
+fn a_candidate_rejects_an_admission_token_bound_to_another_candidate()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let _serial = serial_tls_tests();
+    let pki = test_pki(Validity::Current)?;
+    let candidate_a = PinnedTlsCandidateServer::new(
+        pki.server.identity(),
+        &ServerPeer::new(vec![pki.root.clone()], pki.client.pin),
+        TlsAdmission::new(binding(), PEER_BUDGET),
+    )?;
+    let donor_b = PinnedTlsDonorClient::new(
+        pki.client.identity(),
+        ClientPeer::new(
+            vec![pki.root.clone()],
+            ServerName::try_from("localhost".to_owned())?,
+            pki.server.pin,
+        ),
+        TlsAdmission::new(
+            AdmissionBinding::new([[0xb1; 32], [0xb2; 32], [0xb3; 32], [0xb4; 32]]),
+            PEER_BUDGET,
+        ),
+        (),
+    )?;
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&dispatched);
+    let (donor_socket, candidate_socket) = connected_pair()?;
+    let worker = std::thread::spawn(move || {
+        donor_b.serve_once(donor_socket, |(), _| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        })
+    });
+
+    // When
+    let result = candidate_a.exchange(candidate_socket, b"must-not-dispatch");
+
+    // Then
+    assert_eq!(
+        result,
+        Err(CandidateExchangeError::PreDispatch(TlsError::Admission))
+    );
+    assert!(worker.join().map_err(|_| "donor thread failed")?.is_err());
+    assert_eq!(dispatched.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[test]
 fn candidate_exchange_types_response_loss_as_ambiguous() -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let _serial = serial_tls_tests();

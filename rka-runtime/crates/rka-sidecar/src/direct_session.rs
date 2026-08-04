@@ -1,8 +1,7 @@
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream},
-    os::unix::{fs::PermissionsExt, net::UnixListener},
     path::Path,
     time::Duration,
 };
@@ -17,13 +16,14 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use thiserror::Error;
 
 use crate::{
-    candidate::{AuthenticatedCandidateContext, PairingCatalog},
+    candidate::{AuthenticatedCandidateContext, CandidateLayout, PairingCatalog},
     direct_profile::DirectProfile,
     provisioning_io::FileStateStore,
 };
 
 mod candidate_role;
 mod donor_role;
+mod runtime_paths;
 
 pub use candidate_role::run_candidate;
 pub use donor_role::{run_donor, run_donor_bridge};
@@ -32,12 +32,15 @@ pub use donor_role::{run_donor, run_donor_bridge};
 use candidate_role::{CandidateIterationError, run_candidate_once};
 #[cfg(test)]
 use donor_role::{DonorIteration, run_donor_once};
+#[cfg(test)]
+use runtime_paths::candidate_diagnostic_path;
+use runtime_paths::candidate_local_socket_path;
+use runtime_paths::{bind_local, candidate_diagnostic, diagnostic};
 
 const PORT: u16 = 37_373;
 const BUDGET: Duration = Duration::from_secs(25);
 const MAX_FRAME_BYTES: usize = 1_048_576;
 const PRE_DISPATCH_ATTEMPTS: usize = 3;
-const LOCAL_BRIDGE_SOCKET: &str = "broker.sock";
 
 #[derive(Debug, Error)]
 #[doc(hidden)]
@@ -88,21 +91,18 @@ fn tls_status(error: TlsError, phase: &str) -> String {
     format!("{phase}_{category}")
 }
 
-fn diagnostic(state: &Path, status: &str) {
-    let path = state.join("run/direct-session.diagnostic");
-    if fs::symlink_metadata(&path).is_ok_and(|metadata| !metadata.file_type().is_file()) {
-        return;
-    }
-    if let Ok(mut output) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(output, "{status}");
-    }
-}
-
 fn donor_client(
     state: &Path,
     profile: &DirectProfile,
 ) -> Result<PinnedTlsDonorClient<AuthenticatedCandidateContext>, DirectSessionError> {
-    let (tls_admission, profile_id_hash) = admission(state, profile)?;
+    let authenticated = authenticated_profile(state, profile)?;
+    let candidate_state = CandidateLayout::new(state, authenticated.candidate());
+    let activation_root = if candidate_state.root().is_dir() {
+        candidate_state.root()
+    } else {
+        state
+    };
+    let (tls_admission, profile_id_hash) = admission(activation_root, profile)?;
     let authenticated = PairingCatalog::load(state)
         .and_then(|catalog| catalog.lookup(profile.peer_pin, profile_id_hash, profile.epoch))
         .map_err(|_| DirectSessionError::State)?;
@@ -118,6 +118,15 @@ fn donor_client(
         authenticated,
     )
     .map_err(|_| DirectSessionError::Tls)
+}
+
+fn authenticated_profile(
+    state: &Path,
+    profile: &DirectProfile,
+) -> Result<AuthenticatedCandidateContext, DirectSessionError> {
+    PairingCatalog::load(state)
+        .and_then(|catalog| catalog.lookup_profile(profile.peer_pin, profile.epoch))
+        .map_err(|_| DirectSessionError::State)
 }
 
 fn candidate_server(
@@ -186,26 +195,6 @@ fn peer_trust(state: &Path) -> Result<Vec<CertificateDer<'static>>, DirectSessio
         return Err(DirectSessionError::State);
     }
     Ok(vec![CertificateDer::from(certificate.into_contents())])
-}
-
-fn bind_local(state: &Path) -> Result<UnixListener, DirectSessionError> {
-    let directory = state.join("run/sockets");
-    fs::create_dir_all(&directory).map_err(|_| DirectSessionError::Io)?;
-    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-        .map_err(|_| DirectSessionError::Io)?;
-    let path = directory.join(LOCAL_BRIDGE_SOCKET);
-    match fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(DirectSessionError::Io),
-    }
-    let listener = UnixListener::bind(path).map_err(|_| DirectSessionError::Io)?;
-    fs::set_permissions(
-        directory.join(LOCAL_BRIDGE_SOCKET),
-        fs::Permissions::from_mode(0o600),
-    )
-    .map_err(|_| DirectSessionError::Io)?;
-    Ok(listener)
 }
 
 fn read_frame(stream: &mut impl Read) -> Result<Vec<u8>, DirectSessionError> {

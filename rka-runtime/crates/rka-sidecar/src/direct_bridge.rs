@@ -27,6 +27,7 @@ const GENERATE_BROKER_BUDGET: Duration = Duration::from_secs(20);
 )]
 pub(crate) struct DirectBridgeAdapter {
     state_root: PathBuf,
+    broker_socket: PathBuf,
     candidate_identity: Option<[u8; 32]>,
     executor: RoleExecutor,
 }
@@ -59,9 +60,10 @@ enum ResponsePlan {
 }
 
 impl DirectBridgeAdapter {
-    pub(super) fn new(state_root: &Path) -> Self {
+    pub(super) fn new(state_root: &Path, broker_socket: PathBuf) -> Self {
         Self {
             state_root: state_root.to_path_buf(),
+            broker_socket,
             candidate_identity: None,
             executor: RoleExecutor::new(SidecarRole::Donor),
         }
@@ -128,7 +130,7 @@ impl DirectBridgeAdapter {
     ) -> Result<BridgeMessage, BridgeError> {
         self.executor.dispatch_with_budget(
             BrokerOperation::Donor {
-                socket_path: &self.state_root.join("run/sockets/broker.sock"),
+                socket_path: &self.broker_socket,
                 request: prepared.request(),
             },
             dispatch_budget(prepared.plan),

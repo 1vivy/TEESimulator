@@ -1,20 +1,25 @@
-use std::{cell::Cell, net::SocketAddrV4, path::Path, time::Duration};
+use std::{
+    cell::Cell,
+    net::SocketAddrV4,
+    path::Path,
+    sync::mpsc::{self, SyncSender},
+    time::Duration,
+};
 
 use crate::{
-    LifecycleRole,
-    bridge::{
-        BridgeError, ExchangeRole, decode_frame as decode_bridge_frame,
-        encode_frame as encode_bridge_frame,
-    },
-    candidate::AuthenticatedCandidateContext,
-    direct_bridge::DirectBridgeAdapter,
+    candidate::{AuthenticatedCandidateContext, CandidateId},
     direct_profile::{DialMode, DirectProfile},
     donor::{DonorRuntime, actor::CandidateActor},
 };
 
 use super::{
-    BUDGET, DirectSessionError, PORT, connect_bound, diagnostic, donor_client, tls_status,
+    BUDGET, DirectSessionError, PORT, authenticated_profile, candidate_diagnostic, connect_bound,
+    donor_client,
 };
+
+mod bridge;
+
+pub use bridge::run_donor_bridge;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DonorIteration {
@@ -23,32 +28,86 @@ pub(super) enum DonorIteration {
 }
 
 #[doc(hidden)]
-pub fn run_donor(mut runtime: DonorRuntime) -> Result<(), DirectSessionError> {
-    let (state, profile, _) =
-        crate::direct_profile::load(LifecycleRole::Donor).map_err(|_| DirectSessionError::State)?;
-    if profile.dial_mode != DialMode::DonorDials {
-        return Err(DirectSessionError::State);
-    }
-    let candidate = *runtime
-        .local_candidate()
-        .ok_or(DirectSessionError::State)?
-        .candidate();
-    let actor = CandidateActor::spawn(candidate, move |(authenticated, request): ActorFrame| {
-        runtime.dispatch(&authenticated, &request)
-    })
-    .map_err(|_| DirectSessionError::State)?;
-    loop {
-        match run_donor_actor_once(
-            (&actor, &state, &profile),
-            SocketAddrV4::new(profile.endpoint, PORT),
-        )? {
-            DonorIteration::Served => {}
-            DonorIteration::Retry => std::thread::sleep(Duration::from_secs(1)),
+pub fn run_donor(runtime: DonorRuntime) -> Result<(), DirectSessionError> {
+    let (state, profiles) =
+        crate::direct_profile::load_donor_profiles().map_err(|_| DirectSessionError::State)?;
+    let runtime_actor = runtime_actor(runtime)?;
+    let (failures, receiver) = mpsc::sync_channel(1);
+    for (profile, _) in profiles {
+        if profile.dial_mode != DialMode::DonorDials {
+            return Err(DirectSessionError::State);
         }
+        let authenticated = authenticated_profile(&state, &profile)?;
+        let candidate = *authenticated.candidate();
+        let runtime_actor = runtime_actor.clone();
+        let actor = CandidateActor::spawn(candidate, move |frame: ActorFrame| {
+            let (response, result) = mpsc::sync_channel(1);
+            runtime_actor
+                .send(RuntimeRequest { frame, response })
+                .map_err(|_| crate::donor::DonorError::Broker)?;
+            result
+                .recv()
+                .map_err(|_| crate::donor::DonorError::Broker)?
+        })
+        .map_err(|_| DirectSessionError::State)?;
+        let state = state.clone();
+        let failures = failures.clone();
+        std::thread::Builder::new()
+            .name("rka-profile-supervisor".to_owned())
+            .spawn(move || {
+                let result = run_profile_supervisor((&actor, &state, &profile), &candidate);
+                let _ = failures.send(result);
+            })
+            .map_err(|_| DirectSessionError::State)?;
     }
+    drop(failures);
+    receiver.recv().map_err(|_| DirectSessionError::State)?
 }
 
 type ActorFrame = (AuthenticatedCandidateContext, Vec<u8>);
+
+struct RuntimeRequest {
+    frame: ActorFrame,
+    response: SyncSender<Result<Vec<u8>, crate::donor::DonorError>>,
+}
+
+fn runtime_actor(
+    mut runtime: DonorRuntime,
+) -> Result<SyncSender<RuntimeRequest>, DirectSessionError> {
+    let (sender, receiver) = mpsc::sync_channel::<RuntimeRequest>(32);
+    std::thread::Builder::new()
+        .name("rka-donor-runtime".to_owned())
+        .spawn(move || {
+            while let Ok(request) = receiver.recv() {
+                let (authenticated, frame) = request.frame;
+                let result = runtime.dispatch(&authenticated, &frame);
+                if request.response.send(result).is_err() {
+                    break;
+                }
+            }
+        })
+        .map_err(|_| DirectSessionError::State)?;
+    Ok(sender)
+}
+
+fn run_profile_supervisor(
+    context: (&CandidateActor<ActorFrame>, &Path, &DirectProfile),
+    candidate: &CandidateId,
+) -> Result<(), DirectSessionError> {
+    let (actor, state, profile) = context;
+    loop {
+        match run_donor_actor_once(
+            (actor, state, profile),
+            SocketAddrV4::new(profile.endpoint, PORT),
+        )? {
+            DonorIteration::Served => {}
+            DonorIteration::Retry => {
+                candidate_diagnostic(state, candidate, "donor_pre_dispatch");
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
+}
 
 fn run_donor_actor_once(
     context: (&CandidateActor<ActorFrame>, &Path, &DirectProfile),
@@ -76,62 +135,6 @@ fn run_donor_actor_once(
     }
 }
 
-#[doc(hidden)]
-pub fn run_donor_bridge() -> Result<(), DirectSessionError> {
-    let (state, profile, _) =
-        crate::direct_profile::load(LifecycleRole::Donor).map_err(|_| DirectSessionError::State)?;
-    if profile.dial_mode != DialMode::DonorDials {
-        return Err(DirectSessionError::State);
-    }
-    let mut adapter = DirectBridgeAdapter::new(&state);
-    loop {
-        let donor = donor_client(&state, &profile)?;
-        let Ok(socket) = connect_bound(
-            profile.listen_interface,
-            SocketAddrV4::new(profile.endpoint, PORT),
-            BUDGET,
-        ) else {
-            std::thread::sleep(Duration::from_secs(1));
-            continue;
-        };
-        let dispatched = Cell::new(false);
-        let result = donor.serve_once(socket, |_authenticated, request| {
-            let request = decode_bridge_frame(request, ExchangeRole::CandidateRequest)
-                .map_err(|_| rka_transport::TlsError::Admission)?;
-            let prepared = adapter.prepare(request).map_err(|()| {
-                diagnostic(&state, "donor_bridge_prepare");
-                rka_transport::TlsError::Admission
-            })?;
-            dispatched.set(true);
-            let response = adapter.dispatch(&prepared).map_err(|error| {
-                diagnostic(&state, &format!("donor_bridge_{}", bridge_status(error)));
-                rka_transport::TlsError::Admission
-            })?;
-            let response = DirectBridgeAdapter::finish(&prepared, response).map_err(|()| {
-                diagnostic(&state, "donor_bridge_finish");
-                rka_transport::TlsError::Admission
-            })?;
-            let encoded =
-                encode_bridge_frame(&response, ExchangeRole::CandidateResponse).map_err(|_| {
-                    diagnostic(&state, "donor_bridge_encode");
-                    rka_transport::TlsError::Admission
-                })?;
-            Ok(encoded.as_slice().to_vec())
-        });
-        match (result, dispatched.get()) {
-            (Ok(()), _) => {}
-            (Err(error), true) => {
-                diagnostic(&state, &tls_status(error, "donor_ambiguous"));
-                return Err(DirectSessionError::Ambiguous);
-            }
-            (Err(error), false) => {
-                diagnostic(&state, &tls_status(error, "donor_pre_dispatch"));
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 pub(super) fn run_donor_once(
     context: (&mut DonorRuntime, &Path, &DirectProfile),
@@ -153,21 +156,5 @@ pub(super) fn run_donor_once(
         (Ok(()), _) => Ok(DonorIteration::Served),
         (Err(_), true) => Err(DirectSessionError::Ambiguous),
         (Err(_), false) => Ok(DonorIteration::Retry),
-    }
-}
-
-const fn bridge_status(error: BridgeError) -> &'static str {
-    match error {
-        BridgeError::Deadline => "deadline",
-        BridgeError::PeerDied => "peer_died",
-        BridgeError::PeerIdentity => "peer_identity",
-        BridgeError::TrustedState => "trusted_state",
-        BridgeError::Io => "io",
-        BridgeError::Correlation => "correlation",
-        BridgeError::Generation => "generation",
-        BridgeError::Capacity => "capacity",
-        BridgeError::QueueSaturated => "queue_saturated",
-        BridgeError::Cancelled => "cancelled",
-        _ => "protocol",
     }
 }

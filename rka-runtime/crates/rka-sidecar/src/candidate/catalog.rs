@@ -130,6 +130,26 @@ impl PairingCatalog {
             .ok_or(CatalogError::NotFound)
     }
 
+    pub(crate) fn lookup_profile(
+        &self,
+        peer_spki_hash: [u8; 32],
+        profile_epoch: u64,
+    ) -> Result<AuthenticatedCandidateContext, CatalogError> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| {
+                bool::from(entry.peer_spki_hash.ct_eq(&peer_spki_hash))
+                    && entry.profile_epoch == profile_epoch
+            })
+            .copied()
+            .ok_or(CatalogError::NotFound)?;
+        Ok(AuthenticatedCandidateContext::admitted(
+            CatalogAdmission(()),
+            entry,
+        ))
+    }
+
     pub(crate) fn lookup_identity(
         &self,
         candidate_identity_hash: [u8; 32],

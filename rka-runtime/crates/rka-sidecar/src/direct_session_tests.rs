@@ -16,7 +16,7 @@ use rustls::pki_types::CertificateDer;
 use super::{DirectSessionError, connect_bound};
 use crate::{
     LifecycleRole,
-    direct_profile::{DialMode, DirectProfile, load_from},
+    direct_profile::{DialMode, DirectProfile, load_from, load_published_profiles},
 };
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -93,6 +93,45 @@ fn unavailable_profile_source_fails_before_connect() -> Result<(), Box<dyn std::
     Ok(())
 }
 
+#[test]
+fn the_donor_loads_every_published_candidate_profile_and_rejects_a_duplicate_pin()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let state = TempState::new("donor-profile-catalog")?;
+    let profiles = state.0.join("profiles/direct.d");
+    fs::create_dir_all(&profiles)?;
+    write_profile(
+        &profiles.join("candidate-a.conf"),
+        LifecycleRole::Donor,
+        [0x11; 32],
+    )?;
+    write_profile(
+        &profiles.join("candidate-b.conf"),
+        LifecycleRole::Donor,
+        [0x12; 32],
+    )?;
+
+    // When
+    let loaded = load_published_profiles(&state.0, LifecycleRole::Donor, 9)?;
+
+    // Then
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(
+        loaded
+            .iter()
+            .map(|(profile, _)| profile.peer_pin)
+            .collect::<Vec<_>>(),
+        vec![[0x11; 32], [0x12; 32]]
+    );
+    write_profile(
+        &profiles.join("candidate-c.conf"),
+        LifecycleRole::Donor,
+        [0x11; 32],
+    )?;
+    assert!(load_published_profiles(&state.0, LifecycleRole::Donor, 9).is_err());
+    Ok(())
+}
+
 pub(super) fn persist_profile(
     root: &Path,
     profile: (LifecycleRole, Ipv4Addr, [u8; 32]),
@@ -100,6 +139,25 @@ pub(super) fn persist_profile(
     let (role, listen_interface, peer_pin) = profile;
     let profile_path = root.join("profiles/direct.conf");
     fs::create_dir_all(root.join("profiles"))?;
+    write_profile_at((&profile_path, role, listen_interface), peer_pin)?;
+    let (profile, _) = load_from((root, &profile_path, role), 9)?;
+    assert_eq!(profile.dial_mode, DialMode::DonorDials);
+    Ok(profile)
+}
+
+fn write_profile(
+    path: &Path,
+    role: LifecycleRole,
+    peer_pin: [u8; 32],
+) -> Result<(), Box<dyn std::error::Error>> {
+    write_profile_at((path, role, Ipv4Addr::new(192, 0, 2, 1)), peer_pin)
+}
+
+fn write_profile_at(
+    context: (&Path, LifecycleRole, Ipv4Addr),
+    peer_pin: [u8; 32],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (path, role, listen_interface) = context;
     let role_line = match role {
         LifecycleRole::Donor => "DONOR",
         LifecycleRole::Candidate => "CANDIDATE",
@@ -109,14 +167,12 @@ pub(super) fn persist_profile(
         encoded
     });
     fs::write(
-        &profile_path,
+        path,
         format!(
             "version=2\nrole={role_line}\nprofile_epoch=9\ndial_mode=DONOR_DIALS\ndial_endpoint={listen_interface}\nlisten_interface={listen_interface}\npeer_spki_sha256={encoded_pin}\ntransport=DIRECT\n"
         ),
     )?;
-    let (profile, _) = load_from((root, &profile_path, role), 9)?;
-    assert_eq!(profile.dial_mode, DialMode::DonorDials);
-    Ok(profile)
+    Ok(())
 }
 
 pub(super) fn persist_identity(

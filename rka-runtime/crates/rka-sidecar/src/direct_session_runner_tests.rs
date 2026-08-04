@@ -17,11 +17,45 @@ use rka_state::PairedActivationRecord;
 use rka_transport::peer_spki_hash;
 
 use super::{
-    CandidateIterationError, DirectSessionError, DonorIteration, bind_local, candidate_server,
-    connect_bound, donor_client, read_frame, run_candidate_once, run_donor_once,
+    CandidateIterationError, DirectSessionError, DonorIteration, bind_local, candidate_diagnostic,
+    candidate_diagnostic_path, candidate_local_socket_path, candidate_server, connect_bound,
+    donor_client, read_frame, run_candidate_once, run_donor_once,
     tests::{TempState, identities, persist_identity, persist_profile, routed_local_ipv4},
     write_frame,
 };
+
+#[test]
+fn each_candidate_gets_its_own_diagnostic_file_and_local_broker_socket()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let state = TempState::new("candidate-runtime-paths")?;
+    let mut catalog = PairingCatalog::empty();
+    catalog.admit(PairingAdmission::new(
+        ([0x41; 32], [0x51; 32], 9),
+        [0x61; 32],
+    ))?;
+    catalog.admit(PairingAdmission::new(
+        ([0x42; 32], [0x52; 32], 9),
+        [0x62; 32],
+    ))?;
+    let candidate_a = catalog.lookup([0x41; 32], [0x51; 32], 9)?;
+    let candidate_b = catalog.lookup([0x42; 32], [0x52; 32], 9)?;
+
+    // When
+    candidate_diagnostic(&state.0, candidate_a.candidate(), "candidate-a-ready");
+    candidate_diagnostic(&state.0, candidate_b.candidate(), "candidate-b-ready");
+    let diagnostic_a = candidate_diagnostic_path(&state.0, candidate_a.candidate());
+    let diagnostic_b = candidate_diagnostic_path(&state.0, candidate_b.candidate());
+    let socket_a = candidate_local_socket_path(&state.0, candidate_a.candidate());
+    let socket_b = candidate_local_socket_path(&state.0, candidate_b.candidate());
+
+    // Then
+    assert_ne!(diagnostic_a, diagnostic_b);
+    assert_ne!(socket_a, socket_b);
+    assert_eq!(fs::read_to_string(diagnostic_a)?, "candidate-a-ready\n");
+    assert_eq!(fs::read_to_string(diagnostic_b)?, "candidate-b-ready\n");
+    Ok(())
+}
 use crate::{
     LifecycleRole,
     candidate::{PairingAdmission, PairingCatalog},

@@ -121,11 +121,6 @@ impl DonorSupervisor<BridgeDonorBroker> {
         !self.shards.is_empty()
     }
 
-    /// Returns the candidate whose durable shard was selected at startup.
-    pub(crate) const fn local_candidate(&self) -> Option<&AuthenticatedCandidateContext> {
-        self.local_candidate.as_ref()
-    }
-
     pub(crate) fn dispatch_frame(&mut self, encoded: &[u8]) -> Result<Vec<u8>, DonorError> {
         let context = self.local_candidate.ok_or(DonorError::Unpaired)?;
         self.dispatch(&context, encoded)

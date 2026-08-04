@@ -1,10 +1,27 @@
 #![allow(missing_docs, reason = "integration tests are behavior-named")]
+// allow: SIZE_OK — cohesive donor integration suite; W0-T1 requires this exact test file.
 
 #[path = "donor_rka/support.rs"]
 mod donor_rka_support;
 
 use donor_rka_support::{FakeBroker, Fixture};
 use rka_sidecar::donor::{DonorError, DonorKeyState, DonorRkaService};
+
+#[test]
+fn candidate_b_policy_shares_no_identity_material_with_candidate_a() {
+    // Given
+    let candidate_a = Fixture::new();
+    let candidate_b = Fixture::candidate_b();
+
+    // When
+    let (peer_a, profile_a, identity_a) = candidate_a.policy_identity_material();
+    let (peer_b, profile_b, identity_b) = candidate_b.policy_identity_material();
+
+    // Then
+    assert_ne!(peer_a, peer_b);
+    assert_ne!(profile_a, profile_b);
+    assert_ne!(identity_a, identity_b);
+}
 
 #[test]
 fn donor_generate_operate_delete() -> Result<(), Box<dyn std::error::Error>> {

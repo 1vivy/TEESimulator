@@ -5,7 +5,9 @@ pub const PROFILE_EPOCH: u64 = 9;
 pub const CANDIDATE_NONCE: [u8; 32] = [0x33; 32];
 pub const DONOR_NONCE: [u8; 32] = [0x44; 32];
 pub const PEER: [u8; 32] = [0x55; 32];
+pub const PEER_B: [u8; 32] = [0x56; 32];
 pub const PROFILE: [u8; 32] = [0x66; 32];
+pub const PROFILE_B: [u8; 32] = [0x67; 32];
 pub const SESSION: [u8; 32] = [0x77; 32];
 pub const IRPC: [u8; 32] = [0x88; 32];
 pub const RKP_PUBLIC: [u8; 32] = [0x91; 32];
@@ -16,6 +18,7 @@ pub const RESPONSE: [u8; 32] = [0x95; 32];
 pub const CHAIN: [u8; 32] = [0x96; 32];
 pub const ALIAS: [u8; 16] = [0xa1; 16];
 pub const RKP_CHAIN: [&[u8]; 2] = [b"rkp-leaf", b"rkp-root"];
+pub const IDENTITY_B: &str = "com.example.candidate-b";
 
 const LINEAGE_HASH: [u8; 32] = [0x22; 32];
 
@@ -24,13 +27,21 @@ pub const fn request_id(value: u8) -> [u8; 16] {
 }
 
 pub fn identity() -> (Vec<u8>, [u8; 32]) {
+    identity_for("com.example.candidate")
+}
+
+pub fn identity_b() -> (Vec<u8>, [u8; 32]) {
+    identity_for(IDENTITY_B)
+}
+
+fn identity_for(package_name: &str) -> (Vec<u8>, [u8; 32]) {
     let mut unsigned = CborWriter::with_capacity(256);
-    encode_identity_prefix(&mut unsigned, 5);
+    encode_identity_prefix(&mut unsigned, 5, package_name);
     unsigned.unsigned(5);
     unsigned.bytes(&LINEAGE_HASH);
     let identity_hash = hash_cbor(HashDomain::Identity, &unsigned.finish());
     let mut writer = CborWriter::with_capacity(256);
-    encode_identity_prefix(&mut writer, 6);
+    encode_identity_prefix(&mut writer, 6, package_name);
     writer.unsigned(4);
     writer.bytes(&identity_hash);
     writer.unsigned(5);
@@ -38,7 +49,7 @@ pub fn identity() -> (Vec<u8>, [u8; 32]) {
     (writer.finish(), identity_hash)
 }
 
-fn encode_identity_prefix(writer: &mut CborWriter, map_size: usize) {
+fn encode_identity_prefix(writer: &mut CborWriter, map_size: usize, package_name: &str) {
     writer.map(map_size);
     writer.unsigned(0);
     writer.unsigned(0);
@@ -47,7 +58,7 @@ fn encode_identity_prefix(writer: &mut CborWriter, map_size: usize) {
     writer.unsigned(2);
     writer.array(1);
     writer.array(3);
-    writer.text("com.example.candidate");
+    writer.text(package_name);
     writer.unsigned(1);
     writer.array(1);
     writer.bytes(b"signer");

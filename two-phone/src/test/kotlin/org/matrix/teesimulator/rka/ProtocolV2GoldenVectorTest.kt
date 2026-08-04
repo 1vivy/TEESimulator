@@ -94,6 +94,41 @@ class ProtocolV2GoldenVectorTest {
     }
 
     @Test
+    fun everyGoldenFrameCarriesExactlyEightTopLevelKeysAndNoCandidateDiscriminator() {
+        // Given: all frozen v2 frames and a synthetic frame carrying one unknown top-level key.
+        val vectors = schemaVectors()
+        val frames =
+            vectors.map { vector ->
+                ProtocolV2Cbor.parse(vector.bytes) as ProtocolV2Value.MapValue
+            }
+        val nineKeyFrame =
+            ProtocolV2Cbor.encode(
+                ProtocolV2Value.MapValue(
+                    frames.first().entries + (8L to ProtocolV2Value.UIntValue(0)),
+                )
+            )
+
+        // When: the frozen key sets are inspected and the unknown key crosses the reference decoder.
+        val nineKeyFrameRejected =
+            runCatching {
+                    ProtocolV2Reference.verify(
+                        vectors.mapIndexed { index, vector ->
+                            if (index == 0) vector.copy(bytes = nineKeyFrame) else vector
+                        }
+                    )
+                }
+                .isFailure
+
+        // Then: all 21 frames use only keys 0..7, and adding key 8 is rejected.
+        assertEquals(21, frames.size)
+        frames.forEach { frame ->
+            assertEquals(8, frame.entries.size)
+            assertEquals((0L..7L).toList(), frame.entries.map { (key) -> key })
+        }
+        assertTrue(nineKeyFrameRejected)
+    }
+
+    @Test
     fun kotlinReferenceRejectsNestedBodyAndTranscriptMutations() {
         // Given: a non-HELLO/non-BEGIN RESULT vector with separate body and transcript mutations.
         val vectors = schemaVectors()

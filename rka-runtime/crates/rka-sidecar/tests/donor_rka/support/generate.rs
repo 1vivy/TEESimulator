@@ -12,11 +12,15 @@ use super::{
 
 impl Fixture {
     pub fn generate(&self, request: u8) -> GenerateRequest<'_> {
-        self.generate_parts(
+        self.generate_for(request, self)
+    }
+
+    pub fn generate_for<'a>(&self, request: u8, candidate: &'a Self) -> GenerateRequest<'a> {
+        candidate.generate_parts(
             request,
-            self.context(),
+            candidate.context(),
             ALIAS,
-            &self.envelope,
+            &candidate.envelope,
             CSR,
             [0xc1; 32],
         )

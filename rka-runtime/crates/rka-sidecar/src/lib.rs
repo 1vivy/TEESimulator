@@ -9,6 +9,8 @@ use std::{
 
 use thiserror::Error;
 
+/// Authenticated candidate identity and pairing catalog.
+pub mod candidate;
 #[doc(hidden)]
 pub mod direct_activation;
 mod direct_bridge;

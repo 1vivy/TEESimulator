@@ -1052,6 +1052,7 @@ dependencies = [
  "rustix",
  "rustls",
  "socket2",
+ "subtle",
  "thiserror",
  "x509-parser",
  "zeroize",

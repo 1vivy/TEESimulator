@@ -1,8 +1,7 @@
 use std::{
-    cell::Cell,
     fs::{self, OpenOptions},
     io::{Read, Write},
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream},
     os::unix::{fs::PermissionsExt, net::UnixListener},
     path::Path,
     time::Duration,
@@ -10,25 +9,29 @@ use std::{
 
 use rka_state::PairedActivationRecord;
 use rka_transport::{
-    AdmissionBinding, CandidateExchangeError, ClientPeer, PinnedTlsCandidateServer,
-    PinnedTlsDonorClient, ServerPeer, TlsAdmission, TlsCredentials, TlsError,
+    AdmissionBinding, ClientPeer, PinnedTlsCandidateServer, PinnedTlsDonorClient, ServerPeer,
+    TlsAdmission, TlsCredentials, TlsError,
 };
-use rustix::{net::sockopt::socket_peercred, process::geteuid};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use thiserror::Error;
 
 use crate::{
-    LifecycleRole,
-    bridge::{
-        BridgeError, ExchangeRole, decode_frame as decode_bridge_frame,
-        encode_frame as encode_bridge_frame,
-    },
-    direct_bridge::DirectBridgeAdapter,
-    direct_profile::{DialMode, DirectProfile},
-    donor::DonorRuntime,
+    candidate::{AuthenticatedCandidateContext, PairingCatalog},
+    direct_profile::DirectProfile,
     provisioning_io::FileStateStore,
 };
+
+mod candidate_role;
+mod donor_role;
+
+pub use candidate_role::run_candidate;
+pub use donor_role::{run_donor, run_donor_bridge};
+
+#[cfg(test)]
+use candidate_role::{CandidateIterationError, run_candidate_once};
+#[cfg(test)]
+use donor_role::{DonorIteration, run_donor_once};
 
 const PORT: u16 = 37_373;
 const BUDGET: Duration = Duration::from_secs(25);
@@ -48,159 +51,6 @@ pub enum DirectSessionError {
     Tls,
     #[error("direct session request became ambiguous")]
     Ambiguous,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DonorIteration {
-    Served,
-    Retry,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CandidateIteration {
-    accepted_connections: usize,
-}
-
-#[derive(Debug, Error)]
-#[error("candidate iteration failed after {accepted_connections} accepted connections")]
-struct CandidateIterationError {
-    #[source]
-    error: DirectSessionError,
-    accepted_connections: usize,
-}
-
-#[doc(hidden)]
-pub fn run_donor(runtime: &mut DonorRuntime) -> Result<(), DirectSessionError> {
-    let (state, profile, _) =
-        crate::direct_profile::load(LifecycleRole::Donor).map_err(|_| DirectSessionError::State)?;
-    if profile.dial_mode != DialMode::DonorDials {
-        return Err(DirectSessionError::State);
-    }
-    loop {
-        match run_donor_once(
-            (runtime, &state, &profile),
-            SocketAddrV4::new(profile.endpoint, PORT),
-        )? {
-            DonorIteration::Served => {}
-            DonorIteration::Retry => std::thread::sleep(Duration::from_secs(1)),
-        }
-    }
-}
-
-#[doc(hidden)]
-pub fn run_donor_bridge() -> Result<(), DirectSessionError> {
-    let (state, profile, _) =
-        crate::direct_profile::load(LifecycleRole::Donor).map_err(|_| DirectSessionError::State)?;
-    if profile.dial_mode != DialMode::DonorDials {
-        return Err(DirectSessionError::State);
-    }
-    let mut adapter = DirectBridgeAdapter::new(&state);
-    loop {
-        let Ok(socket) = connect_bound(
-            profile.listen_interface,
-            SocketAddrV4::new(profile.endpoint, PORT),
-            BUDGET,
-        ) else {
-            std::thread::sleep(Duration::from_secs(1));
-            continue;
-        };
-        let donor = donor_client(&state, &profile)?;
-        let dispatched = Cell::new(false);
-        let result = donor.serve_once(socket, |request| {
-            let request = decode_bridge_frame(request, ExchangeRole::CandidateRequest)
-                .map_err(|_| rka_transport::TlsError::Admission)?;
-            let prepared = adapter.prepare(request).map_err(|()| {
-                diagnostic(&state, "donor_bridge_prepare");
-                rka_transport::TlsError::Admission
-            })?;
-            dispatched.set(true);
-            let response = adapter.dispatch(&prepared).map_err(|error| {
-                diagnostic(&state, &format!("donor_bridge_{}", bridge_status(error)));
-                rka_transport::TlsError::Admission
-            })?;
-            let response = DirectBridgeAdapter::finish(&prepared, response).map_err(|()| {
-                diagnostic(&state, "donor_bridge_finish");
-                rka_transport::TlsError::Admission
-            })?;
-            let encoded =
-                encode_bridge_frame(&response, ExchangeRole::CandidateResponse).map_err(|_| {
-                    diagnostic(&state, "donor_bridge_encode");
-                    rka_transport::TlsError::Admission
-                })?;
-            Ok(encoded.as_slice().to_vec())
-        });
-        match (result, dispatched.get()) {
-            (Ok(()), _) => {}
-            (Err(error), true) => {
-                diagnostic(&state, &tls_status(error, "donor_ambiguous"));
-                return Err(DirectSessionError::Ambiguous);
-            }
-            (Err(error), false) => {
-                diagnostic(&state, &tls_status(error, "donor_pre_dispatch"));
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        }
-    }
-}
-
-#[doc(hidden)]
-pub fn run_candidate() -> Result<(), DirectSessionError> {
-    let (state, profile, _) = crate::direct_profile::load(LifecycleRole::Candidate)
-        .map_err(|_| DirectSessionError::State)?;
-    if profile.dial_mode != DialMode::DonorDials {
-        return Err(DirectSessionError::State);
-    }
-    let network = TcpListener::bind(SocketAddrV4::new(profile.listen_interface, PORT))
-        .map_err(|_| DirectSessionError::Io)?;
-    let local = bind_local(&state)?;
-    loop {
-        run_candidate_once((&network, &local, &state, &profile))
-            .map_err(|failure| failure.error)?;
-    }
-}
-
-fn run_donor_once(
-    context: (&mut DonorRuntime, &Path, &DirectProfile),
-    remote: SocketAddrV4,
-) -> Result<DonorIteration, DirectSessionError> {
-    let (runtime, state, profile) = context;
-    let Ok(socket) = connect_bound(profile.listen_interface, remote, BUDGET) else {
-        return Ok(DonorIteration::Retry);
-    };
-    let donor = donor_client(state, profile)?;
-    let dispatched = Cell::new(false);
-    let result = donor.serve_once(socket, |request| {
-        dispatched.set(true);
-        runtime
-            .dispatch_frame(request)
-            .map_err(|_| rka_transport::TlsError::Admission)
-    });
-    match (result, dispatched.get()) {
-        (Ok(()), _) => Ok(DonorIteration::Served),
-        (Err(_), true) => Err(DirectSessionError::Ambiguous),
-        (Err(_), false) => Ok(DonorIteration::Retry),
-    }
-}
-
-fn run_candidate_once(
-    context: (&TcpListener, &UnixListener, &Path, &DirectProfile),
-) -> Result<CandidateIteration, CandidateIterationError> {
-    let (network, local, state, profile) = context;
-    let (mut broker, _) = local
-        .accept()
-        .map_err(|_| candidate_failure(DirectSessionError::Io, 0))?;
-    let credentials =
-        socket_peercred(&broker).map_err(|_| candidate_failure(DirectSessionError::State, 0))?;
-    if credentials.uid != geteuid() {
-        return Err(candidate_failure(DirectSessionError::State, 0));
-    }
-    let request = read_frame(&mut broker).map_err(|error| candidate_failure(error, 0))?;
-    let exchange = exchange_candidate_request((network, state, profile), &request)?;
-    write_frame(&mut broker, &exchange.response)
-        .map_err(|error| candidate_failure(error, exchange.accepted_connections))?;
-    Ok(CandidateIteration {
-        accepted_connections: exchange.accepted_connections,
-    })
 }
 
 fn connect_bound(
@@ -223,72 +73,6 @@ fn connect_bound(
     }
 }
 
-struct CandidateExchange {
-    response: Vec<u8>,
-    accepted_connections: usize,
-}
-
-fn exchange_candidate_request(
-    context: (&TcpListener, &Path, &DirectProfile),
-    request: &[u8],
-) -> Result<CandidateExchange, CandidateIterationError> {
-    let (network, state, profile) = context;
-    let candidate = candidate_server(state, profile).map_err(|error| {
-        let status = match &error {
-            DirectSessionError::State => "candidate_setup_state",
-            DirectSessionError::Io => "candidate_setup_io",
-            DirectSessionError::Tls => "candidate_setup_tls",
-            DirectSessionError::Ambiguous => "candidate_setup_ambiguous",
-        };
-        diagnostic(state, status);
-        candidate_failure(error, 0)
-    })?;
-    for attempt in 0..PRE_DISPATCH_ATTEMPTS {
-        let accepted_connections = attempt.saturating_add(1);
-        let (socket, _) = network
-            .accept()
-            .map_err(|_| candidate_failure(DirectSessionError::Io, attempt))?;
-        match candidate.exchange(socket, request) {
-            Ok(response) => {
-                return Ok(CandidateExchange {
-                    response,
-                    accepted_connections,
-                });
-            }
-            Err(CandidateExchangeError::PreDispatch(error))
-                if attempt < PRE_DISPATCH_ATTEMPTS.saturating_sub(1) =>
-            {
-                diagnostic(state, &tls_status(error, "candidate_pre_dispatch"));
-            }
-            Err(CandidateExchangeError::Ambiguous(error)) => {
-                diagnostic(state, &tls_status(error, "candidate_ambiguous"));
-                return Err(candidate_failure(
-                    DirectSessionError::Ambiguous,
-                    accepted_connections,
-                ));
-            }
-            Err(CandidateExchangeError::PreDispatch(error)) => {
-                diagnostic(state, &tls_status(error, "candidate_pre_dispatch"));
-                return Err(candidate_failure(
-                    DirectSessionError::Tls,
-                    accepted_connections,
-                ));
-            }
-            Err(_) => {
-                diagnostic(state, "candidate_pre_dispatch_unknown");
-                return Err(candidate_failure(
-                    DirectSessionError::Tls,
-                    accepted_connections,
-                ));
-            }
-        }
-    }
-    Err(candidate_failure(
-        DirectSessionError::Tls,
-        PRE_DISPATCH_ATTEMPTS,
-    ))
-}
-
 fn tls_status(error: TlsError, phase: &str) -> String {
     let category = match error {
         TlsError::Configuration => "configuration",
@@ -304,22 +88,6 @@ fn tls_status(error: TlsError, phase: &str) -> String {
     format!("{phase}_{category}")
 }
 
-const fn bridge_status(error: BridgeError) -> &'static str {
-    match error {
-        BridgeError::Deadline => "deadline",
-        BridgeError::PeerDied => "peer_died",
-        BridgeError::PeerIdentity => "peer_identity",
-        BridgeError::TrustedState => "trusted_state",
-        BridgeError::Io => "io",
-        BridgeError::Correlation => "correlation",
-        BridgeError::Generation => "generation",
-        BridgeError::Capacity => "capacity",
-        BridgeError::QueueSaturated => "queue_saturated",
-        BridgeError::Cancelled => "cancelled",
-        _ => "protocol",
-    }
-}
-
 fn diagnostic(state: &Path, status: &str) {
     let path = state.join("run/direct-session.diagnostic");
     if fs::symlink_metadata(&path).is_ok_and(|metadata| !metadata.file_type().is_file()) {
@@ -330,20 +98,14 @@ fn diagnostic(state: &Path, status: &str) {
     }
 }
 
-const fn candidate_failure(
-    error: DirectSessionError,
-    accepted_connections: usize,
-) -> CandidateIterationError {
-    CandidateIterationError {
-        error,
-        accepted_connections,
-    }
-}
-
 fn donor_client(
     state: &Path,
     profile: &DirectProfile,
-) -> Result<PinnedTlsDonorClient, DirectSessionError> {
+) -> Result<PinnedTlsDonorClient<AuthenticatedCandidateContext>, DirectSessionError> {
+    let (tls_admission, profile_id_hash) = admission(state, profile)?;
+    let authenticated = PairingCatalog::load(state)
+        .and_then(|catalog| catalog.lookup(profile.peer_pin, profile_id_hash, profile.epoch))
+        .map_err(|_| DirectSessionError::State)?;
     PinnedTlsDonorClient::new(
         identity(state)?,
         ClientPeer::new(
@@ -352,7 +114,8 @@ fn donor_client(
                 .map_err(|_| DirectSessionError::State)?,
             profile.peer_pin,
         ),
-        admission(state, profile)?,
+        tls_admission,
+        authenticated,
     )
     .map_err(|_| DirectSessionError::Tls)
 }
@@ -361,10 +124,11 @@ fn candidate_server(
     state: &Path,
     profile: &DirectProfile,
 ) -> Result<PinnedTlsCandidateServer, DirectSessionError> {
+    let (tls_admission, _) = admission(state, profile)?;
     let result = PinnedTlsCandidateServer::new(
         identity(state)?,
         &ServerPeer::new(peer_trust(state)?, profile.peer_pin),
-        admission(state, profile)?,
+        tls_admission,
     );
     if let Err(error) = &result {
         diagnostic(state, &tls_status(*error, "candidate_setup"));
@@ -372,20 +136,26 @@ fn candidate_server(
     result.map_err(|_| DirectSessionError::Tls)
 }
 
-fn admission(state: &Path, profile: &DirectProfile) -> Result<TlsAdmission, DirectSessionError> {
+fn admission(
+    state: &Path,
+    profile: &DirectProfile,
+) -> Result<(TlsAdmission, [u8; 32]), DirectSessionError> {
     let record = PairedActivationRecord::load(&FileStateStore::new(state))
         .map_err(|_| DirectSessionError::State)?;
     if record.profile_epoch != profile.epoch || record.peer_spki_hash != profile.peer_pin {
         return Err(DirectSessionError::State);
     }
-    Ok(TlsAdmission::new(
-        AdmissionBinding::new([
-            record.profile_id_hash,
-            record.session_id,
-            record.candidate_nonce,
-            record.prior_transcript_hash,
-        ]),
-        BUDGET,
+    Ok((
+        TlsAdmission::new(
+            AdmissionBinding::new([
+                record.profile_id_hash,
+                record.session_id,
+                record.candidate_nonce,
+                record.prior_transcript_hash,
+            ]),
+            BUDGET,
+        ),
+        record.profile_id_hash,
     ))
 }
 

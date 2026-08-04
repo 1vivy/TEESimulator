@@ -1,4 +1,6 @@
+// allow: SIZE_OK — one serialized TLS integration harness shares a generated PKI and socket peers.
 use std::{
+    cell::Cell,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     os::fd::AsRawFd,
@@ -52,9 +54,10 @@ fn candidate_exchange_types_admission_failure_as_pre_dispatch()
             AdmissionBinding::new([[0x91; 32], [2; 32], [3; 32], [4; 32]]),
             PEER_BUDGET,
         ),
+        (),
     )?;
     let (donor_socket, candidate_socket) = connected_pair()?;
-    let worker = std::thread::spawn(move || donor.serve_once(donor_socket, |_| Ok(Vec::new())));
+    let worker = std::thread::spawn(move || donor.serve_once(donor_socket, |(), _| Ok(Vec::new())));
 
     // When
     let result = candidate.exchange(candidate_socket, b"never-dispatched");
@@ -86,12 +89,13 @@ fn candidate_exchange_types_response_loss_as_ambiguous() -> Result<(), Box<dyn s
             pki.server.pin,
         ),
         TlsAdmission::new(binding(), PEER_BUDGET),
+        (),
     )?;
     let dispatched = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&dispatched);
     let (donor_socket, candidate_socket) = connected_pair()?;
     let worker = std::thread::spawn(move || {
-        donor.serve_once(donor_socket, |_| {
+        donor.serve_once(donor_socket, |(), _| {
             observed.fetch_add(1, Ordering::SeqCst);
             Err(TlsError::Io)
         })
@@ -133,10 +137,11 @@ fn donor_dials_while_candidate_originates_the_request() -> Result<(), Box<dyn st
             pki.server.pin,
         ),
         TlsAdmission::new(binding(), PEER_BUDGET),
+        (),
     )?;
 
     // When: the donor opens the socket and dispatches the candidate's request once.
-    let donor_result = donor.serve_once(TcpStream::connect(address)?, |request| {
+    let donor_result = donor.serve_once(TcpStream::connect(address)?, |(), request| {
         assert_eq!(request, b"candidate-request");
         Ok(b"donor-response".to_vec())
     });
@@ -146,6 +151,83 @@ fn donor_dials_while_candidate_originates_the_request() -> Result<(), Box<dyn st
     assert_eq!(
         worker.join().map_err(|_| "candidate thread failed")??,
         b"donor-response"
+    );
+    Ok(())
+}
+
+#[test]
+fn donor_handler_receives_the_authenticated_context_only_after_pin_verification()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let _serial = serial_tls_tests();
+    let pki = test_pki(Validity::Current)?;
+    let authenticated = Arc::new([0x61; 32]);
+    let expected = Arc::clone(&authenticated);
+    let candidate = PinnedTlsCandidateServer::new(
+        pki.server.identity(),
+        &ServerPeer::new(vec![pki.root.clone()], pki.client.pin),
+        TlsAdmission::new(binding(), PEER_BUDGET),
+    )?;
+    let donor = PinnedTlsDonorClient::new(
+        pki.client.identity(),
+        ClientPeer::new(
+            vec![pki.root.clone()],
+            ServerName::try_from("localhost".to_owned())?,
+            pki.server.pin,
+        ),
+        TlsAdmission::new(binding(), PEER_BUDGET),
+        authenticated,
+    )?;
+    let (donor_socket, candidate_socket) = connected_pair()?;
+    let success_worker =
+        std::thread::spawn(move || candidate.exchange(candidate_socket, b"authenticated-request"));
+    let mismatched_candidate = PinnedTlsCandidateServer::new(
+        pki.server.identity(),
+        &ServerPeer::new(vec![pki.root.clone()], pki.client.pin),
+        TlsAdmission::new(binding(), PEER_BUDGET),
+    )?;
+    let mismatched_donor = PinnedTlsDonorClient::new(
+        pki.client.identity(),
+        ClientPeer::new(
+            vec![pki.root],
+            ServerName::try_from("localhost".to_owned())?,
+            [0x62; 32],
+        ),
+        TlsAdmission::new(binding(), PEER_BUDGET),
+        Arc::new([0x63; 32]),
+    )?;
+    let (mismatched_donor_socket, mismatched_candidate_socket) = connected_pair()?;
+    let mismatch_worker = std::thread::spawn(move || {
+        mismatched_candidate.exchange(mismatched_candidate_socket, b"must-not-dispatch")
+    });
+    let invoked = Cell::new(false);
+
+    // When
+    let success = donor.serve_once(donor_socket, |actual, request| {
+        assert!(Arc::ptr_eq(actual, &expected));
+        assert_eq!(request, b"authenticated-request");
+        Ok(b"authenticated-response".to_vec())
+    });
+    let mismatch = mismatched_donor.serve_once(mismatched_donor_socket, |_, _| {
+        invoked.set(true);
+        Ok(Vec::new())
+    });
+
+    // Then
+    success?;
+    assert_eq!(
+        success_worker
+            .join()
+            .map_err(|_| "candidate thread failed")??,
+        b"authenticated-response"
+    );
+    assert_eq!(mismatch, Err(TlsError::Pin));
+    assert!(!invoked.get());
+    assert!(
+        mismatch_worker
+            .join()
+            .map_err(|_| "candidate thread failed")?
+            .is_err()
     );
     Ok(())
 }

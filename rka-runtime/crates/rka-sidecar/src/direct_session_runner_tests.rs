@@ -1,4 +1,6 @@
+// allow: SIZE_OK — one end-to-end runner matrix shares live donor/candidate socket fixtures.
 use std::{
+    cell::Cell,
     fs, io,
     net::{SocketAddr, SocketAddrV4, TcpListener},
     os::unix::{
@@ -13,13 +15,16 @@ use rka_state::PairedActivationRecord;
 use rka_transport::peer_spki_hash;
 
 use super::{
-    CandidateIterationError, DirectSessionError, DonorIteration, bind_local, read_frame,
-    run_candidate_once, run_donor_once,
+    CandidateIterationError, DirectSessionError, DonorIteration, bind_local, candidate_server,
+    connect_bound, donor_client, read_frame, run_candidate_once, run_donor_once,
     tests::{TempState, identities, persist_identity, persist_profile, routed_local_ipv4},
     write_frame,
 };
 use crate::{
-    LifecycleRole, direct_profile::DirectProfile, donor::dispatch_tests::support::Fixture,
+    LifecycleRole,
+    candidate::{PairingAdmission, PairingCatalog},
+    direct_profile::DirectProfile,
+    donor::dispatch_tests::support::Fixture,
     provisioning_io::FileStateStore,
 };
 
@@ -56,6 +61,14 @@ impl RunnerFixture {
             persist_profile(&donor.root, (LifecycleRole::Donor, local, candidate_pin))?;
         let candidate_profile =
             persist_profile(&candidate.0, (LifecycleRole::Candidate, local, donor_pin))?;
+        let mut catalog = PairingCatalog::empty();
+        catalog.admit(PairingAdmission {
+            peer_spki_hash: candidate_pin,
+            profile_id_hash: pair.profile_id_hash,
+            profile_epoch: donor_profile.epoch,
+            candidate_identity_hash: pair.candidate_identity_hash,
+        })?;
+        catalog.persist(&donor.root)?;
         Ok(Self {
             donor,
             candidate,
@@ -78,6 +91,59 @@ impl RunnerFixture {
     fn candidate_socket(&self) -> PathBuf {
         self.candidate.0.join("run/sockets/broker.sock")
     }
+}
+
+#[test]
+fn donor_dispatch_receives_the_catalog_resolved_candidate_for_the_selected_profile()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let fixture = RunnerFixture::new()?;
+    let candidate_a = fixture.pair.candidate_identity_hash.map(|byte| byte ^ 0xff);
+    let mut catalog = PairingCatalog::empty();
+    catalog.admit(PairingAdmission {
+        peer_spki_hash: fixture.donor_profile.peer_pin.map(|byte| byte ^ 0xff),
+        profile_id_hash: fixture.pair.profile_id_hash.map(|byte| byte ^ 0xff),
+        profile_epoch: fixture.donor_profile.epoch,
+        candidate_identity_hash: candidate_a,
+    })?;
+    catalog.admit(PairingAdmission {
+        peer_spki_hash: fixture.donor_profile.peer_pin,
+        profile_id_hash: fixture.pair.profile_id_hash,
+        profile_epoch: fixture.donor_profile.epoch,
+        candidate_identity_hash: fixture.pair.candidate_identity_hash,
+    })?;
+    catalog.persist(&fixture.donor.root)?;
+    let (network, remote) = fixture.network()?;
+    let candidate = candidate_server(&fixture.candidate.0, &fixture.candidate_profile)?;
+    let worker = std::thread::spawn(move || {
+        let (socket, _) = network.accept().map_err(|_| {
+            rka_transport::CandidateExchangeError::PreDispatch(rka_transport::TlsError::Io)
+        })?;
+        candidate.exchange(socket, b"candidate-b-request")
+    });
+    let donor = donor_client(&fixture.donor.root, &fixture.donor_profile)?;
+    let observed = Cell::new(None);
+
+    // When
+    let result = donor.serve_once(
+        connect_bound(fixture.local, remote, std::time::Duration::from_secs(2))?,
+        |authenticated, request| {
+            observed.set(Some(*authenticated.candidate().as_bytes()));
+            assert_eq!(request, b"candidate-b-request");
+            Ok(b"candidate-b-response".to_vec())
+        },
+    );
+
+    // Then
+    result?;
+    assert_eq!(observed.get(), Some(fixture.pair.candidate_identity_hash));
+    assert_ne!(observed.get(), Some(candidate_a));
+    assert_eq!(
+        worker.join().map_err(|_| "candidate thread failed")??,
+        b"candidate-b-response"
+    );
+    fixture.donor.cleanup()?;
+    Ok(())
 }
 
 #[test]

@@ -58,14 +58,16 @@ pub(super) fn decode_body(
             }
             BridgeMessage::Error(request_id, code, Hash32::new(cursor.take_array()?))
         }
-        7 | 8 => {
+        7 => {
+            let operation = CandidateBridgeOperation::from_wire(cursor.take_u8()?)?;
+            let candidate_id = Hash32::new(cursor.take_array()?);
+            let payload = cursor.take_public(0, MAX_FRAME_BYTES.saturating_sub(37))?;
+            BridgeMessage::CandidateCommand(request_id, operation, candidate_id, payload)
+        }
+        8 => {
             let operation = CandidateBridgeOperation::from_wire(cursor.take_u8()?)?;
             let payload = cursor.take_public(0, MAX_FRAME_BYTES.saturating_sub(5))?;
-            if tag == 7 {
-                BridgeMessage::CandidateCommand(request_id, operation, payload)
-            } else {
-                BridgeMessage::CandidateReply(request_id, operation, payload)
-            }
+            BridgeMessage::CandidateReply(request_id, operation, payload)
         }
         9 => decode_certification_request(request_id, &mut cursor)?,
         10 => BridgeMessage::CertificationAck(

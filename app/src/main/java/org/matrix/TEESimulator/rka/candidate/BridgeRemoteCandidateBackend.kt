@@ -18,6 +18,7 @@ import org.matrix.TEESimulator.rka.bridge.PublicBytes
 import org.matrix.TEESimulator.rka.bridge.RequestId
 
 internal class BridgeRemoteCandidateBackend(
+    private val candidateId: IdentityHash,
     private val exchange: (BridgeMessage) -> BridgeResult<BridgeMessage> =
         BrokerBridgeFactory::exchangeCandidate
 ) : RemoteCandidateBackend {
@@ -99,7 +100,8 @@ internal class BridgeRemoteCandidateBackend(
             BridgeMessage.CandidateCommand(
                 requestId,
                 operation,
-                PublicBytes.of(payload, BridgeLimits.MAX_FRAME_BYTES - 5),
+                candidateId,
+                PublicBytes.of(payload, BridgeLimits.MAX_FRAME_BYTES - 37),
             )
         payload.fill(0)
         return when (val result = exchange(request)) {

@@ -26,7 +26,7 @@ class DonorKeyMintProductionReachabilityTest {
         assertTrue(backend.contains("RkpJournalState.APP_KEY_GENERATING"))
         assertTrue(
             runtime.contains(
-                "DonorDispatchAdapter.dispatch(message, donorBackend.value, candidate)"
+                "DonorDispatchAdapter.dispatch(message, donorBackend.value)"
             )
         )
         assertFalse(adapter.contains("android.system.keystore2"))

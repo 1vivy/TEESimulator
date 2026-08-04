@@ -1,3 +1,4 @@
+use rka_sidecar::candidate::CandidateId;
 use rka_sidecar::donor::{
     BrokerBegin, BrokerFailure, BrokerGenerate, DonorBroker, GeneratedKey, PublicKeyResult,
     RemoteKeyHandle, RemoteOperationHandle, RkpKeyHandle,
@@ -19,6 +20,8 @@ pub struct FakeBroker {
 }
 
 impl DonorBroker for FakeBroker {
+    fn bind_candidate(&mut self, _candidate: &CandidateId) {}
+
     fn generate(&mut self, request: BrokerGenerate<'_>) -> Result<GeneratedKey, BrokerFailure> {
         self.generated_requests += 1;
         self.prior_transcripts.push(request.prior_transcript_hash);

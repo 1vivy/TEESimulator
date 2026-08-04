@@ -52,12 +52,14 @@ impl<B: DonorBroker> DonorSupervisor<B> {
         {
             let (shards, broker) = (&mut self.shards, &mut self.broker);
             if let Some(shard) = shards.get_mut(&existing.candidate) {
+                broker.bind_candidate(&existing.candidate);
                 shard.service.invalidate(existing.alias, broker);
             }
         }
         {
             let (shards, broker) = (&mut self.shards, &mut self.broker);
             if let Some(shard) = shards.get_mut(&current.candidate) {
+                broker.bind_candidate(&current.candidate);
                 shard
                     .service
                     .quarantine_after_remote_delete(current.alias, broker);

@@ -10,15 +10,14 @@ import org.matrix.TEESimulator.rka.bridge.BridgeMessage
 import org.matrix.TEESimulator.rka.bridge.CandidateBridgeOperation
 import org.matrix.TEESimulator.rka.bridge.Hash32
 import org.matrix.TEESimulator.rka.bridge.PublicBytes
-import org.matrix.TEESimulator.rka.candidate.IdentityHash
 import org.matrix.TEESimulator.rka.journal.RkpOpaqueHandle
 
 internal object DonorBridgeDispatcher {
     fun dispatch(
         command: BridgeMessage.CandidateCommand,
         backend: DonorKeyMintBackend,
-        candidate: IdentityHash,
     ): BridgeMessage {
+        val candidate = command.candidateId
         val payload = command.payload.copyBytes()
         return try {
             val result =

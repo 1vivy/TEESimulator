@@ -173,8 +173,8 @@ fn body_length(message: &BridgeMessage) -> Result<usize, BridgeError> {
             })
         }
         BridgeMessage::Error(..) => Ok(33),
-        BridgeMessage::CandidateCommand(_, _, payload)
-        | BridgeMessage::CandidateReply(_, _, payload) => checked(5, payload.as_slice().len()),
+        BridgeMessage::CandidateCommand(_, _, _, payload) => checked(37, payload.as_slice().len()),
+        BridgeMessage::CandidateReply(_, _, payload) => checked(5, payload.as_slice().len()),
         BridgeMessage::CertificationRequest(_, _, keys, _, _) => keys
             .len()
             .checked_mul(130)
@@ -309,8 +309,12 @@ fn encode_body(message: &BridgeMessage, output: &mut Vec<u8>) -> Result<(), Brid
             output.push(*code);
             output.extend_from_slice(detail_hash.as_array());
         }
-        BridgeMessage::CandidateCommand(_, operation, payload)
-        | BridgeMessage::CandidateReply(_, operation, payload) => {
+        BridgeMessage::CandidateCommand(_, operation, candidate_id, payload) => {
+            output.push(operation.wire());
+            output.extend_from_slice(candidate_id.as_array());
+            put_bytes(output, payload.as_slice())?;
+        }
+        BridgeMessage::CandidateReply(_, operation, payload) => {
             output.push(operation.wire());
             put_bytes(output, payload.as_slice())?;
         }

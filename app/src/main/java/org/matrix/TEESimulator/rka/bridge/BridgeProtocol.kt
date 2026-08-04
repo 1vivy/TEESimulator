@@ -4,6 +4,7 @@ import java.io.Closeable
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicBoolean
+import org.matrix.TEESimulator.rka.candidate.IdentityHash
 
 /** Frozen Task-7/Task-8 broker bridge contract. This is not the public RKA v2 wire protocol. */
 object BridgeLimits {
@@ -627,10 +628,11 @@ sealed class BridgeMessage : AutoCloseable {
     class CandidateCommand(
         override val requestId: RequestId,
         val operation: CandidateBridgeOperation,
+        val candidateId: IdentityHash,
         val payload: PublicBytes,
     ) : BridgeMessage() {
         init {
-            require(payload.size <= BridgeLimits.MAX_FRAME_BYTES - 5)
+            require(payload.size <= BridgeLimits.MAX_FRAME_BYTES - 37)
         }
 
         override fun close() = payload.close()

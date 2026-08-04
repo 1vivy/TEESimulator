@@ -32,7 +32,7 @@ object CandidateRuntimeRegistry {
                     val service =
                         RemoteCandidateService(
                             identityHash,
-                            BridgeRemoteCandidateBackend(),
+                            BridgeRemoteCandidateBackend(identityHash),
                             FileRemoteCandidateStore(PRODUCTION_RKA_STATE_ROOT, identityHash),
                             target.aaidDer,
                         )

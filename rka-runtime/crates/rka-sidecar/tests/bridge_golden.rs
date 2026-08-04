@@ -3,10 +3,13 @@
 use std::{collections::BTreeMap, error::Error};
 
 use rka_sidecar::bridge::{
-    BridgeMessage, ExchangeRole, RequestId, decode_frame, encode_frame, expected_response_tag,
+    BridgeMessage, CandidateBridgeOperation, ExchangeRole, Hash32, PublicBytes, RequestId,
+    decode_frame, encode_frame, expected_response_tag,
 };
+use rka_sidecar::candidate::{PairingAdmission, PairingCatalog};
 
 const GOLDENS: &str = include_str!("fixtures/bridge-kotlin-goldens-v1.txt");
+const CANDIDATE_ID_OFFSET: usize = 25;
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     value
@@ -86,5 +89,38 @@ fn bridge_golden_interop_correlates_exact_response_kinds() -> Result<(), Box<dyn
     assert_eq!(expected_response_tag(&update)?, 4);
     assert_eq!(expected_response_tag(&cancel)?, 5);
     assert!(matches!(request, BridgeMessage::PublicKeyRequest(..)));
+    Ok(())
+}
+
+#[test]
+fn candidate_command_encodes_the_trusted_candidate_id() -> Result<(), Box<dyn Error>> {
+    // Given
+    let mut catalog = PairingCatalog::empty();
+    catalog.admit(PairingAdmission::new(
+        ([0x11; 32], [0x22; 32], 7),
+        [0x33; 32],
+    ))?;
+    let context = catalog.lookup([0x11; 32], [0x22; 32], 7)?;
+    let candidate_id = *context.candidate().as_bytes();
+    let command = BridgeMessage::CandidateCommand(
+        RequestId::new(0x0102_0304_0506_0708),
+        CandidateBridgeOperation::List,
+        Hash32::new(candidate_id),
+        PublicBytes::bounded(b"abc", 0, 32)?,
+    );
+
+    // When
+    let encoded = encode_frame(&command, ExchangeRole::DonorRequest)?;
+    let decoded = decode_frame(encoded.as_slice(), ExchangeRole::DonorRequest)?;
+
+    // Then
+    assert_eq!(
+        encoded
+            .as_slice()
+            .get(CANDIDATE_ID_OFFSET..CANDIDATE_ID_OFFSET + candidate_id.len())
+            .ok_or("candidate id offset")?,
+        candidate_id
+    );
+    assert_eq!(decoded, command);
     Ok(())
 }

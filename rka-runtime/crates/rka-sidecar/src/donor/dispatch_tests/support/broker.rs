@@ -73,7 +73,7 @@ fn reply(ordinal: u8) -> Result<BridgeMessage, Box<dyn std::error::Error>> {
 
 fn generate_payload(message: BridgeMessage) -> Result<Vec<u8>, String> {
     match message {
-        BridgeMessage::CandidateCommand(_, CandidateBridgeOperation::Generate, payload) => {
+        BridgeMessage::CandidateCommand(_, CandidateBridgeOperation::Generate, _, payload) => {
             Ok(payload.as_slice().to_vec())
         }
         _ => Err("broker did not receive CandidateCommand Generate".to_owned()),

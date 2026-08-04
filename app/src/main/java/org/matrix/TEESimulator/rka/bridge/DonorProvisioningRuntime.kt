@@ -152,7 +152,8 @@ object DonorProvisioningRuntime {
     private fun dispatch(message: BridgeMessage): BridgeMessage =
         try {
             when (message) {
-                is BridgeMessage.CandidateCommand -> failure(message.requestId)
+                is BridgeMessage.CandidateCommand ->
+                    DonorDispatchAdapter.dispatch(message, donorBackend.value)
                 is BridgeMessage.SyntheticLeaseProbeRequest -> {
                     donorBackend.value
                     probeSyntheticLeaseForTest(message, donorDevice.value, journal)
@@ -179,7 +180,11 @@ object DonorProvisioningRuntime {
             is BridgeMessage.PublicKeyRequest -> provision(candidate, message)
             is BridgeMessage.CertificationRequest -> certify(candidate, message)
             is BridgeMessage.CandidateCommand ->
-                DonorDispatchAdapter.dispatch(message, donorBackend.value, candidate)
+                if (message.candidateId == candidate) {
+                    DonorDispatchAdapter.dispatch(message, donorBackend.value)
+                } else {
+                    failure(message.requestId)
+                }
             is BridgeMessage.SyntheticLeaseProbeRequest -> {
                 donorBackend.value
                 probeSyntheticLeaseForTest(message, donorDevice.value, journal)

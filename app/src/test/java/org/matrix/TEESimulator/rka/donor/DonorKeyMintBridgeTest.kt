@@ -53,6 +53,25 @@ class DonorKeyMintBridgeTest {
     }
 
     @Test
+    fun dispatcherListIsCandidateScoped() {
+        // Given
+        val fixture = DonorFixture()
+        val backend = DonorKeyMintBackend(FakeDonorKeyMintDevice(fixture), fixture.journal)
+        val candidateA = IdentityHash.of(ByteArray(32) { 1 })
+        val candidateB = IdentityHash.of(ByteArray(32) { 2 })
+        assertTrue(backend.generate(candidateA, fixture.request()) is DonorResult.Success)
+        mirrorRetainedKey(backend, candidateA, candidateB, fixture.alias)
+
+        // When
+        val listedA = dispatchList(backend, candidateA)
+        val listedB = dispatchList(backend, candidateB)
+
+        // Then
+        assertEquals(1, listedA.first().toInt())
+        assertEquals(1, listedB.first().toInt())
+    }
+
+    @Test
     fun authenticatedDonorDispatcherSupportsEveryLifecycleCommand() {
         // Given
         val fixture = DonorFixture()
@@ -127,6 +146,7 @@ class DonorKeyMintBridgeTest {
             BridgeMessage.CandidateCommand(
                 RequestId(20),
                 CandidateBridgeOperation.GENERATE,
+                donorTestCandidate,
                 PublicBytes.of(
                     DonorBridgeCodec.generateCommand(fixture.request()),
                     BridgeLimits.MAX_FRAME_BYTES - 5,
@@ -187,10 +207,11 @@ class DonorKeyMintBridgeTest {
             BridgeMessage.CandidateCommand(
                 RequestId(operation.wire.toLong()),
                 operation,
+                donorTestCandidate,
                 PublicBytes.of(payload, BridgeLimits.MAX_FRAME_BYTES - 5),
             )
         return try {
-            val response = DonorBridgeDispatcher.dispatch(command, backend, donorTestCandidate)
+            val response = DonorBridgeDispatcher.dispatch(command, backend)
             try {
                 require(response is BridgeMessage.CandidateReply) { response.toString() }
                 response.payload.copyBytes()
@@ -212,11 +233,33 @@ class DonorKeyMintBridgeTest {
             BridgeMessage.CandidateCommand(
                 RequestId(91),
                 CandidateBridgeOperation.GENERATE,
+                donorTestCandidate,
                 PublicBytes.of(payload, BridgeLimits.MAX_FRAME_BYTES - 5),
             )
         payload.fill(0)
         return try {
-            DonorBridgeDispatcher.dispatch(command, backend, donorTestCandidate)
+            DonorBridgeDispatcher.dispatch(command, backend)
+        } finally {
+            command.close()
+        }
+    }
+
+    private fun dispatchList(backend: DonorKeyMintBackend, candidate: IdentityHash): ByteArray {
+        val command =
+            BridgeMessage.CandidateCommand(
+                RequestId(CandidateBridgeOperation.LIST.wire.toLong()),
+                CandidateBridgeOperation.LIST,
+                candidate,
+                PublicBytes.of(ByteArray(0), BridgeLimits.MAX_FRAME_BYTES - 37),
+            )
+        return try {
+            val response = DonorBridgeDispatcher.dispatch(command, backend)
+            try {
+                require(response is BridgeMessage.CandidateReply)
+                response.payload.copyBytes()
+            } finally {
+                response.close()
+            }
         } finally {
             command.close()
         }

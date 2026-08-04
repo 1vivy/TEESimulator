@@ -19,9 +19,10 @@ class BridgeRemoteCandidateBackendTest {
     fun productionBackendExchangesEveryRemoteOperationSuccessfully() {
         val key = RemoteKeyHandle.of(ByteArray(16) { 1 })
         val operation = RemoteOperationHandle.of(ByteArray(16) { 2 })
+        val identity = IdentityHash.of(ByteArray(32) { 3 })
         val seen = mutableListOf<CandidateBridgeOperation>()
         val frames = mutableListOf<ByteArray>()
-        val backend = BridgeRemoteCandidateBackend { request ->
+        val backend = BridgeRemoteCandidateBackend(identity) { request ->
             val command = request as BridgeMessage.CandidateCommand
             seen += command.operation
             frames += BridgeCodec.encode(command, BridgeExchangeRole.CANDIDATE_REQUEST)
@@ -54,8 +55,6 @@ class BridgeRemoteCandidateBackendTest {
                 )
             )
         }
-        val identity = IdentityHash.of(ByteArray(32) { 3 })
-
         assertTrue(
             backend.generate(RemoteGenerateCommand(key, identity, byteArrayOf(4)))
                 is CandidateResult.Success
@@ -81,11 +80,13 @@ class BridgeRemoteCandidateBackendTest {
 
     @Test
     fun candidateCommandCodecIsCanonicalBoundedAndCorrelated() {
+        val identity = IdentityHash.of(ByteArray(32) { 3 })
         CandidateBridgeOperation.entries.forEach { operation ->
             val message =
                 BridgeMessage.CandidateCommand(
                     org.matrix.TEESimulator.rka.bridge.RequestId(operation.wire.toLong()),
                     operation,
+                    identity,
                     PublicBytes.of(byteArrayOf(operation.wire.toByte()), 1),
                 )
             val encoded = BridgeCodec.encode(message, BridgeExchangeRole.CANDIDATE_REQUEST)
@@ -105,6 +106,7 @@ class BridgeRemoteCandidateBackendTest {
             BridgeMessage.CandidateCommand(
                 org.matrix.TEESimulator.rka.bridge.RequestId(1),
                 CandidateBridgeOperation.UPDATE,
+                identity,
                 PublicBytes.of(tooLarge, BridgeLimits.MAX_FRAME_BYTES),
             )
         }

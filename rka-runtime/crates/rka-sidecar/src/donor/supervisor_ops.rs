@@ -27,6 +27,7 @@ impl<B: DonorBroker> DonorSupervisor<B> {
         let alias = request.alias;
         let generated = {
             let (shards, broker) = (&mut self.shards, &mut self.broker);
+            broker.bind_candidate(context.candidate());
             shard_mut(shards, context)?
                 .service
                 .generate(request, broker)?
@@ -53,6 +54,7 @@ impl<B: DonorBroker> DonorSupervisor<B> {
     ) -> Result<BeginResult, DonorError> {
         self.ensure_candidate(context)?;
         let (shards, broker) = (&mut self.shards, &mut self.broker);
+        broker.bind_candidate(context.candidate());
         shard_mut(shards, context)?.service.begin(request, broker)
     }
 
@@ -64,6 +66,7 @@ impl<B: DonorBroker> DonorSupervisor<B> {
     ) -> Result<usize, DonorError> {
         self.ensure_candidate(context)?;
         let (shards, broker) = (&mut self.shards, &mut self.broker);
+        broker.bind_candidate(context.candidate());
         shard_mut(shards, context)?
             .service
             .update_aad(request, broker)
@@ -77,6 +80,7 @@ impl<B: DonorBroker> DonorSupervisor<B> {
     ) -> Result<Vec<u8>, DonorError> {
         self.ensure_candidate(context)?;
         let (shards, broker) = (&mut self.shards, &mut self.broker);
+        broker.bind_candidate(context.candidate());
         shard_mut(shards, context)?.service.update(request, broker)
     }
 
@@ -88,6 +92,7 @@ impl<B: DonorBroker> DonorSupervisor<B> {
     ) -> Result<FinishResult, DonorError> {
         self.ensure_candidate(context)?;
         let (shards, broker) = (&mut self.shards, &mut self.broker);
+        broker.bind_candidate(context.candidate());
         shard_mut(shards, context)?.service.finish(request, broker)
     }
 
@@ -99,6 +104,7 @@ impl<B: DonorBroker> DonorSupervisor<B> {
     ) -> Result<(), DonorError> {
         self.ensure_candidate(context)?;
         let (shards, broker) = (&mut self.shards, &mut self.broker);
+        broker.bind_candidate(context.candidate());
         shard_mut(shards, context)?.service.abort(request, broker)
     }
 
@@ -110,6 +116,7 @@ impl<B: DonorBroker> DonorSupervisor<B> {
     ) -> Result<DonorKeyState, DonorError> {
         self.ensure_candidate(context)?;
         let (shards, broker) = (&mut self.shards, &mut self.broker);
+        broker.bind_candidate(context.candidate());
         shard_mut(shards, context)?.service.delete(request, broker)
     }
 

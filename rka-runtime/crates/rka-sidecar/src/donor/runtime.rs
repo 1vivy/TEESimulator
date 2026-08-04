@@ -176,6 +176,7 @@ impl<B: DonorBroker> DonorSupervisor<B> {
     pub fn candidate_died(&mut self, candidate: &crate::candidate::CandidateId) {
         let (shards, broker) = (&mut self.shards, &mut self.broker);
         if let Some(shard) = shards.get_mut(candidate) {
+            broker.bind_candidate(candidate);
             shard.service.invalidate_all(broker);
         }
     }
@@ -183,7 +184,8 @@ impl<B: DonorBroker> DonorSupervisor<B> {
     /// Invalidates every shard after donor broker death.
     pub fn broker_died(&mut self) {
         let (shards, broker) = (&mut self.shards, &mut self.broker);
-        for shard in shards.values_mut() {
+        for (candidate, shard) in shards {
+            broker.bind_candidate(candidate);
             shard.service.invalidate_all(broker);
         }
     }

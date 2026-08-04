@@ -1,4 +1,5 @@
 use super::{RemoteKeyHandle, RemoteOperationHandle, RkpKeyHandle};
+use crate::candidate::CandidateId;
 
 /// Broker generate request containing public inputs and typed handles only.
 #[derive(Clone, Copy, Debug)]
@@ -63,6 +64,7 @@ pub enum BrokerFailure {
 
 /// Typed Android broker boundary.
 pub trait DonorBroker {
+    fn bind_candidate(&mut self, candidate: &CandidateId);
     fn generate(&mut self, request: BrokerGenerate<'_>) -> Result<GeneratedKey, BrokerFailure>;
     fn begin(&mut self, request: BrokerBegin) -> Result<RemoteOperationHandle, BrokerFailure>;
     fn update_aad(

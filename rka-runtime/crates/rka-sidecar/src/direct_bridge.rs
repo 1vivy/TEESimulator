@@ -8,7 +8,7 @@ use rka_state::{PairedActivationRecord, RkpLeaseBatch};
 
 use crate::{
     bridge::{
-        BridgeError, BridgeMessage, BrokerOperation, CandidateBridgeOperation, PublicBytes,
+        BridgeError, BridgeMessage, BrokerOperation, CandidateBridgeOperation, Hash32, PublicBytes,
         RoleExecutor, SidecarRole,
     },
     provisioning_io::{FileStateStore, load_lease_chain},
@@ -71,9 +71,11 @@ impl DirectBridgeAdapter {
         if matches!(request, BridgeMessage::SyntheticLeaseIssueRequest { .. }) {
             return self.prepare_synthetic_lease_issue(request);
         }
-        let BridgeMessage::CandidateCommand(request_id, operation, payload) = request else {
+        let BridgeMessage::CandidateCommand(request_id, operation, candidate_id, payload) = request
+        else {
             return Err(());
         };
+        self.admit_identity(*candidate_id.as_array())?;
         let (translated, plan) = match operation {
             CandidateBridgeOperation::Generate => self.generate(payload.as_slice())?,
             CandidateBridgeOperation::List => {
@@ -113,6 +115,7 @@ impl DirectBridgeAdapter {
             request: BridgeMessage::CandidateCommand(
                 request_id,
                 operation,
+                Hash32::new(self.candidate_identity.ok_or(())?),
                 PublicBytes::bounded(&translated, 0, MAX_FRAME_BYTES).map_err(|_| ())?,
             ),
             plan,
@@ -159,7 +162,8 @@ impl DirectBridgeAdapter {
         let BridgeMessage::CandidateReply(request_id, operation, payload) = response else {
             return Err(());
         };
-        let BridgeMessage::CandidateCommand(expected_id, expected_operation, _) = &prepared.request
+        let BridgeMessage::CandidateCommand(expected_id, expected_operation, _, _) =
+            &prepared.request
         else {
             return Err(());
         };

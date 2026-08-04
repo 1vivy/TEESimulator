@@ -8,6 +8,7 @@ import java.io.EOFException
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import org.matrix.TEESimulator.rka.candidate.IdentityHash
 
 object BridgeCodec {
     fun encode(message: BridgeMessage, direction: BridgeDirection): ByteArray {
@@ -177,6 +178,7 @@ object BridgeCodec {
                     }
                     is BridgeMessage.CandidateCommand -> {
                         out.writeByte(message.operation.wire)
+                        writeFixed(out, message.candidateId)
                         writeBytes(out, message.payload)
                     }
                     is BridgeMessage.CandidateReply -> {
@@ -366,7 +368,17 @@ object BridgeCodec {
                         requireNotNull(code)
                         BridgeMessage.Error(requestId, code, readHash(input))
                     }
-                    BridgeTag.CANDIDATE_COMMAND,
+                    BridgeTag.CANDIDATE_COMMAND -> {
+                        val operationValue = input.readUnsignedByte()
+                        val operation =
+                            CandidateBridgeOperation.entries.singleOrNull {
+                                it.wire == operationValue
+                            }
+                        requireNotNull(operation)
+                        val candidateId = readIdentityHash(input)
+                        val payload = readPublicBytes(input, BridgeLimits.MAX_FRAME_BYTES - 37)
+                        BridgeMessage.CandidateCommand(requestId, operation, candidateId, payload)
+                    }
                     BridgeTag.CANDIDATE_REPLY -> {
                         val operationValue = input.readUnsignedByte()
                         val operation =
@@ -375,11 +387,7 @@ object BridgeCodec {
                             }
                         requireNotNull(operation)
                         val payload = readPublicBytes(input, BridgeLimits.MAX_FRAME_BYTES - 5)
-                        if (tag == BridgeTag.CANDIDATE_COMMAND) {
-                            BridgeMessage.CandidateCommand(requestId, operation, payload)
-                        } else {
-                            BridgeMessage.CandidateReply(requestId, operation, payload)
-                        }
+                        BridgeMessage.CandidateReply(requestId, operation, payload)
                     }
                     BridgeTag.CERTIFICATION_REQUEST -> {
                         val batchId = readBatchId(input)
@@ -550,6 +558,15 @@ object BridgeCodec {
         }
     }
 
+    private fun writeFixed(output: DataOutputStream, value: IdentityHash) {
+        val copy = value.copyBytes()
+        try {
+            output.write(copy)
+        } finally {
+            copy.fill(0)
+        }
+    }
+
     private fun readPublicBytes(
         input: DataInputStream,
         maximum: Int,
@@ -582,6 +599,15 @@ object BridgeCodec {
         val bytes = readFixed(input, 32)
         return try {
             Hash32.of(bytes)
+        } finally {
+            bytes.fill(0)
+        }
+    }
+
+    private fun readIdentityHash(input: DataInputStream): IdentityHash {
+        val bytes = readFixed(input, 32)
+        return try {
+            IdentityHash.of(bytes)
         } finally {
             bytes.fill(0)
         }

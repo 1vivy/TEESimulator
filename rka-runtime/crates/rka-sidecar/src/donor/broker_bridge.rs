@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 use rka_protocol::{HashDomain, hash_bytes};
 
 use crate::bridge::{
-    BridgeMessage, BrokerOperation, CandidateBridgeOperation, PublicBytes, RequestId, RoleExecutor,
-    SidecarRole,
+    BridgeMessage, BrokerOperation, CandidateBridgeOperation, Hash32, PublicBytes, RequestId,
+    RoleExecutor, SidecarRole,
 };
+use crate::candidate::CandidateId;
 
 use super::{
     BrokerBegin, BrokerFailure, BrokerGenerate, DonorBroker, GeneratedKey, PublicKeyResult,
@@ -18,6 +19,7 @@ pub struct BridgeDonorBroker {
     socket: PathBuf,
     executor: RoleExecutor,
     next_request: u64,
+    candidate: Option<CandidateId>,
 }
 
 impl BridgeDonorBroker {
@@ -28,6 +30,7 @@ impl BridgeDonorBroker {
             socket: socket.to_path_buf(),
             executor: RoleExecutor::new(SidecarRole::Donor),
             next_request: 1,
+            candidate: None,
         }
     }
 
@@ -40,6 +43,7 @@ impl BridgeDonorBroker {
             socket: socket.to_path_buf(),
             executor: RoleExecutor::new_with_test_identities(SidecarRole::Donor, exchanges)?,
             next_request: 1,
+            candidate: None,
         })
     }
 
@@ -53,6 +57,7 @@ impl BridgeDonorBroker {
         operation: CandidateBridgeOperation,
         payload: &[u8],
     ) -> Result<Vec<u8>, BrokerFailure> {
+        let candidate = self.candidate.ok_or(BrokerFailure::Rejected)?;
         let request_id = RequestId::new(self.next_request);
         self.next_request = self
             .next_request
@@ -61,7 +66,8 @@ impl BridgeDonorBroker {
         let request = BridgeMessage::CandidateCommand(
             request_id,
             operation,
-            PublicBytes::bounded(payload, 0, 1_048_571).map_err(|_| BrokerFailure::Rejected)?,
+            Hash32::new(*candidate.as_bytes()),
+            PublicBytes::bounded(payload, 0, 1_048_539).map_err(|_| BrokerFailure::Rejected)?,
         );
         let response = self
             .executor
@@ -83,6 +89,10 @@ impl BridgeDonorBroker {
 }
 
 impl DonorBroker for BridgeDonorBroker {
+    fn bind_candidate(&mut self, candidate: &CandidateId) {
+        self.candidate = Some(*candidate);
+    }
+
     fn generate(&mut self, request: BrokerGenerate<'_>) -> Result<GeneratedKey, BrokerFailure> {
         let mut payload = Vec::new();
         payload.extend_from_slice(&request.alias);

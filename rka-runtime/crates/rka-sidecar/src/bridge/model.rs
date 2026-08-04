@@ -340,8 +340,8 @@ pub enum BridgeMessage {
     Cancel(RequestId, Vec<Hash32>, Option<(BrokerBatchId, Vec<Hash32>)>),
     #[doc = "Returns one redacted typed failure."]
     Error(RequestId, u8, Hash32),
-    #[doc = "Invokes one donor `KeyMint` operation on the authenticated JVM broker."]
-    CandidateCommand(RequestId, CandidateBridgeOperation, PublicBytes),
+    #[doc = "Invokes one candidate-owned donor `KeyMint` operation on the authenticated JVM broker."]
+    CandidateCommand(RequestId, CandidateBridgeOperation, Hash32, PublicBytes),
     #[doc = "Returns one public-only donor `KeyMint` result."]
     CandidateReply(RequestId, CandidateBridgeOperation, PublicBytes),
     #[doc = "Commits exact validated activation metadata to the broker journal."]

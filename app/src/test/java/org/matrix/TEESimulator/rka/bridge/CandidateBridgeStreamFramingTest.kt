@@ -7,6 +7,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.matrix.TEESimulator.rka.candidate.IdentityHash
 
 class CandidateBridgeStreamFramingTest {
     @Test
@@ -15,6 +16,7 @@ class CandidateBridgeStreamFramingTest {
             BridgeMessage.CandidateCommand(
                 RequestId(7),
                 CandidateBridgeOperation.GET,
+                IdentityHash.of(ByteArray(32) { 7 }),
                 PublicBytes.of(byteArrayOf(1, 2, 3), BridgeLimits.MAX_FRAME_BYTES),
             )
         val canonical = BridgeCodec.encode(message, BridgeExchangeRole.CANDIDATE_REQUEST)

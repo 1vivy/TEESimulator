@@ -19,8 +19,10 @@ socket_directory_context=${RKA_SOCKET_DIRECTORY_CONTEXT:-u:object_r:teesimulator
 socket_context=${RKA_SOCKET_CONTEXT:-u:object_r:teesimulator_rka_socket:s0}
 internal_name=
 internal_role=
+internal_candidate=
+candidate_selector=
 
-usage() { printf '%s\n' 'usage: rka-supervisor.sh [--root PATH] [--state-root PATH] {start|stop|status}' >&2; }
+usage() { printf '%s\n' 'usage: rka-supervisor.sh [--root PATH] [--state-root PATH] {start|stop|status} [CANDIDATE]' >&2; }
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -28,14 +30,19 @@ while [ $# -gt 0 ]; do
         --state-root) state=$2; shift 2 ;;
         start|stop|status) command=$1; shift ;;
         __child-loop)
-            [ "$#" -ge 3 ] || { usage; exit 2; }
+            [ "$#" -ge 4 ] || { usage; exit 2; }
             command=$1
             internal_name=$2
             internal_role=$3
-            shift 3
+            internal_candidate=$4
+            shift 4
             break
             ;;
-        *) usage; exit 2 ;;
+        *)
+            [ -n "${command:-}" ] && [ -z "$candidate_selector" ] || { usage; exit 2; }
+            candidate_selector=$1
+            shift
+            ;;
     esac
 done
 [ -n "$command" ] || { usage; exit 2; }
@@ -44,6 +51,29 @@ run=$state/run
 pids=$run/pids
 state_file=$run/supervisor.state
 runtime_sidecar=$state/bin/rka-sidecar
+
+candidate_is_valid() {
+    [ -n "$1" ] && [ "$(printf %s "$1" | wc -c)" -le 64 ] || return 1
+    case $1 in *[!A-Za-z0-9_-]*) return 1 ;; esac
+}
+
+donor_candidates() {
+    candidate_directory=$state/profiles/direct.d
+    if [ ! -e "$candidate_directory" ] && [ ! -L "$candidate_directory" ]; then
+        return 0
+    fi
+    [ -d "$candidate_directory" ] && [ ! -L "$candidate_directory" ] || return 1
+    candidate_profiles=$(find "$candidate_directory" -mindepth 1 -maxdepth 1 -name '*.conf' -print | LC_ALL=C sort) || return 1
+    while IFS= read -r candidate_profile; do
+        [ -n "$candidate_profile" ] || continue
+        candidate_name=${candidate_profile##*/}
+        candidate_name=${candidate_name%.conf}
+        candidate_is_valid "$candidate_name" || return 1
+        printf '%s\n' "$candidate_name"
+    done <<EOF
+$candidate_profiles
+EOF
+}
 
 proc_stamp() {
     [ -r "/proc/$1/stat" ] || return 1
@@ -154,7 +184,7 @@ publish_identity() {
 $child_stamp
 EOF
     case $name in
-        broker)
+        broker|broker-*)
             executable=/system/bin/app_process64
             expected_cmdline="/system/bin/app_process64
 /system/bin
@@ -162,7 +192,7 @@ org.matrix.TEESimulator.App
 --rka-role
 $selected_role"
             ;;
-        sidecar)
+        sidecar|sidecar-*)
             executable=$runtime_sidecar
             expected_cmdline="$runtime_sidecar
 --role
@@ -214,7 +244,7 @@ profile_valid() {
 }
 
 direct_profile_valid() {
-    profile=$state/profiles/direct.conf
+    profile=${3:-$state/profiles/direct.conf}
     [ -f "$profile" ] && [ ! -L "$profile" ] || return 1
     [ "$(stat -c '%u:%a' "$profile")" = "$(id -u):600" ] || return 1
     [ "$(sed -n '1p' "$profile")" = version=2 ] || return 1
@@ -329,12 +359,14 @@ restart_blocked() {
 start_one() {
     name=$1
     selected_role=$2
-    shift 2
+    selected_candidate=$3
+    shift 3
     if record_live "$pids/$name.pid"; then return 0; fi
     rm -f "$pids/$name.pid" "$pids/$name.identity"
     [ -x "$native_supervisor" ] || return 1
     "$native_supervisor" --detach "$module_directory/rka-supervisor.sh" \
-        --root "$root" --state-root "$state" __child-loop "$name" "$selected_role" "$@" || return 1
+        --root "$root" --state-root "$state" __child-loop "$name" "$selected_role" \
+        "$selected_candidate" "$@" || return 1
     attempts=0
     while [ ! -f "$pids/$name.pid" ] && [ "$attempts" -lt 5 ]; do
         sleep 1
@@ -344,7 +376,8 @@ start_one() {
 }
 
 profile_receipt_valid() {
-    receipt=$state/run/direct-profile.receipt
+    receipt=$1
+    shift
     [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
     [ "$(stat -c '%u:%a' "$receipt")" = "$(id -u):600" ] || return 1
     [ "$(sed -n '1p' "$receipt")" = version=1 ] || return 1
@@ -363,23 +396,49 @@ profile_receipt_valid() {
 start_sidecar() {
     selected_role=$1
     selected_epoch=$2
-    profile_hash=$(sha256sum "$state/profiles/direct.conf" | awk '{print $1}') || return 1
-    if record_live "$pids/sidecar.pid" && profile_receipt_valid "$profile_hash" "$selected_epoch"; then
+    selected_candidate=${3:-}
+    if [ -n "$selected_candidate" ]; then
+        profile_path=$state/profiles/direct.d/$selected_candidate.conf
+        receipt_path=$state/run/direct-profile-$selected_candidate.receipt
+        process_name=sidecar-$selected_candidate
+        socket_path=$state/run/sockets/broker-$selected_candidate.sock
+    else
+        profile_path=$state/profiles/direct.conf
+        receipt_path=$state/run/direct-profile.receipt
+        process_name=sidecar
+        socket_path=$state/run/sockets/broker.sock
+    fi
+    profile_hash=$(sha256sum "$profile_path" | awk '{print $1}') || return 1
+    if record_live "$pids/$process_name.pid" &&
+        profile_receipt_valid "$receipt_path" "$profile_hash" "$selected_epoch"; then
         return 0
     fi
-    rm -f "$state/run/direct-profile.receipt"
-    start_one sidecar "$selected_role" env RKA_STATE_ROOT="$state" \
-        RKA_PROFILE_PATH="$state/profiles/direct.conf" \
+    rm -f "$receipt_path"
+    start_one "$process_name" "$selected_role" "$selected_candidate" env RKA_STATE_ROOT="$state" \
+        RKA_PROFILE_PATH="$profile_path" \
         RKA_EXPECTED_PROFILE_EPOCH="$selected_epoch" \
-        RKA_PROFILE_RECEIPT_PATH="$state/run/direct-profile.receipt" \
+        RKA_PROFILE_RECEIPT_PATH="$receipt_path" \
+        RKA_DONOR_SOCKET="$socket_path" \
         "$runtime_sidecar" --role "$selected_role" || return 1
     attempts=0
-    while ! profile_receipt_valid "$profile_hash" "$selected_epoch" && [ "$attempts" -lt 5 ]; do
-        record_live "$pids/sidecar.pid" || return 1
+    while ! profile_receipt_valid "$receipt_path" "$profile_hash" "$selected_epoch" && [ "$attempts" -lt 5 ]; do
+        record_live "$pids/$process_name.pid" || return 1
         sleep 1
         attempts=$((attempts + 1))
     done
-    profile_receipt_valid "$profile_hash" "$selected_epoch"
+    profile_receipt_valid "$receipt_path" "$profile_hash" "$selected_epoch"
+}
+
+start_donor_candidate() {
+    selected_candidate=$1
+    profile_path=$state/profiles/direct.d/$selected_candidate.conf
+    direct_profile_valid DONOR "$active_epoch" "$profile_path" || return 1
+    start_sidecar donor "$active_epoch" "$selected_candidate" || return 1
+    start_one "broker-$selected_candidate" donor "$selected_candidate" env \
+        RKA_DONOR_SOCKET="$run/sockets/broker-$selected_candidate.sock" \
+        "$daemon" "$module_directory" --rka-role donor || return 1
+    printf '%s\n' RUNNING > "$run/supervisor-$selected_candidate.state"
+    chmod 600 "$run/supervisor-$selected_candidate.state"
 }
 
 start() {
@@ -391,7 +450,13 @@ start() {
     role=$($control --root "$root" --state-root "$state" boot-decision) || return 1
     case $role in
         DISABLED) return 1 ;;
-        DONOR|CANDIDATE)
+        DONOR)
+            profile_valid "$role" || return 1
+            if [ "${RKA_REQUIRE_DIRECT_READY:-false}" = true ]; then
+                direct_ready || return 1
+            fi
+            ;;
+        CANDIDATE)
             profile_valid "$role" || return 1
             direct_profile_valid "$role" "$active_epoch" || return 1
             if [ "${RKA_REQUIRE_DIRECT_READY:-false}" = true ]; then
@@ -407,24 +472,52 @@ start() {
     [ "$(cat "$state_file" 2>/dev/null)" = FAILED_CRASH_CAP ] && return 1
     printf '%s\n' RUNNING > "$state_file"
     case $role in
-        LOCAL) start_one legacy '' "$daemon" legacy ;;
+        LOCAL) start_one legacy '' '' "$daemon" legacy ;;
         DONOR)
             materialize_sidecar || { stop; return 1; }
-            start_sidecar donor "$active_epoch" || { stop; return 1; }
-            start_one broker donor "$daemon" "$module_directory" --rka-role donor || { stop; return 1; }
+            selected_candidates=$(donor_candidates) || { stop; return 1; }
+            if [ -n "$selected_candidates" ]; then
+                while IFS= read -r selected_candidate; do
+                    [ -n "$selected_candidate" ] || continue
+                    start_donor_candidate "$selected_candidate" || { stop; return 1; }
+                done <<EOF
+$selected_candidates
+EOF
+            else
+                direct_profile_valid DONOR "$active_epoch" || { stop; return 1; }
+                start_sidecar donor "$active_epoch" || { stop; return 1; }
+                start_one broker donor '' "$daemon" "$module_directory" --rka-role donor || { stop; return 1; }
+            fi
             ;;
         CANDIDATE)
             materialize_sidecar || { stop; return 1; }
             start_sidecar candidate "$active_epoch" || { stop; return 1; }
-            start_one broker candidate "$daemon" "$module_directory" --rka-role candidate || { stop; return 1; }
+            start_one broker candidate '' "$daemon" "$module_directory" --rka-role candidate || { stop; return 1; }
             ;;
     esac
 }
 
 stop() {
     mkdir -p "$pids" || return 1
-    printf '%s\n' STOPPED > "$state_file"
-    for name in legacy broker sidecar; do
+    if [ -n "$candidate_selector" ]; then
+        candidate_is_valid "$candidate_selector" || return 1
+        stop_names="broker-$candidate_selector sidecar-$candidate_selector"
+        selected_state_file=$run/supervisor-$candidate_selector.state
+    else
+        stop_names="legacy broker sidecar"
+        donor_pid_paths=$(find "$pids" -mindepth 1 -maxdepth 1 \( -name 'broker-*.pid' -o -name 'sidecar-*.pid' \) -print 2>/dev/null) || return 1
+        while IFS= read -r donor_pid_path; do
+            [ -n "$donor_pid_path" ] || continue
+            donor_pid_name=${donor_pid_path##*/}
+            stop_names="$stop_names ${donor_pid_name%.pid}"
+        done <<EOF
+$donor_pid_paths
+EOF
+        selected_state_file=$state_file
+    fi
+    printf '%s\n' STOPPED > "$selected_state_file"
+    chmod 600 "$selected_state_file"
+    for name in $stop_names; do
         record=$pids/$name.pid
         [ -f "$record" ] || {
             rm -f "$pids/$name.identity"
@@ -452,24 +545,40 @@ stop() {
         fi
         rm -f "$record" "$pids/$name.identity"
     done
-    remove_runtime_socket
+    remove_runtime_socket "$candidate_selector" || return 1
+    if [ -z "$candidate_selector" ]; then
+        stopped_candidates=$(donor_candidates) || return 1
+        while IFS= read -r stopped_candidate; do
+            [ -n "$stopped_candidate" ] || continue
+            remove_runtime_socket "$stopped_candidate" || return 1
+        done <<EOF
+$stopped_candidates
+EOF
+    fi
 }
 
 remove_runtime_socket() {
+    selected_candidate=${1:-}
     socket_directory=$run/sockets
-    socket_path=$socket_directory/broker.sock
+    if [ -n "$selected_candidate" ]; then
+        candidate_is_valid "$selected_candidate" || return 1
+        socket_name=broker-$selected_candidate.sock
+    else
+        socket_name=broker.sock
+    fi
+    socket_path=$socket_directory/$socket_name
     [ ! -e "$socket_directory" ] && [ ! -L "$socket_directory" ] && return 0
     private_directory "$socket_directory" || return 1
     ensure_socket_directory_context "$socket_directory" || return 1
     if [ -e "$socket_path" ] || [ -L "$socket_path" ]; then
         remove_owned_runtime_socket "$socket_path" || return 1
     fi
-    runtime_tombstones=$(find "$socket_directory" -mindepth 1 -maxdepth 1 -name '.broker.sock.delete-*' -print) || return 1
+    runtime_tombstones=$(find "$socket_directory" -mindepth 1 -maxdepth 1 -name ".$socket_name.delete-*" -print) || return 1
     while IFS= read -r runtime_tombstone; do
         [ -n "$runtime_tombstone" ] || continue
         tombstone_name=${runtime_tombstone##*/}
-        tombstone_token=${tombstone_name#.broker.sock.delete-}
-        [ "$tombstone_name" = ".broker.sock.delete-$tombstone_token" ] || return 1
+        tombstone_token=${tombstone_name#.$socket_name.delete-}
+        [ "$tombstone_name" = ".$socket_name.delete-$tombstone_token" ] || return 1
         [ "$(printf %s "$tombstone_token" | wc -c)" -eq 32 ] || return 1
         case $tombstone_token in *[!0-9a-f]*) return 1 ;; esac
         remove_owned_runtime_socket "$runtime_tombstone" || return 1
@@ -506,6 +615,11 @@ case $command in
         [ "${RKA_INTERNAL_CHILD_LOOP:-}" = 1 ] || exit 2
         case $internal_name:$internal_role in
             legacy:|broker:donor|broker:candidate|sidecar:donor|sidecar:candidate) ;;
+            broker-*:donor|sidecar-*:donor)
+                candidate_is_valid "$internal_candidate" || exit 2
+                [ "$internal_name" = "${internal_name%%-*}-$internal_candidate" ] || exit 2
+                state_file=$run/supervisor-$internal_candidate.state
+                ;;
             *) exit 2 ;;
         esac
         [ "$#" -gt 0 ] || exit 2

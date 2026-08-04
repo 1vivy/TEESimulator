@@ -87,7 +87,8 @@ rka_runtime_tree_is_valid() {
         [ ! -L "$rka_entry" ] || return 1
         if [ -d "$rka_entry" ]; then
             rka_path_is_private_directory "$rka_entry" || return 1
-        elif [ "$rka_entry" = "$rka_runtime_socket" ]; then
+        elif [ "$rka_entry" = "$rka_runtime_socket" ] ||
+            { [ "$rka_layout_role" = DONOR ] && rka_donor_socket_path_is_valid "$rka_entry"; }; then
             [ -S "$rka_entry" ] || return 1
             [ "$(stat -c '%u:%g:%a' "$rka_entry")" = "$(id -u):$(id -g):$RKA_LAYOUT_FILE_MODE" ] || return 1
         else
@@ -96,6 +97,19 @@ rka_runtime_tree_is_valid() {
     done <<EOF
 $rka_entries
 EOF
+}
+
+rka_candidate_is_valid() {
+    [ -n "$1" ] && [ "$(printf %s "$1" | wc -c)" -le 64 ] || return 1
+    case $1 in *[!A-Za-z0-9_-]*) return 1 ;; esac
+}
+
+rka_donor_socket_path_is_valid() {
+    rka_donor_socket_name=${1##*/}
+    case $rka_donor_socket_name in broker-*.sock) ;; *) return 1 ;; esac
+    rka_donor_candidate=${rka_donor_socket_name#broker-}
+    rka_donor_candidate=${rka_donor_candidate%.sock}
+    rka_candidate_is_valid "$rka_donor_candidate"
 }
 
 rka_atomic_replace() {
@@ -118,6 +132,7 @@ rka_layout_directories() {
     printf '%s\n' \
         "$rka_state_root" \
         "$rka_state_root/profiles" \
+        "$rka_state_root/profiles/direct.d" \
         "$rka_state_root/secrets" \
         "$rka_state_root/trust" \
         "$rka_state_root/journal" \
@@ -158,6 +173,7 @@ rka_layout_is_valid() {
 $(rka_layout_directories)
 EOF
     rka_optional_private_file_is_valid "$rka_state_root/profiles/$RKA_PROFILE_NAME" || return 1
+    rka_layout_role=$(sed -n '2s/^role=//p' "$rka_state_root/profiles/$RKA_PROFILE_NAME" 2>/dev/null)
     rka_optional_private_file_is_valid "$rka_state_root/secrets/transport.key" || return 1
     rka_optional_private_file_is_valid "$rka_state_root/trust/transport-trust.pem" || return 1
     rka_optional_private_file_is_valid "$rka_state_root/journal/mutation.state" || return 1

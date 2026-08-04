@@ -120,8 +120,15 @@ class RkaSupervisorTest(unittest.TestCase):
         path.write_text(f"version=1\nrole={role}\nprofile_epoch=0\n", encoding="utf-8")
         os.chmod(path, 0o600)
 
-    def write_direct_profile(self, state: Path, role: str, epoch: int = 0) -> None:
-        path = state / "profiles" / "direct.conf"
+    def write_direct_profile(
+        self, state: Path, role: str, epoch: int = 0, candidate: str | None = None
+    ) -> None:
+        path = (
+            state / "profiles" / "direct.conf"
+            if candidate is None
+            else state / "profiles" / "direct.d" / f"{candidate}.conf"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             "version=2\n"
             f"role={role}\n"
@@ -165,7 +172,7 @@ class RkaSupervisorTest(unittest.TestCase):
         root.mkdir()
         child = root / "fake-child.sh"
         child.write_text(
-            "#!/bin/sh\nprintf '%s %s RKA_PROFILE_PATH=%s RKA_EXPECTED_PROFILE_EPOCH=%s RKA_PROFILE_RECEIPT_PATH=%s\\n' \"$0\" \"$*\" \"${RKA_PROFILE_PATH-}\" \"${RKA_EXPECTED_PROFILE_EPOCH-}\" \"${RKA_PROFILE_RECEIPT_PATH-}\" >> \"$RKA_CHILD_LOG\"\nif [ -n \"${RKA_PROFILE_RECEIPT_PATH-}\" ]; then profile_hash=$(sha256sum \"$RKA_PROFILE_PATH\" | awk '{print $1}'); printf 'version=1\\nprofile_sha256=%s\\nprofile_epoch=%s\\npeer_pin_sha256=%064d\\ndial_mode=DONOR_DIALS\\ntransport=DIRECT\\n' \"$profile_hash\" \"$RKA_EXPECTED_PROFILE_EPOCH\" 0 > \"$RKA_PROFILE_RECEIPT_PATH\"; chmod 600 \"$RKA_PROFILE_RECEIPT_PATH\"; fi\n[ \"${RKA_CHILD_MODE:-hold}\" = crash ] && exit 7\nif [ \"${RKA_CHILD_MODE:-hold}\" = crash-once ] && [ ! -e \"$RKA_CRASH_ONCE_FILE\" ]; then : > \"$RKA_CRASH_ONCE_FILE\"; sleep 1; exit 7; fi\nif [ \"${RKA_CHILD_MODE:-hold}\" = ignore-term ]; then trap '' TERM INT; else trap 'printf term\\n >> \"$RKA_CHILD_LOG\"; exit 0' TERM INT; fi\nwhile :; do sleep 1; done\n",
+            "#!/bin/sh\nprintf '%s %s RKA_PROFILE_PATH=%s RKA_EXPECTED_PROFILE_EPOCH=%s RKA_PROFILE_RECEIPT_PATH=%s RKA_DONOR_SOCKET=%s\\n' \"$0\" \"$*\" \"${RKA_PROFILE_PATH-}\" \"${RKA_EXPECTED_PROFILE_EPOCH-}\" \"${RKA_PROFILE_RECEIPT_PATH-}\" \"${RKA_DONOR_SOCKET-}\" >> \"$RKA_CHILD_LOG\"\nif [ -n \"${RKA_PROFILE_RECEIPT_PATH-}\" ]; then profile_hash=$(sha256sum \"$RKA_PROFILE_PATH\" | awk '{print $1}'); printf 'version=1\\nprofile_sha256=%s\\nprofile_epoch=%s\\npeer_pin_sha256=%064d\\ndial_mode=DONOR_DIALS\\ntransport=DIRECT\\n' \"$profile_hash\" \"$RKA_EXPECTED_PROFILE_EPOCH\" 0 > \"$RKA_PROFILE_RECEIPT_PATH\"; chmod 600 \"$RKA_PROFILE_RECEIPT_PATH\"; fi\n[ \"${RKA_CHILD_MODE:-hold}\" = crash ] && exit 7\nif [ \"${RKA_CHILD_MODE:-hold}\" = crash-once ] && [ ! -e \"$RKA_CRASH_ONCE_FILE\" ]; then : > \"$RKA_CRASH_ONCE_FILE\"; sleep 1; exit 7; fi\nif [ \"${RKA_CHILD_MODE:-hold}\" = ignore-term ]; then trap '' TERM INT; else trap 'printf term\\n >> \"$RKA_CHILD_LOG\"; exit 0' TERM INT; fi\nwhile :; do sleep 1; done\n",
             encoding="utf-8",
         )
         child.chmod(0o755)
@@ -219,6 +226,105 @@ class RkaSupervisorTest(unittest.TestCase):
         finally:
             self.clean(root, state)
             temporary.cleanup()
+
+    def test_donor_starts_one_sidecar_and_socket_per_candidate(self) -> None:
+        temporary, root, state = self.fixture("DONOR")
+        candidates = ("candidate-a", "candidate-b")
+        listeners: list[socket.socket] = []
+        try:
+            socket_directory = state / "run" / "sockets"
+            socket_directory.mkdir(parents=True)
+            socket_directory.chmod(0o700)
+            for candidate in candidates:
+                self.write_direct_profile(state, "DONOR", candidate=candidate)
+
+            started = self.command(root, state, "start")
+            child_log = (root / "children.log").read_text(encoding="utf-8")
+            sidecar_lines = [
+                line for line in child_log.splitlines() if " --role donor " in f" {line} "
+            ]
+            sockets = [state / "run" / "sockets" / f"broker-{candidate}.sock" for candidate in candidates]
+            sidecar_pids = [state / "run" / "pids" / f"sidecar-{candidate}.pid" for candidate in candidates]
+            for socket_path in sockets:
+                listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                listener.bind(str(socket_path))
+                socket_path.chmod(0o600)
+                listeners.append(listener)
+
+            stopped = self.command(root, state, "stop", candidates[0])
+
+            self.assertEqual(started.returncode, 0, started.stderr)
+            self.assertEqual(len(sidecar_lines), len(candidates))
+            self.assertEqual(
+                {line.split("RKA_DONOR_SOCKET=", 1)[1] for line in sidecar_lines},
+                {str(path) for path in sockets},
+            )
+            self.assertEqual(stopped.returncode, 0, stopped.stderr)
+            self.assertFalse(sidecar_pids[0].exists())
+            self.assertFalse(sockets[0].exists())
+            self.assertTrue(sidecar_pids[1].exists())
+            self.assertTrue(sockets[1].is_socket())
+        finally:
+            for listener in listeners:
+                listener.close()
+            self.clean(root, state)
+            temporary.cleanup()
+
+    def test_control_status_reports_every_paired_candidate(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            root = temporary / "root"
+            state = temporary / "state"
+
+            def control(*arguments: str) -> CompletedProcess[str]:
+                return run(
+                    [
+                        "bash",
+                        str(REPOSITORY_ROOT / "module" / "rka-control.sh"),
+                        "--root",
+                        str(root),
+                        "--state-root",
+                        str(state),
+                        *arguments,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+
+            self.assertEqual(control("set-role", "DONOR").returncode, 0)
+            self.assertEqual(control("initialize").returncode, 0)
+            for candidate in ("candidate-a", "candidate-b"):
+                self.write_direct_profile(state, "DONOR", candidate=candidate)
+            opened = control("webui-open")
+            nonce = opened.stdout.split("=", 1)[1].strip()
+
+            paired = control("webui", "pair-direct", nonce, "--candidate", "candidate-a")
+            pair_request_created = (
+                state / "profiles" / "direct.d" / "candidate-a.pair.request"
+            ).is_file()
+            next_nonce = next(
+                line.removeprefix("next_nonce=")
+                for line in paired.stdout.splitlines()
+                if line.startswith("next_nonce=")
+            )
+            status = control("webui", "status", next_nonce)
+            renewal = control(
+                "webui",
+                "renew-synthetic-lease",
+                next_nonce,
+                "--candidate",
+                "candidate-a",
+            )
+
+        self.assertEqual(paired.returncode, 0, paired.stderr)
+        self.assertTrue(pair_request_created)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(status.stdout.count("candidate_begin="), 2)
+        self.assertEqual(status.stdout.count("candidate_end="), 2)
+        self.assertIn("candidate_id=candidate-a\n", status.stdout)
+        self.assertIn("candidate_id=candidate-b\n", status.stdout)
+        self.assertNotEqual(renewal.returncode, 2)
 
     def test_broker_launches_daemon_with_module_directory(self) -> None:
         temporary, root, state = self.fixture("DONOR")

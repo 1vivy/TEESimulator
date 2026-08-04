@@ -113,7 +113,7 @@ role=$requested_role
 }
 
 usage() {
-    printf '%s\n' 'usage: rka-control.sh [--root PATH] [--state-root PATH] {set-role ROLE|initialize|provision-rkp|wipe|mutation-states|status|boot-decision|recover-exact ACTION TARGET [ARGS]|webui-open|webui ACTION NONCE}' >&2
+    printf '%s\n' 'usage: rka-control.sh [--root PATH] [--state-root PATH] {set-role ROLE|initialize|provision-rkp|wipe|mutation-states|status|boot-decision|recover-exact ACTION TARGET [ARGS]|webui-open|webui ACTION NONCE [CONFIRMATION] [--candidate CANDIDATE]}' >&2
 }
 
 provision_getprop() {
@@ -555,11 +555,43 @@ webui_quarantine_count() {
 }
 
 webui_pair_request_is_valid() {
-    webui_request_path=$rka_state_root/profiles/pair.request
+    webui_request_path=$(webui_pair_request_path "${webui_status_candidate:-}") || return 1
     rka_private_file_is_valid "$webui_request_path" || return 1
     [ "$(wc -c < "$webui_request_path")" -le 64 ] || return 1
     [ "$(cat "$webui_request_path")" = "version=1
 action=PAIR_DIRECT" ]
+}
+
+webui_donor_candidates() {
+    webui_candidate_directory=$rka_state_root/profiles/direct.d
+    rka_path_is_private_directory "$webui_candidate_directory" || return 1
+    webui_candidate_profiles=$(find "$webui_candidate_directory" -mindepth 1 -maxdepth 1 -name '*.conf' -print | LC_ALL=C sort) || return 1
+    while IFS= read -r webui_candidate_profile; do
+        [ -n "$webui_candidate_profile" ] || continue
+        rka_private_file_is_valid "$webui_candidate_profile" || return 1
+        webui_candidate_name=${webui_candidate_profile##*/}
+        webui_candidate_name=${webui_candidate_name%.conf}
+        rka_candidate_is_valid "$webui_candidate_name" || return 1
+        printf '%s\n' "$webui_candidate_name"
+    done <<EOF
+$webui_candidate_profiles
+EOF
+}
+
+webui_pair_request_path() {
+    webui_selected_candidate=$1
+    if [ -z "$webui_selected_candidate" ]; then
+        printf '%s\n' "$rka_state_root/profiles/pair.request"
+        return 0
+    fi
+    rka_candidate_is_valid "$webui_selected_candidate" || return 1
+    [ "$(read_role)" = DONOR ] || {
+        printf '%s\n' "$rka_state_root/profiles/pair.request"
+        return 0
+    }
+    webui_selected_profile=$rka_state_root/profiles/direct.d/$webui_selected_candidate.conf
+    rka_private_file_is_valid "$webui_selected_profile" || return 1
+    printf '%s\n' "$rka_state_root/profiles/direct.d/$webui_selected_candidate.pair.request"
 }
 
 webui_runtime_state() {
@@ -616,7 +648,8 @@ webui_status_state() {
     webui_direct_profile=UNAVAILABLE
     webui_direct_readiness=NOT_READY
     webui_diagnostic=DIAGNOSTIC_ONLY
-    if [ ! -e "$rka_state_root/profiles/pair.request" ] && [ ! -L "$rka_state_root/profiles/pair.request" ]; then
+    webui_status_request=$(webui_pair_request_path "${webui_status_candidate:-}") || return 1
+    if [ ! -e "$webui_status_request" ] && [ ! -L "$webui_status_request" ]; then
         return 0
     fi
     webui_pair_request_is_valid || return 1
@@ -630,7 +663,8 @@ webui_status_state() {
     fi
 }
 
-webui_status() {
+webui_status_block() {
+    webui_status_candidate=${1:-}
     webui_role=$(read_role) || return 1
     webui_read_active_profile || return 1
     [ "$webui_role" = "$webui_profile_role" ] || return 1
@@ -639,6 +673,9 @@ webui_status() {
     webui_status_state || return 1
     webui_rkp_provisioning_status || return 1
     webui_synthetic_lease_status
+    if [ -n "$webui_status_candidate" ]; then
+        printf 'candidate_id=%s\n' "$webui_status_candidate"
+    fi
     printf 'role=%s\n' "$webui_role"
     printf 'phone_role=%s\n' "$(webui_phone_role "$webui_role")"
     printf 'profile_epoch=%s\n' "$webui_profile_epoch"
@@ -654,6 +691,35 @@ webui_status() {
     printf 'lease_next=%s\n' "$webui_lease_next"
     printf 'lease_valid_until_millis=%s\n' "$webui_lease_valid_until_millis"
     printf 'quarantine_count=%s\n' "$(webui_quarantine_count)"
+}
+
+webui_status() {
+    webui_requested_candidate=${1:-}
+    webui_status_role=$(read_role) || return 1
+    if [ "$webui_status_role" != DONOR ]; then
+        webui_status_block
+        return $?
+    fi
+    if [ -n "$webui_requested_candidate" ]; then
+        webui_pair_request_path "$webui_requested_candidate" >/dev/null || return 1
+        printf 'candidate_begin=%s\n' "$webui_requested_candidate"
+        webui_status_block "$webui_requested_candidate" || return 1
+        printf 'candidate_end=%s\n' "$webui_requested_candidate"
+        return 0
+    fi
+    webui_status_candidates=$(webui_donor_candidates) || return 1
+    if [ -z "$webui_status_candidates" ]; then
+        webui_status_block
+        return $?
+    fi
+    while IFS= read -r webui_status_candidate_name; do
+        [ -n "$webui_status_candidate_name" ] || continue
+        printf 'candidate_begin=%s\n' "$webui_status_candidate_name"
+        webui_status_block "$webui_status_candidate_name" || return 1
+        printf 'candidate_end=%s\n' "$webui_status_candidate_name"
+    done <<EOF
+$webui_status_candidates
+EOF
 }
 
 webui_rkp_provisioning_status() {
@@ -1071,16 +1137,22 @@ webui_request() {
     webui_action=$1
     webui_nonce=$2
     webui_confirmation=${3:-}
+    webui_candidate_selector=${4:-}
     webui_action_is_valid "$webui_action" || return 1
+    if [ -n "$webui_candidate_selector" ]; then
+        rka_candidate_is_valid "$webui_candidate_selector" || return 1
+        case $webui_action in status|pair-direct|renew-synthetic-lease) ;; *) return 1 ;; esac
+    fi
     case $webui_action in
-        status|quarantine) webui_nonce_matches "$webui_nonce" && webui_status; return $? ;;
+        status|quarantine) webui_nonce_matches "$webui_nonce" && webui_status "$webui_candidate_selector"; return $? ;;
     esac
     webui_consume_nonce "$webui_nonce" || return 1
     webui_request_ok=false
     case $webui_action in
         role-donor) webui_set_role DONOR && webui_request_ok=true ;;
         role-candidate) webui_set_role CANDIDATE && webui_request_ok=true ;;
-        pair-direct) webui_record_request "$rka_state_root/profiles/pair.request" "version=1
+        pair-direct) webui_pair_request=$(webui_pair_request_path "$webui_candidate_selector") &&
+            webui_record_request "$webui_pair_request" "version=1
 action=PAIR_DIRECT
 " && webui_request_ok=true ;;
         rotate-pairing) webui_record_request "$rka_state_root/trust/rotate.request" "version=1
@@ -1258,11 +1330,32 @@ while [ $# -gt 0 ]; do
             exit 0
             ;;
         webui)
-            { [ $# -eq 3 ] || [ $# -eq 4 ]; } || {
+            { [ $# -ge 3 ] && [ $# -le 6 ]; } || {
                 webui_invalid_request
                 exit 1
             }
-            webui_request "$2" "$3" "${4:-}" || {
+            webui_confirmation=
+            webui_candidate_selector=
+            case $# in
+                3) ;;
+                4) webui_confirmation=$4 ;;
+                5)
+                    [ "$4" = --candidate ] || {
+                        webui_invalid_request
+                        exit 1
+                    }
+                    webui_candidate_selector=$5
+                    ;;
+                6)
+                    [ "$5" = --candidate ] || {
+                        webui_invalid_request
+                        exit 1
+                    }
+                    webui_confirmation=$4
+                    webui_candidate_selector=$6
+                    ;;
+            esac
+            webui_request "$2" "$3" "$webui_confirmation" "$webui_candidate_selector" || {
                 webui_invalid_request
                 exit 1
             }

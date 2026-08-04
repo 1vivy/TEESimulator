@@ -169,6 +169,44 @@ impl StateStore for FileStateStore {
         fs::create_dir_all(&self.0).map_err(|_| StateError::Storage)?;
         atomic_replace(&self.path(key)?, value).map_err(|_| StateError::Storage)
     }
+
+    fn donor_replay_bytes(&self) -> Result<usize, StateError> {
+        let Some(candidate_directory) = self.0.parent() else {
+            return Err(StateError::Storage);
+        };
+        let Some(catalog_directory) = candidate_directory.parent() else {
+            return replay_record_bytes(&self.0);
+        };
+        if catalog_directory.file_name().and_then(|name| name.to_str()) != Some("candidates") {
+            return replay_record_bytes(&self.0);
+        }
+        let mut bytes = 0_usize;
+        for entry in fs::read_dir(catalog_directory).map_err(|_| StateError::Storage)? {
+            let path = entry.map_err(|_| StateError::Storage)?.path();
+            if !fs::symlink_metadata(&path)
+                .map_err(|_| StateError::Storage)?
+                .file_type()
+                .is_dir()
+            {
+                continue;
+            }
+            bytes = bytes
+                .checked_add(replay_record_bytes(&path.join("records"))?)
+                .ok_or(StateError::Capacity)?;
+        }
+        Ok(bytes)
+    }
+}
+
+fn replay_record_bytes(records: &Path) -> Result<usize, StateError> {
+    let store = FileStateStore(records.parent().ok_or(StateError::Storage)?.to_path_buf());
+    match fs::metadata(store.path(b"rka-replay-v2")?) {
+        Ok(metadata) if metadata.is_file() => {
+            usize::try_from(metadata.len()).map_err(|_| StateError::Capacity)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Ok(_) | Err(_) => Err(StateError::Storage),
+    }
 }
 
 impl FileStateStore {
@@ -184,6 +222,10 @@ impl FileStateStore {
             },
         );
         Ok(self.0.join(name))
+    }
+
+    pub(crate) fn record_path(&self, key: &[u8]) -> Result<PathBuf, StateError> {
+        self.path(key)
     }
 }
 
@@ -302,17 +344,24 @@ pub(crate) fn atomic_replace(path: &Path, value: &[u8]) -> std::io::Result<()> {
     clippy::redundant_pub_crate,
     reason = "sibling trust runtime injects durable-stage failures"
 )]
-pub(crate) enum AtomicReplaceStage {
+/// Durable atomic-replacement checkpoints.
+#[non_exhaustive]
+pub enum AtomicReplaceStage {
+    /// Before opening the temporary file.
     TempOpen,
+    /// Before writing the temporary file.
     TempWrite,
+    /// Before syncing the temporary file.
     TempSync,
+    /// Before renaming the temporary file.
     Rename,
+    /// Before syncing the parent directory.
     ParentSync,
 }
 
 impl AtomicReplaceStage {
-    #[cfg(test)]
-    pub(crate) const ALL: [Self; 5] = [
+    /// All durable replacement checkpoints in execution order.
+    pub const ALL: [Self; 5] = [
         Self::TempOpen,
         Self::TempWrite,
         Self::TempSync,
@@ -339,6 +388,7 @@ pub(crate) fn atomic_replace_with(
         .create(true)
         .truncate(true)
         .open(&temporary)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
     checkpoint(AtomicReplaceStage::TempWrite)?;
     file.write_all(value)?;
     checkpoint(AtomicReplaceStage::TempSync)?;

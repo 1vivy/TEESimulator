@@ -15,6 +15,18 @@ pub const FAILURE_WINDOW_SECONDS: u64 = 120;
 
 static FAILURE_LOCK: Mutex<()> = Mutex::new(());
 
+/// Typed source for one candidate's persistent failure-budget namespace.
+pub trait FailureBudgetNamespace {
+    /// Returns the stable candidate identity bytes used by the shared record.
+    fn failure_budget_namespace(&self) -> [u8; 32];
+}
+
+impl FailureBudgetNamespace for [u8; 32] {
+    fn failure_budget_namespace(&self) -> [u8; 32] {
+        *self
+    }
+}
+
 /// One peer's restart-safe sliding failure budget.
 pub struct FailureBudget<'a, S: StateStore> {
     store: &'a S,
@@ -29,9 +41,20 @@ impl<S: StateStore> fmt::Debug for FailureBudget<'_, S> {
 
 impl<'a, S: StateStore> FailureBudget<'a, S> {
     /// Loads and canonically rewrites the authoritative bounded state.
-    pub fn load(store: &'a S, namespace: [u8; 32], now: u64) -> Result<Self, FailureBudgetError> {
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "the namespace witness is a small Copy identity value consumed at admission"
+    )]
+    pub fn load(
+        store: &'a S,
+        candidate: impl FailureBudgetNamespace,
+        now: u64,
+    ) -> Result<Self, FailureBudgetError> {
         let _guard = lock();
-        let budget = Self { store, namespace };
+        let budget = Self {
+            store,
+            namespace: candidate.failure_budget_namespace(),
+        };
         let state = budget.read_at(now)?;
         budget.flush(&state)?;
         Ok(budget)
@@ -246,3 +269,7 @@ fn lock() -> MutexGuard<'static, ()> {
         Err(poisoned) => poisoned.into_inner(),
     }
 }
+
+#[cfg(test)]
+#[path = "failure_budget_tests.rs"]
+mod tests;

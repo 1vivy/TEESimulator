@@ -20,14 +20,14 @@ pub(crate) mod dispatch_tests;
 mod ingress;
 mod ingress_io;
 mod ingress_path;
-mod lease;
+pub(crate) mod lease;
 mod model;
 mod operations;
 mod runtime;
 mod service;
 mod service_preflight;
 mod service_replay;
-mod state;
+pub(crate) mod state;
 mod validation;
 
 pub use broker::{

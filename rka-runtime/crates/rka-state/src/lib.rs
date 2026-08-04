@@ -27,6 +27,7 @@ mod synthetic_lease;
 
 pub use failure_budget::{
     FAILURE_THRESHOLD, FAILURE_WINDOW_SECONDS, FailureAdmission, FailureBudget, FailureBudgetError,
+    FailureBudgetNamespace,
 };
 pub use quarantine::{
     AmbiguousMaterial, CleanupIntent, CrashRecovery, MutationCrashState, QuarantineAction,
@@ -61,6 +62,11 @@ pub trait StateStore {
 
     /// Atomically replaces one bounded record.
     fn replace(&self, key: &[u8], value: &[u8]) -> Result<(), StateError>;
+
+    /// Returns donor-wide replay-record disk usage when the store can observe it.
+    fn donor_replay_bytes(&self) -> Result<usize, StateError> {
+        Ok(0)
+    }
 }
 
 /// State boundary failures.

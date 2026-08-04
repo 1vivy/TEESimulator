@@ -1,13 +1,16 @@
 use std::path::{Path, PathBuf};
 
-use rka_state::{CertifiedLeaseMetadata, PairedActivationRecord, RkpLeaseBatch};
+use rka_state::{CertifiedLeaseMetadata, PairedActivationRecord, RkpLeaseBatch, StateStore};
 
 use super::{
     BeginRequest, BeginResult, BridgeDonorBroker, DeleteRequest, DonorError, DonorKeyState,
     DonorRkaService, FinishRequest, FinishResult, GenerateRequest, GenerateResult,
     OperationRequest, PairedPolicy, PublicKeyResult,
 };
-use crate::provisioning_io::FileStateStore;
+use crate::{
+    candidate::authority::{self, StateAuthority},
+    provisioning_io::FileStateStore,
+};
 
 #[allow(
     dead_code,
@@ -58,10 +61,41 @@ impl DonorRuntime {
     /// Reopens only an authenticated pair backed by an active certified lease.
     #[must_use]
     pub fn open(state_root: &Path, socket: &Path) -> Self {
-        let store = FileStateStore::new(state_root);
-        let admitted = PairedActivationRecord::load(&store)
+        match authority::resolve(state_root) {
+            StateAuthority::Legacy => {
+                let store = FileStateStore::new(state_root);
+                Self::open_at(state_root, socket, &store)
+            }
+            StateAuthority::Candidate(candidate_root) => {
+                let store = FileStateStore::new(&candidate_root);
+                Self::open_at(&candidate_root, socket, &store)
+            }
+            StateAuthority::Invalid => Self::inactive(state_root, socket),
+        }
+    }
+
+    /// Opens with an observable legacy store for fail-closed authority tests.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn open_with_legacy_store(
+        state_root: &Path,
+        socket: &Path,
+        legacy_store: &dyn StateStore,
+    ) -> Self {
+        match authority::resolve(state_root) {
+            StateAuthority::Legacy => Self::open_at(state_root, socket, legacy_store),
+            StateAuthority::Candidate(candidate_root) => {
+                let store = FileStateStore::new(&candidate_root);
+                Self::open_at(&candidate_root, socket, &store)
+            }
+            StateAuthority::Invalid => Self::inactive(state_root, socket),
+        }
+    }
+
+    fn open_at(state_root: &Path, socket: &Path, store: &dyn StateStore) -> Self {
+        let admitted = PairedActivationRecord::load(store)
             .ok()
-            .zip(RkpLeaseBatch::load_active(&store).ok())
+            .zip(RkpLeaseBatch::load_active(store).ok())
             .and_then(|(pair, leases)| {
                 let lease = leases.leases().first()?.metadata();
                 let irpc = *lease.irpc_identity_hash.as_bytes();
@@ -112,6 +146,16 @@ impl DonorRuntime {
             trust,
             state_root: Some(state_root.to_path_buf()),
             transcript,
+        }
+    }
+
+    fn inactive(state_root: &Path, socket: &Path) -> Self {
+        Self {
+            service: None,
+            broker: BridgeDonorBroker::new(socket),
+            trust: None,
+            state_root: Some(state_root.to_path_buf()),
+            transcript: None,
         }
     }
 

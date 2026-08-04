@@ -6,6 +6,8 @@ use crate::{
 
 const RECORD_KEY: &[u8] = b"rka-replay-v2";
 const MAX_TOMBSTONES: usize = 1_024;
+const MAX_CANDIDATES: usize = 32;
+const MAX_DONOR_REPLAY_BYTES: usize = MAX_STATE_BYTES * MAX_CANDIDATES;
 
 /// Monotonic creation coordinates retained with a replay key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +51,7 @@ pub struct ReplayManager<'a, S: StateStore> {
     store: &'a S,
     entries: Vec<Tombstone>,
     last_time: Option<u64>,
+    persisted_bytes: usize,
 }
 
 impl<S: StateStore> fmt::Debug for ReplayManager<'_, S> {
@@ -64,18 +67,22 @@ impl<'a, S: StateStore> ReplayManager<'a, S> {
     /// Loads the canonical record, failing closed on malformed bytes.
     pub fn load(store: &'a S) -> Result<Self, StateError> {
         let mut bytes = vec![0_u8; MAX_STATE_BYTES];
-        let entries = match store.read(RECORD_KEY, &mut bytes) {
-            Ok(length) => decode(
-                bytes.get(..length).ok_or(StateError::Corrupt)?,
-                MAX_TOMBSTONES,
-            )?,
-            Err(StateError::Missing) => Vec::new(),
+        let (entries, persisted_bytes) = match store.read(RECORD_KEY, &mut bytes) {
+            Ok(length) => (
+                decode(
+                    bytes.get(..length).ok_or(StateError::Corrupt)?,
+                    MAX_TOMBSTONES,
+                )?,
+                length,
+            ),
+            Err(StateError::Missing) => (Vec::new(), 0),
             Err(error) => return Err(error),
         };
         Ok(Self {
             store,
             entries,
             last_time: None,
+            persisted_bytes,
         })
     }
 
@@ -197,10 +204,20 @@ impl<'a, S: StateStore> ReplayManager<'a, S> {
         Ok(())
     }
 
-    fn flush(&self) -> Result<(), StateError> {
+    fn flush(&mut self) -> Result<(), StateError> {
         let bytes = encode(&self.entries);
         validate_record(&bytes)?;
-        self.store.replace(RECORD_KEY, &bytes)
+        let donor_bytes = self.store.donor_replay_bytes()?;
+        let projected = donor_bytes
+            .saturating_sub(self.persisted_bytes)
+            .checked_add(bytes.len())
+            .ok_or(StateError::Capacity)?;
+        if projected > MAX_DONOR_REPLAY_BYTES {
+            return Err(StateError::Capacity);
+        }
+        self.store.replace(RECORD_KEY, &bytes)?;
+        self.persisted_bytes = bytes.len();
+        Ok(())
     }
 
     fn retained(&self, namespace: ReplayNamespace, id: &[u8]) -> bool {
@@ -217,3 +234,7 @@ struct ReplayRecordRef<'a> {
     id: &'a [u8],
 }
 use core::fmt;
+
+#[cfg(test)]
+#[path = "replay_tests.rs"]
+mod tests;

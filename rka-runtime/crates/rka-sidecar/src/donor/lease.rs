@@ -5,7 +5,11 @@ use rka_state::CertifiedLeaseMetadata;
 use super::DonorError;
 use crate::provisioning_io::load_lease_chain;
 
-pub(super) fn load_verified_chain(
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "candidate migration reuses the donor chain validator"
+)]
+pub(crate) fn load_verified_chain(
     root: &Path,
     lease: &CertifiedLeaseMetadata,
 ) -> Result<Vec<Vec<u8>>, DonorError> {

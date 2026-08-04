@@ -86,6 +86,29 @@ impl TranscriptJournal {
     }
 }
 
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "candidate migration reuses the donor transcript validator"
+)]
+pub(crate) fn validate_existing_transcript(
+    root: &Path,
+    expected: [u8; 32],
+) -> Result<(), DonorError> {
+    let path = root.join("donor-transcript-v1");
+    if !fs::symlink_metadata(path)
+        .map_err(|_| DonorError::Storage)?
+        .file_type()
+        .is_file()
+    {
+        return Err(DonorError::Storage);
+    }
+    let journal = TranscriptJournal::open(root, expected)?;
+    if journal.committed()? != expected {
+        return Err(DonorError::Storage);
+    }
+    Ok(())
+}
+
 fn encode_pending(pending: PendingTranscript) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(PENDING_BYTES);
     encoded.extend_from_slice(MAGIC);

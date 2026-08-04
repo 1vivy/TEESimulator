@@ -1,4 +1,5 @@
 use super::catalog::{CatalogAdmission, PairingAdmission};
+use rka_state::FailureBudgetNamespace;
 
 /// Candidate identity admitted from the trusted pairing catalog.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -9,6 +10,12 @@ impl CandidateId {
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+}
+
+impl FailureBudgetNamespace for CandidateId {
+    fn failure_budget_namespace(&self) -> [u8; 32] {
+        self.0
     }
 }
 

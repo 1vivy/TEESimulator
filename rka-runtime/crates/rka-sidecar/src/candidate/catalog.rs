@@ -114,6 +114,28 @@ impl PairingCatalog {
             .ok_or(CatalogError::NotFound)
     }
 
+    pub(crate) fn lookup_identity(
+        &self,
+        candidate_identity_hash: [u8; 32],
+    ) -> Result<AuthenticatedCandidateContext, CatalogError> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| {
+                bool::from(
+                    entry
+                        .candidate_identity_hash
+                        .ct_eq(&candidate_identity_hash),
+                )
+            })
+            .copied()
+            .ok_or(CatalogError::NotFound)?;
+        Ok(AuthenticatedCandidateContext::admitted(
+            CatalogAdmission(()),
+            entry,
+        ))
+    }
+
     /// Loads the canonical catalog from the root-owned state store.
     pub fn load(state_root: &Path) -> Result<Self, CatalogError> {
         let store = FileStateStore::new(state_root);

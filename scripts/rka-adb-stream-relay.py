@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import ipaddress
 import json
@@ -29,14 +30,28 @@ class RelayFailure(Exception):
     """A redacted, user-actionable relay failure."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DevicePair:
     donor_serial: str
+    candidate_serials: tuple[str, ...]
+
+    @property
+    def candidate_serial(self) -> str:
+        return self.candidate_serials[0]
+
+
+@dataclass(frozen=True, slots=True)
+class RelaySession:
+    donor_serial: str
     candidate_serial: str
+    candidate_address: str
+    donor_listener_port: int
 
 
-@dataclass
+@dataclass(slots=True)
 class BridgeStats:
+    """Mutable byte counters owned by exactly one relay session."""
+
     donor_bytes: int = 0
     candidate_bytes: int = 0
     donor_tls_record: bool = False
@@ -51,6 +66,12 @@ class BridgeStats:
             f"DONOR_TOTAL={self.donor_bytes} "
             f"CANDIDATE_TOTAL={self.candidate_bytes}"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class RelayOutcome:
+    stats: BridgeStats | None
+    failure: RelayFailure | None
 
 
 def read_device_pair(path: Path) -> DevicePair:
@@ -75,18 +96,31 @@ def read_device_pair(path: Path) -> DevicePair:
     try:
         value = json.loads(payload)
         donor = value["donor_serial"]
-        candidate = value["candidate_serial"]
+        schema_version = value["schema_version"]
+        match schema_version:
+            case 1:
+                candidates = (value["candidate_serial"],)
+            case 2:
+                candidates = tuple(candidate["serial"] for candidate in value["candidates"])
+            case _:
+                raise RelayFailure("PAIR_FILE_INVALID")
     except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RelayFailure("PAIR_FILE_INVALID") from error
     if (
         not isinstance(donor, str)
-        or not isinstance(candidate, str)
         or SERIAL_PATTERN.fullmatch(donor) is None
-        or SERIAL_PATTERN.fullmatch(candidate) is None
-        or donor == candidate
+        or not candidates
+        or len(candidates) > 4
+        or any(
+            not isinstance(candidate, str)
+            or SERIAL_PATTERN.fullmatch(candidate) is None
+            for candidate in candidates
+        )
+        or donor in candidates
+        or len(set(candidates)) != len(candidates)
     ):
         raise RelayFailure("PAIR_FILE_INVALID")
-    return DevicePair(donor_serial=donor, candidate_serial=candidate)
+    return DevicePair(donor_serial=donor, candidate_serials=candidates)
 
 
 def candidate_address(adb: str, serial: str) -> str:
@@ -113,7 +147,7 @@ def candidate_address(adb: str, serial: str) -> str:
     return address
 
 
-def donor_listener(adb: str, serial: str) -> subprocess.Popen[bytes]:
+def donor_listener(adb: str, serial: str, port: int = PORT) -> subprocess.Popen[bytes]:
     try:
         return subprocess.Popen(
             [
@@ -126,7 +160,7 @@ def donor_listener(adb: str, serial: str) -> subprocess.Popen[bytes]:
                 "nc",
                 "-l",
                 "-p",
-                str(PORT),
+                str(port),
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -154,8 +188,8 @@ def close_listener(process: subprocess.Popen[bytes]) -> None:
         process.wait(timeout=2)
 
 
-def bridge_once(adb: str, pair: DevicePair, address: str) -> BridgeStats:
-    remote = donor_listener(adb, pair.donor_serial)
+def bridge_once(adb: str, session: RelaySession) -> BridgeStats:
+    remote = donor_listener(adb, session.donor_serial, session.donor_listener_port)
     if remote.stdin is None or remote.stdout is None:
         close_listener(remote)
         raise RelayFailure("DONOR_ADB_UNAVAILABLE")
@@ -166,7 +200,7 @@ def bridge_once(adb: str, pair: DevicePair, address: str) -> BridgeStats:
     try:
         time.sleep(0.2)
         try:
-            network = socket.create_connection((address, PORT), timeout=5)
+            network = socket.create_connection((session.candidate_address, PORT), timeout=5)
         except OSError as error:
             raise RelayFailure("CANDIDATE_ROUTE_UNAVAILABLE") from error
         network.settimeout(None)
@@ -217,27 +251,62 @@ def parse_arguments(arguments: Sequence[str]) -> argparse.Namespace:
     return parser.parse_args(arguments)
 
 
+def run_relays_once(adb: str, pair: DevicePair) -> list[RelayOutcome]:
+    def relay(candidate: tuple[int, str]) -> RelayOutcome:
+        index, serial = candidate
+        try:
+            session = RelaySession(
+                donor_serial=pair.donor_serial,
+                candidate_serial=serial,
+                candidate_address=candidate_address(adb, serial),
+                donor_listener_port=PORT + index,
+            )
+            stats = bridge_once(adb, session)
+            if not (stats.donor_bytes and stats.candidate_bytes and stats.donor_tls_record):
+                raise RelayFailure("RELAY_SESSION_INCOMPLETE")
+            return RelayOutcome(stats=stats, failure=None)
+        except RelayFailure as error:
+            return RelayOutcome(stats=None, failure=error)
+
+    with ThreadPoolExecutor(max_workers=len(pair.candidate_serials)) as executor:
+        return list(executor.map(relay, enumerate(pair.candidate_serials)))
+
+
+def run_relay_forever(adb: str, pair: DevicePair, index: int, serial: str) -> None:
+    while True:
+        try:
+            session = RelaySession(
+                donor_serial=pair.donor_serial,
+                candidate_serial=serial,
+                candidate_address=candidate_address(adb, serial),
+                donor_listener_port=PORT + index,
+            )
+            stats = bridge_once(adb, session)
+            if not (stats.donor_bytes and stats.candidate_bytes and stats.donor_tls_record):
+                raise RelayFailure("RELAY_SESSION_INCOMPLETE")
+        except RelayFailure as error:
+            print(f"ADB_STREAM_RELAY=RETRY REASON={error}", flush=True)
+        time.sleep(0.25)
+
+
 def run(arguments: Sequence[str]) -> int:
     options = parse_arguments(arguments)
     pair = read_device_pair(options.pair)
     print("ADB_STREAM_RELAY=STARTING", flush=True)
-    while True:
-        try:
-            address = candidate_address(options.adb, pair.candidate_serial)
-            stats = bridge_once(options.adb, pair, address)
-            if not (
-                stats.donor_bytes
-                and stats.candidate_bytes
-                and stats.donor_tls_record
-            ):
-                raise RelayFailure("RELAY_SESSION_INCOMPLETE")
-            if options.once:
-                return 0
-        except RelayFailure as error:
-            print(f"ADB_STREAM_RELAY=RETRY REASON={error}", flush=True)
-            if options.once:
-                return 1
-        time.sleep(0.25)
+    if options.once:
+        outcomes = run_relays_once(options.adb, pair)
+        for outcome in outcomes:
+            if outcome.failure is not None:
+                print(f"ADB_STREAM_RELAY=RETRY REASON={outcome.failure}", flush=True)
+        return 0 if all(outcome.failure is None for outcome in outcomes) else 1
+    with ThreadPoolExecutor(max_workers=len(pair.candidate_serials)) as executor:
+        futures = [
+            executor.submit(run_relay_forever, options.adb, pair, index, serial)
+            for index, serial in enumerate(pair.candidate_serials)
+        ]
+        for future in futures:
+            future.result()
+    return 0
 
 
 def main() -> int:

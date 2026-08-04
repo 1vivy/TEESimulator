@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+import threading
 import unittest
 from unittest import mock
 
@@ -36,6 +37,34 @@ class RkaAdbStreamRelayTest(unittest.TestCase):
         )
         os.chmod(path, 0o600)
         return path
+
+    def test_two_candidate_relays_run_concurrently(self) -> None:
+        # Given
+        pair = RELAY.DevicePair(
+            donor_serial="donor-adb",
+            candidate_serials=("candidate-a", "candidate-b"),
+        )
+        barrier = threading.Barrier(2)
+        completed = threading.Event()
+
+        def bridge(_adb: str, session: RELAY.RelaySession) -> RELAY.BridgeStats:
+            barrier.wait(timeout=1)
+            if session.candidate_serial == "candidate-a":
+                raise RELAY.RelayFailure("CANDIDATE_ROUTE_UNAVAILABLE")
+            completed.set()
+            return RELAY.BridgeStats(donor_bytes=11, candidate_bytes=22, donor_tls_record=True)
+
+        # When
+        with mock.patch.object(RELAY, "candidate_address", return_value="127.0.0.1"):
+            with mock.patch.object(RELAY, "bridge_once", side_effect=bridge):
+                outcomes = RELAY.run_relays_once("fake-adb", pair)
+
+        # Then
+        self.assertTrue(completed.is_set())
+        self.assertEqual(len(outcomes), 2)
+        self.assertIsNone(outcomes[0].stats)
+        self.assertEqual(outcomes[1].stats.donor_bytes, 11)
+        self.assertEqual(outcomes[1].stats.candidate_bytes, 22)
 
     def test_reads_private_pair_without_logging_identifiers(self) -> None:
         with TemporaryDirectory() as temporary_directory:

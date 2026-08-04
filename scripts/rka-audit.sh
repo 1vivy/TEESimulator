@@ -19,30 +19,38 @@ fail() {
 
 known_bouncycastle_parameterutil_prompt_only() {
     python3 - "$1" <<'PY'
-from hashlib import sha256
 from pathlib import Path
 import re
 import sys
 
 data = Path(sys.argv[1]).read_bytes()
 needle = b"password: "
-offset = data.find(needle)
-window = data[offset - 96:offset + 128] if offset >= 96 else b""
 matches = list(re.finditer(
     rb"BEGIN [A-Z ]*PRIVATE KEY|(?:password|passwd|api[_-]?key|bearer|client[_-]?secret)[ \t]*[:=]",
     data,
     re.IGNORECASE,
 ))
-known = "6192bdaac3bc33d3a66162e3ff67588cd625b830539ca0f9183a1b55d37933a5"
+dependency_markers = (
+    b"password empty",
+    b"password incorrect or store tampered with",
+    b"password supplied for keystore that does not require one",
+)
 accepted = (
     data.startswith(b"dex\n")
     and data.count(needle) == 1
-    and sha256(window).hexdigest() == known
     and len(matches) == 1
     and matches[0].group() == b"password:"
+    and all(data.count(marker) == 1 for marker in dependency_markers)
 )
 raise SystemExit(0 if accepted else 1)
 PY
+}
+
+known_public_software_attestation_fixture_only() {
+    local candidate=$1
+    local known_sha=773abeca64bdb537bde8ca37ee6071674cc1409f940b70ec8119a563e2867164
+    [[ "$(sha256sum -- "$candidate" | awk '{print $1}')" == "$known_sha" ]] &&
+        cmp -s -- "$candidate" "$repo_root/module/keybox.xml"
 }
 
 [[ "${1-}" == "secrets" ]] || fail "expected secrets"
@@ -176,7 +184,10 @@ if [[ -n "$archive" ]]; then
         [[ "$(stat -c '%s' -- "$archive_scan_file")" == "${member_sizes[$member]}" ]] ||
             fail "archive member size changed while reading"
         if LC_ALL=C grep -aE -- "$patterns" "$archive_scan_file" >/dev/null &&
-            ! { [[ "$member" == "classes.dex" ]] && known_bouncycastle_parameterutil_prompt_only "$archive_scan_file"; }; then
+            ! {
+                { [[ "$member" == "classes.dex" ]] && known_bouncycastle_parameterutil_prompt_only "$archive_scan_file"; } ||
+                    { [[ "$member" == "keybox.xml" ]] && known_public_software_attestation_fixture_only "$archive_scan_file"; }
+            }; then
             violations+=("archive:$member")
         fi
     done

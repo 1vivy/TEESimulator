@@ -27,7 +27,9 @@ mod runtime;
 mod service;
 mod service_preflight;
 mod service_replay;
+mod shard;
 pub(crate) mod state;
+mod supervisor_ops;
 mod validation;
 
 pub use broker::{
@@ -47,3 +49,4 @@ pub use runtime::DonorRuntime;
 )]
 pub(crate) use runtime::activate_authenticated_pair;
 pub use service::{BeginResult, DonorRkaService, FinishResult, GenerateResult};
+pub use shard::{CandidateShard, DonorSupervisor};

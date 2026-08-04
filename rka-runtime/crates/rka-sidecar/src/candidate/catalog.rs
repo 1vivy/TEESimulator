@@ -20,6 +20,22 @@ pub struct PairingAdmission {
     pub candidate_identity_hash: [u8; 32],
 }
 
+impl PairingAdmission {
+    /// Creates trusted catalog coordinates after pairing verification.
+    #[must_use]
+    pub const fn new(
+        profile: ([u8; 32], [u8; 32], u64),
+        candidate_identity_hash: [u8; 32],
+    ) -> Self {
+        Self {
+            peer_spki_hash: profile.0,
+            profile_id_hash: profile.1,
+            profile_epoch: profile.2,
+            candidate_identity_hash,
+        }
+    }
+}
+
 /// Opaque proof that only catalog lookup can mint.
 #[derive(Clone, Copy, Debug)]
 pub struct CatalogAdmission(());

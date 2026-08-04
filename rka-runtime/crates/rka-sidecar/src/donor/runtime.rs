@@ -1,16 +1,33 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use rka_state::{CertifiedLeaseMetadata, PairedActivationRecord, RkpLeaseBatch, StateStore};
 
 use super::{
-    BeginRequest, BeginResult, BridgeDonorBroker, DeleteRequest, DonorError, DonorKeyState,
-    DonorRkaService, FinishRequest, FinishResult, GenerateRequest, GenerateResult,
-    OperationRequest, PairedPolicy, PublicKeyResult,
+    BridgeDonorBroker, CandidateShard, DonorBroker, DonorError, DonorSupervisor, PairedPolicy,
+    shard::DurableShardState, state::TranscriptJournal,
 };
 use crate::{
-    candidate::authority::{self, StateAuthority},
+    candidate::{
+        AuthenticatedCandidateContext, CandidateLayout, PairingAdmission, PairingCatalog,
+        authority::{self, StateAuthority},
+    },
     provisioning_io::FileStateStore,
 };
+
+/// Production donor supervisor backed by the authenticated Android broker.
+pub type DonorRuntime = DonorSupervisor<BridgeDonorBroker>;
+
+#[derive(Debug)]
+pub(super) struct RuntimeTrust {
+    pub(super) pair: PairedActivationRecord,
+    pub(super) leases: Vec<CertifiedLeaseMetadata>,
+}
+
+#[derive(Clone, Copy)]
+struct RuntimeLocation<'a> {
+    state_root: &'a Path,
+    candidate_root: &'a Path,
+}
 
 #[allow(
     dead_code,
@@ -29,46 +46,38 @@ pub(crate) fn activate_authenticated_pair(
         .map_err(|_| DonorError::Storage)
 }
 
-/// Production donor lifecycle wired to the authenticated Android broker bridge.
-#[derive(Debug)]
-pub struct DonorRuntime {
-    pub(super) service: Option<DonorRkaService>,
-    pub(super) broker: BridgeDonorBroker,
-    pub(super) trust: Option<RuntimeTrust>,
-    pub(super) state_root: Option<PathBuf>,
-    pub(super) transcript: Option<super::state::TranscriptJournal>,
-}
-
-#[derive(Debug)]
-pub(super) struct RuntimeTrust {
-    pub(super) pair: PairedActivationRecord,
-    pub(super) leases: Vec<CertifiedLeaseMetadata>,
-}
-
-impl DonorRuntime {
-    /// Creates a dormant donor role without accepting unpaired requests.
+impl DonorSupervisor<BridgeDonorBroker> {
+    /// Creates a dormant donor without any authenticated candidate shard.
     #[must_use]
     pub fn new(socket: &Path) -> Self {
-        Self {
-            service: None,
-            broker: BridgeDonorBroker::new(socket),
-            trust: None,
-            state_root: None,
-            transcript: None,
-        }
+        Self::with_broker(PairingCatalog::empty(), BridgeDonorBroker::new(socket))
     }
 
-    /// Reopens only an authenticated pair backed by an active certified lease.
+    /// Reopens the authoritative candidate shard and its pairing catalog.
     #[must_use]
     pub fn open(state_root: &Path, socket: &Path) -> Self {
         match authority::resolve(state_root) {
             StateAuthority::Legacy => {
                 let store = FileStateStore::new(state_root);
-                Self::open_at(state_root, socket, &store)
+                Self::open_at(
+                    RuntimeLocation {
+                        state_root,
+                        candidate_root: state_root,
+                    },
+                    socket,
+                    &store,
+                )
             }
             StateAuthority::Candidate(candidate_root) => {
                 let store = FileStateStore::new(&candidate_root);
-                Self::open_at(&candidate_root, socket, &store)
+                Self::open_at(
+                    RuntimeLocation {
+                        state_root,
+                        candidate_root: &candidate_root,
+                    },
+                    socket,
+                    &store,
+                )
             }
             StateAuthority::Invalid => Self::inactive(state_root, socket),
         }
@@ -83,147 +92,159 @@ impl DonorRuntime {
         legacy_store: &dyn StateStore,
     ) -> Self {
         match authority::resolve(state_root) {
-            StateAuthority::Legacy => Self::open_at(state_root, socket, legacy_store),
+            StateAuthority::Legacy => Self::open_at(
+                RuntimeLocation {
+                    state_root,
+                    candidate_root: state_root,
+                },
+                socket,
+                legacy_store,
+            ),
             StateAuthority::Candidate(candidate_root) => {
                 let store = FileStateStore::new(&candidate_root);
-                Self::open_at(&candidate_root, socket, &store)
+                Self::open_at(
+                    RuntimeLocation {
+                        state_root,
+                        candidate_root: &candidate_root,
+                    },
+                    socket,
+                    &store,
+                )
             }
             StateAuthority::Invalid => Self::inactive(state_root, socket),
         }
     }
 
-    fn open_at(state_root: &Path, socket: &Path, store: &dyn StateStore) -> Self {
-        let admitted = PairedActivationRecord::load(store)
-            .ok()
-            .zip(RkpLeaseBatch::load_active(store).ok())
-            .and_then(|(pair, leases)| {
-                let lease = leases.leases().first()?.metadata();
-                let irpc = *lease.irpc_identity_hash.as_bytes();
-                let lease_epoch = lease.profile_epoch;
-                let consistent = leases.leases().iter().all(|entry| {
-                    entry.metadata().profile_epoch == pair.profile_epoch
-                        && entry.metadata().irpc_identity_hash.as_bytes() == &irpc
-                });
-                if !consistent || lease_epoch != pair.profile_epoch {
-                    return None;
-                }
-                let service = DonorRkaService::new_durable(
-                    PairedPolicy::new(
-                        pair.peer_spki_hash,
-                        pair.profile_id_hash,
-                        pair.profile_epoch,
-                        pair.candidate_identity_hash,
-                        irpc,
-                        pair.prior_transcript_hash,
-                    ),
-                    state_root,
-                );
-                let metadata = leases
-                    .leases()
-                    .iter()
-                    .map(|entry| *entry.metadata())
-                    .collect();
-                let transcript =
-                    super::state::TranscriptJournal::open(state_root, pair.prior_transcript_hash)
-                        .ok()?;
-                transcript.committed().ok()?;
-                Some((
-                    service,
-                    RuntimeTrust {
-                        pair,
-                        leases: metadata,
-                    },
-                    transcript,
-                ))
-            });
-        let (service, trust, transcript) = admitted
-            .map_or((None, None, None), |(service, trust, transcript)| {
-                (Some(service), Some(trust), Some(transcript))
-            });
-        Self {
-            service,
-            broker: BridgeDonorBroker::new(socket),
-            trust,
-            state_root: Some(state_root.to_path_buf()),
-            transcript,
-        }
+    /// Reports whether at least one authenticated shard is active.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        !self.shards.is_empty()
+    }
+
+    pub(crate) fn dispatch_frame(&mut self, encoded: &[u8]) -> Result<Vec<u8>, DonorError> {
+        let context = self.local_candidate.ok_or(DonorError::Unpaired)?;
+        self.dispatch(&context, encoded)
+    }
+
+    fn open_at(location: RuntimeLocation<'_>, socket: &Path, store: &dyn StateStore) -> Self {
+        let Ok(pair) = PairedActivationRecord::load(store) else {
+            return Self::inactive(location.state_root, socket);
+        };
+        let catalog = if let Ok(catalog) = PairingCatalog::load(location.state_root) {
+            catalog
+        } else {
+            let mut catalog = PairingCatalog::empty();
+            if catalog
+                .admit(PairingAdmission {
+                    peer_spki_hash: pair.peer_spki_hash,
+                    profile_id_hash: pair.profile_id_hash,
+                    profile_epoch: pair.profile_epoch,
+                    candidate_identity_hash: pair.candidate_identity_hash,
+                })
+                .is_err()
+            {
+                return Self::inactive(location.state_root, socket);
+            }
+            catalog
+        };
+        let Ok(context) = catalog.lookup(
+            pair.peer_spki_hash,
+            pair.profile_id_hash,
+            pair.profile_epoch,
+        ) else {
+            return Self::inactive(location.state_root, socket);
+        };
+        let Ok(shard) = load_at(location.candidate_root, store, &context) else {
+            return Self::inactive(location.state_root, socket);
+        };
+        let mut runtime = Self::with_broker(catalog, BridgeDonorBroker::new(socket));
+        runtime.shards.insert(*context.candidate(), shard);
+        runtime.state_root = Some(location.state_root.to_path_buf());
+        runtime.local_candidate = Some(context);
+        runtime
     }
 
     fn inactive(state_root: &Path, socket: &Path) -> Self {
-        Self {
-            service: None,
-            broker: BridgeDonorBroker::new(socket),
-            trust: None,
-            state_root: Some(state_root.to_path_buf()),
-            transcript: None,
+        let mut runtime = Self::new(socket);
+        runtime.state_root = Some(state_root.to_path_buf());
+        runtime
+    }
+}
+
+impl<B: DonorBroker> DonorSupervisor<B> {
+    /// Invalidates only the disconnected authenticated candidate shard.
+    pub fn candidate_died(&mut self, candidate: &crate::candidate::CandidateId) {
+        let (shards, broker) = (&mut self.shards, &mut self.broker);
+        if let Some(shard) = shards.get_mut(candidate) {
+            shard.service.invalidate_all(broker);
         }
     }
 
-    /// Reports whether both trusted durable records admitted the donor role.
-    #[must_use]
-    pub const fn is_active(&self) -> bool {
-        self.service.is_some()
-    }
-
-    /// Decodes and dispatches one authenticated canonical RKA request.
-    pub fn dispatch_frame(&mut self, encoded: &[u8]) -> Result<Vec<u8>, DonorError> {
-        super::dispatch::dispatch(self, encoded)
-    }
-
-    /// Generates one retained application key through the typed broker bridge.
-    pub fn generate(&mut self, request: GenerateRequest<'_>) -> Result<GenerateResult, DonorError> {
-        let service = self.service.as_mut().ok_or(DonorError::Unpaired)?;
-        service.generate(request, &mut self.broker)
-    }
-
-    /// Returns retained public material after exact key authorization.
-    pub fn get(&mut self, request: DeleteRequest) -> Result<&PublicKeyResult, DonorError> {
-        self.service
-            .as_mut()
-            .ok_or(DonorError::Unpaired)?
-            .get(request)
-    }
-
-    /// Begins the sole live operation for a retained key.
-    pub fn begin(&mut self, request: BeginRequest) -> Result<BeginResult, DonorError> {
-        let service = self.service.as_mut().ok_or(DonorError::Unpaired)?;
-        service.begin(request, &mut self.broker)
-    }
-
-    /// Sends authenticated associated data to the live operation.
-    pub fn update_aad(&mut self, request: OperationRequest<'_>) -> Result<usize, DonorError> {
-        let service = self.service.as_mut().ok_or(DonorError::Unpaired)?;
-        service.update_aad(request, &mut self.broker)
-    }
-
-    /// Sends bounded message bytes to the live operation.
-    pub fn update(&mut self, request: OperationRequest<'_>) -> Result<Vec<u8>, DonorError> {
-        let service = self.service.as_mut().ok_or(DonorError::Unpaired)?;
-        service.update(request, &mut self.broker)
-    }
-
-    /// Finishes and tombstones the live operation.
-    pub fn finish(&mut self, request: FinishRequest<'_>) -> Result<FinishResult, DonorError> {
-        let service = self.service.as_mut().ok_or(DonorError::Unpaired)?;
-        service.finish(request, &mut self.broker)
-    }
-
-    /// Aborts and tombstones the live operation.
-    pub fn abort(&mut self, request: OperationRequest<'_>) -> Result<(), DonorError> {
-        let service = self.service.as_mut().ok_or(DonorError::Unpaired)?;
-        service.abort(request, &mut self.broker)
-    }
-
-    /// Deletes the retained broker key.
-    pub fn delete(&mut self, request: DeleteRequest) -> Result<DonorKeyState, DonorError> {
-        let service = self.service.as_mut().ok_or(DonorError::Unpaired)?;
-        service.delete(request, &mut self.broker)
-    }
-
-    /// Invalidates all retained state when the authenticated peer disappears.
-    pub fn peer_died(&mut self) {
-        if let Some(service) = self.service.as_mut() {
-            service.peer_died(&mut self.broker);
+    /// Invalidates every shard after donor broker death.
+    pub fn broker_died(&mut self) {
+        let (shards, broker) = (&mut self.shards, &mut self.broker);
+        for shard in shards.values_mut() {
+            shard.service.invalidate_all(broker);
         }
     }
+}
+
+pub(super) fn load_candidate(
+    state_root: &Path,
+    context: &AuthenticatedCandidateContext,
+) -> Result<CandidateShard, DonorError> {
+    let layout = CandidateLayout::new(state_root, context.candidate());
+    let store = FileStateStore::new(layout.root());
+    load_at(layout.root(), &store, context)
+}
+
+fn load_at(
+    candidate_root: &Path,
+    store: &dyn StateStore,
+    context: &AuthenticatedCandidateContext,
+) -> Result<CandidateShard, DonorError> {
+    let pair = PairedActivationRecord::load(store).map_err(|_| DonorError::Storage)?;
+    if pair.peer_spki_hash != *context.peer_spki_hash()
+        || pair.profile_id_hash != *context.profile_id_hash()
+        || pair.profile_epoch != context.profile_epoch()
+        || pair.candidate_identity_hash != *context.candidate().as_bytes()
+    {
+        return Err(DonorError::Unpaired);
+    }
+    let lease_batch = RkpLeaseBatch::load_active(store).map_err(|_| DonorError::Storage)?;
+    let first = lease_batch.leases().first().ok_or(DonorError::Unpaired)?;
+    let irpc = *first.metadata().irpc_identity_hash.as_bytes();
+    let consistent = lease_batch.leases().iter().all(|entry| {
+        entry.metadata().profile_epoch == pair.profile_epoch
+            && entry.metadata().irpc_identity_hash.as_bytes() == &irpc
+    });
+    if !consistent {
+        return Err(DonorError::Unpaired);
+    }
+    let policy = PairedPolicy::new(
+        pair.peer_spki_hash,
+        pair.profile_id_hash,
+        pair.profile_epoch,
+        pair.candidate_identity_hash,
+        irpc,
+        pair.prior_transcript_hash,
+    );
+    let transcript = TranscriptJournal::open(candidate_root, pair.prior_transcript_hash)?;
+    transcript.committed()?;
+    CandidateShard::durable(
+        context,
+        policy,
+        DurableShardState {
+            trust: RuntimeTrust {
+                pair,
+                leases: lease_batch
+                    .leases()
+                    .iter()
+                    .map(|entry| *entry.metadata())
+                    .collect(),
+            },
+            replay_root: candidate_root.to_path_buf(),
+            transcript,
+        },
+    )
 }

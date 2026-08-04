@@ -1,4 +1,7 @@
 use rka_protocol::{HashDomain, hash_bytes};
+use rka_sidecar::candidate::{
+    AuthenticatedCandidateContext, CatalogError, PairingAdmission, PairingCatalog,
+};
 use rka_sidecar::donor::{
     AccessContext, BeginRequest, DeleteRequest, FinishRequest, OperationRequest, PairedPolicy,
     RemoteOperationHandle,
@@ -73,6 +76,20 @@ impl Fixture {
             self.profile_id_hash,
             self.identity_hash,
         )
+    }
+
+    pub const fn admission(&self) -> PairingAdmission {
+        PairingAdmission::new(
+            (self.peer_spki_hash, self.profile_id_hash, PROFILE_EPOCH),
+            self.identity_hash,
+        )
+    }
+
+    pub fn authenticated(
+        &self,
+        catalog: &PairingCatalog,
+    ) -> Result<AuthenticatedCandidateContext, CatalogError> {
+        catalog.lookup(self.peer_spki_hash, self.profile_id_hash, PROFILE_EPOCH)
     }
 
     pub fn begin(&self, request: u8) -> BeginRequest {

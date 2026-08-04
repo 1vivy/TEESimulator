@@ -1,31 +1,68 @@
-use super::{DonorBroker, DonorKeyState, RemoteKeyHandle, service::DonorRkaService};
+use std::collections::{HashMap, hash_map::Entry};
 
-impl DonorRkaService {
-    pub(super) fn reject_key_collision(
+use crate::candidate::{AuthenticatedCandidateContext, CandidateId};
+
+use super::{DonorBroker, DonorError, DonorSupervisor, RemoteKeyHandle};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RemoteKeyOwner {
+    candidate: CandidateId,
+    alias: [u8; 16],
+}
+
+#[derive(Debug, Default)]
+pub(super) struct RemoteKeyRegistry {
+    owners: HashMap<RemoteKeyHandle, RemoteKeyOwner>,
+}
+
+impl RemoteKeyRegistry {
+    fn register(
         &mut self,
         handle: RemoteKeyHandle,
-        broker: &mut impl DonorBroker,
-    ) {
-        let owner = self
-            .keys
-            .iter()
-            .find_map(|(alias, record)| (record.remote == handle).then_some(*alias));
-        if let Some(alias) = owner {
-            if let Some(operation) = self
-                .keys
-                .get_mut(&alias)
-                .and_then(|record| record.live.take())
-            {
-                self.operation_tombstones.insert(operation);
-                let _ = broker.abort(operation);
-            }
-            if let Some(record) = self.keys.get_mut(&alias)
-                && record.state != DonorKeyState::Deleted
-            {
-                record.state = DonorKeyState::Quarantined;
-                record.broker_deleted = true;
+        owner: RemoteKeyOwner,
+    ) -> Result<(), RemoteKeyOwner> {
+        match self.owners.entry(handle) {
+            Entry::Occupied(entry) => Err(*entry.get()),
+            Entry::Vacant(entry) => {
+                entry.insert(owner);
+                Ok(())
             }
         }
-        let _ = broker.delete(handle);
+    }
+}
+
+impl<B: DonorBroker> DonorSupervisor<B> {
+    pub(super) fn register_generated_key(
+        &mut self,
+        context: &AuthenticatedCandidateContext,
+        alias: [u8; 16],
+    ) -> Result<(), DonorError> {
+        let handle = self
+            .shard(context)?
+            .service
+            .remote_for_alias(alias)
+            .ok_or(DonorError::Broker)?;
+        let current = RemoteKeyOwner {
+            candidate: *context.candidate(),
+            alias,
+        };
+        let Err(existing) = self.remote_keys.register(handle, current) else {
+            return Ok(());
+        };
+        {
+            let (shards, broker) = (&mut self.shards, &mut self.broker);
+            if let Some(shard) = shards.get_mut(&existing.candidate) {
+                shard.service.invalidate(existing.alias, broker);
+            }
+        }
+        {
+            let (shards, broker) = (&mut self.shards, &mut self.broker);
+            if let Some(shard) = shards.get_mut(&current.candidate) {
+                shard
+                    .service
+                    .quarantine_after_remote_delete(current.alias, broker);
+            }
+        }
+        Err(DonorError::HandleCollision)
     }
 }

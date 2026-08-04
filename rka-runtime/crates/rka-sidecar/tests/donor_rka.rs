@@ -5,7 +5,10 @@
 mod donor_rka_support;
 
 use donor_rka_support::{FakeBroker, Fixture};
-use rka_sidecar::donor::{DonorError, DonorKeyState, DonorRkaService};
+use rka_sidecar::{
+    candidate::PairingCatalog,
+    donor::{DonorError, DonorKeyState, DonorRkaService, DonorSupervisor},
+};
 
 #[test]
 fn candidate_b_policy_shares_no_identity_material_with_candidate_a() {
@@ -21,6 +24,171 @@ fn candidate_b_policy_shares_no_identity_material_with_candidate_a() {
     assert_ne!(peer_a, peer_b);
     assert_ne!(profile_a, profile_b);
     assert_ne!(identity_a, identity_b);
+}
+
+#[test]
+fn two_candidate_shards_hold_independent_key_and_request_id_namespaces()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let candidate_a = Fixture::new();
+    let candidate_b = Fixture::candidate_b();
+    let mut catalog = PairingCatalog::empty();
+    catalog.admit(candidate_a.admission())?;
+    catalog.admit(candidate_b.admission())?;
+    let context_a = candidate_a.authenticated(&catalog)?;
+    let context_b = candidate_b.authenticated(&catalog)?;
+    let mut donor = DonorSupervisor::with_broker(catalog, FakeBroker::default());
+    donor.activate_candidate(&context_a, candidate_a.policy())?;
+    donor.activate_candidate(&context_b, candidate_b.policy())?;
+
+    // When
+    let generated_a = donor.generate(&context_a, candidate_a.generate(1))?;
+    let generated_b = donor.generate(&context_b, candidate_a.generate_for(1, &candidate_b))?;
+    donor.delete(&context_b, candidate_b.delete(2))?;
+
+    // Then
+    assert_eq!(generated_a.state, DonorKeyState::Active);
+    assert_eq!(generated_b.state, DonorKeyState::Active);
+    assert_eq!(
+        donor.key_state(&context_a, candidate_a.alias())?,
+        Some(DonorKeyState::Active)
+    );
+    Ok(())
+}
+
+#[test]
+fn an_operation_handle_from_another_candidate_returns_the_same_redacted_stale_handle_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let candidate_a = Fixture::new();
+    let candidate_b = Fixture::candidate_b();
+    let mut catalog = PairingCatalog::empty();
+    catalog.admit(candidate_a.admission())?;
+    catalog.admit(candidate_b.admission())?;
+    let context_a = candidate_a.authenticated(&catalog)?;
+    let context_b = candidate_b.authenticated(&catalog)?;
+    let mut donor = DonorSupervisor::with_broker(catalog, FakeBroker::default());
+    donor.activate_candidate(&context_a, candidate_a.policy())?;
+    donor.activate_candidate(&context_b, candidate_b.policy())?;
+    donor.generate(&context_a, candidate_a.generate(1))?;
+    donor.generate(&context_b, candidate_b.generate(1))?;
+    let operation_b = donor.begin(&context_b, candidate_b.begin(2))?;
+
+    let mut random_catalog = PairingCatalog::empty();
+    random_catalog.admit(candidate_a.admission())?;
+    let random_context = candidate_a.authenticated(&random_catalog)?;
+    let mut random_donor = DonorSupervisor::with_broker(random_catalog, FakeBroker::default());
+    random_donor.activate_candidate(&random_context, candidate_a.policy())?;
+    random_donor.generate(&random_context, candidate_a.generate(1))?;
+
+    // When
+    let foreign = donor.update(
+        &context_a,
+        candidate_a.update(2, operation_b.operation_handle, b"foreign"),
+    );
+    let unknown = random_donor.update(
+        &random_context,
+        candidate_a.update(
+            2,
+            rka_sidecar::donor::RemoteOperationHandle::new([0xff; 16]),
+            b"unknown",
+        ),
+    );
+
+    // Then
+    assert_eq!(foreign, Err(DonorError::StaleHandle));
+    assert_eq!(foreign, unknown);
+    assert_eq!(
+        donor.key_state(&context_b, candidate_b.alias())?,
+        Some(DonorKeyState::Active)
+    );
+    donor.abort(
+        &context_b,
+        candidate_b.abort(3, operation_b.operation_handle),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn a_remote_handle_collision_across_candidates_quarantines_both_records()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let candidate_a = Fixture::new();
+    let candidate_b = Fixture::candidate_b();
+    let mut catalog = PairingCatalog::empty();
+    catalog.admit(candidate_a.admission())?;
+    catalog.admit(candidate_b.admission())?;
+    let context_a = candidate_a.authenticated(&catalog)?;
+    let context_b = candidate_b.authenticated(&catalog)?;
+    let collision = rka_sidecar::donor::RemoteKeyHandle::new([0xdd; 16]);
+    let broker = FakeBroker {
+        forced_key: Some(collision),
+        ..FakeBroker::default()
+    };
+    let mut donor = DonorSupervisor::with_broker(catalog, broker);
+    donor.activate_candidate(&context_a, candidate_a.policy())?;
+    donor.activate_candidate(&context_b, candidate_b.policy())?;
+    donor.generate(&context_a, candidate_a.generate(1))?;
+
+    // When
+    let reused = donor.generate(&context_b, candidate_b.generate(1));
+
+    // Then
+    assert_eq!(reused, Err(DonorError::HandleCollision));
+    assert_eq!(
+        donor.key_state(&context_a, candidate_a.alias())?,
+        Some(DonorKeyState::Quarantined)
+    );
+    assert_eq!(
+        donor.key_state(&context_b, candidate_b.alias())?,
+        Some(DonorKeyState::Quarantined)
+    );
+    Ok(())
+}
+
+#[test]
+fn candidate_disconnect_invalidates_only_that_candidate_but_broker_death_invalidates_all()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let candidate_a = Fixture::new();
+    let candidate_b = Fixture::candidate_b();
+    let mut catalog = PairingCatalog::empty();
+    catalog.admit(candidate_a.admission())?;
+    catalog.admit(candidate_b.admission())?;
+    let context_a = candidate_a.authenticated(&catalog)?;
+    let context_b = candidate_b.authenticated(&catalog)?;
+    let mut donor = DonorSupervisor::with_broker(catalog, FakeBroker::default());
+    donor.activate_candidate(&context_a, candidate_a.policy())?;
+    donor.activate_candidate(&context_b, candidate_b.policy())?;
+    donor.generate(&context_a, candidate_a.generate(1))?;
+    donor.generate(&context_b, candidate_b.generate(1))?;
+
+    // When
+    donor.candidate_died(context_a.candidate());
+
+    // Then
+    assert_eq!(
+        donor.key_state(&context_a, candidate_a.alias())?,
+        Some(DonorKeyState::Quarantined)
+    );
+    assert_eq!(
+        donor.key_state(&context_b, candidate_b.alias())?,
+        Some(DonorKeyState::Active)
+    );
+
+    // When
+    donor.broker_died();
+
+    // Then
+    assert_eq!(
+        donor.key_state(&context_a, candidate_a.alias())?,
+        Some(DonorKeyState::Quarantined)
+    );
+    assert_eq!(
+        donor.key_state(&context_b, candidate_b.alias())?,
+        Some(DonorKeyState::Quarantined)
+    );
+    Ok(())
 }
 
 #[test]
@@ -167,26 +335,29 @@ fn donor_rka_peer_death_and_policy_failure_are_terminal() -> Result<(), Box<dyn 
 {
     // Given
     let fixture = Fixture::new();
-    let mut broker = FakeBroker::default();
-    let mut donor = DonorRkaService::new(fixture.policy());
-    donor.generate(fixture.generate(1), &mut broker)?;
-    let operation = donor.begin(fixture.begin(2), &mut broker)?;
+    let mut catalog = PairingCatalog::empty();
+    catalog.admit(fixture.admission())?;
+    let context = fixture.authenticated(&catalog)?;
+    let mut donor = DonorSupervisor::with_broker(catalog, FakeBroker::default());
+    donor.activate_candidate(&context, fixture.policy())?;
+    donor.generate(&context, fixture.generate(1))?;
+    let operation = donor.begin(&context, fixture.begin(2))?;
 
     // When
-    donor.peer_died(&mut broker);
+    donor.candidate_died(context.candidate());
     let after_death = donor.update(
+        &context,
         fixture.update(3, operation.operation_handle, b"x"),
-        &mut broker,
     );
 
     // Then
     assert_eq!(after_death, Err(DonorError::Quarantined));
     assert_eq!(
-        donor.key_state(fixture.alias()),
+        donor.key_state(&context, fixture.alias())?,
         Some(DonorKeyState::Quarantined)
     );
-    assert_eq!(broker.abort_calls, 1);
-    assert_eq!(broker.delete_calls, 1);
+    assert_eq!(donor.broker().abort_calls, 1);
+    assert_eq!(donor.broker().delete_calls, 1);
     Ok(())
 }
 
@@ -344,20 +515,24 @@ fn donor_broker_failures_are_terminal_and_expose_no_result()
 fn donor_rejects_remote_key_handle_collision() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let collision = rka_sidecar::donor::RemoteKeyHandle::new([0xdd; 16]);
-    let mut broker = FakeBroker {
+    let broker = FakeBroker {
         forced_key: Some(collision),
         ..FakeBroker::default()
     };
-    let mut donor = DonorRkaService::new(fixture.policy());
-    donor.generate(fixture.generate(1), &mut broker)?;
+    let mut catalog = PairingCatalog::empty();
+    catalog.admit(fixture.admission())?;
+    let context = fixture.authenticated(&catalog)?;
+    let mut donor = DonorSupervisor::with_broker(catalog, broker);
+    donor.activate_candidate(&context, fixture.policy())?;
+    donor.generate(&context, fixture.generate(1))?;
 
-    let reused = donor.generate(fixture.generate_secondary(2), &mut broker);
+    let reused = donor.generate(&context, fixture.generate_secondary(2));
 
     assert_eq!(reused, Err(DonorError::HandleCollision));
-    assert_eq!(broker.generated_requests, 2);
-    assert_eq!(broker.delete_calls, 1);
+    assert_eq!(donor.broker().generated_requests, 2);
+    assert_eq!(donor.broker().delete_calls, 1);
     assert_eq!(
-        donor.key_state(fixture.alias()),
+        donor.key_state(&context, fixture.alias())?,
         Some(DonorKeyState::Quarantined)
     );
     Ok(())

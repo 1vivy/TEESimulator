@@ -58,7 +58,6 @@ pub struct DonorRkaService {
     pub(super) policy: PairedPolicy,
     pub(super) keys: HashMap<[u8; 16], KeyRecord>,
     pub(super) request_ids: HashSet<[u8; 16]>,
-    remote_keys: HashSet<RemoteKeyHandle>,
     pub(super) operation_tombstones: HashSet<RemoteOperationHandle>,
     pub(super) replay_root: Option<PathBuf>,
 }
@@ -71,7 +70,6 @@ impl DonorRkaService {
             policy,
             keys: HashMap::new(),
             request_ids: HashSet::new(),
-            remote_keys: HashSet::new(),
             operation_tombstones: HashSet::new(),
             replay_root: None,
         }
@@ -111,10 +109,6 @@ impl DonorRkaService {
                 prior_transcript_hash: request.prior_transcript_hash,
             })
             .map_err(|_| DonorError::Broker)?;
-        if !self.remote_keys.insert(generated.handle) {
-            self.reject_key_collision(generated.handle, broker);
-            return Err(DonorError::HandleCollision);
-        }
         self.keys.insert(
             request.alias,
             KeyRecord {
@@ -251,8 +245,8 @@ impl DonorRkaService {
             return;
         }
         if let Some(operation) = record.live.take() {
-            self.operation_tombstones.insert(operation);
             let _ = broker.abort(operation);
+            self.operation_tombstones.insert(operation);
         }
         let _ = broker.delete(record.remote);
         record.broker_deleted = true;
@@ -261,5 +255,25 @@ impl DonorRkaService {
 
     pub(super) fn aliases(&self) -> Vec<[u8; 16]> {
         self.keys.keys().copied().collect()
+    }
+
+    pub(super) fn remote_for_alias(&self, alias: [u8; 16]) -> Option<RemoteKeyHandle> {
+        self.keys.get(&alias).map(|record| record.remote)
+    }
+
+    pub(super) fn quarantine_after_remote_delete(
+        &mut self,
+        alias: [u8; 16],
+        broker: &mut impl DonorBroker,
+    ) {
+        let Some(record) = self.keys.get_mut(&alias) else {
+            return;
+        };
+        if let Some(operation) = record.live.take() {
+            let _ = broker.abort(operation);
+            self.operation_tombstones.insert(operation);
+        }
+        record.broker_deleted = true;
+        record.state = DonorKeyState::Quarantined;
     }
 }

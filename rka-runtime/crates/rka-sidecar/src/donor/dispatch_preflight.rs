@@ -1,7 +1,7 @@
 use rka_protocol::{Frame, FrameBody, MessageKind};
 
 use super::{
-    AccessContext, BeginRequest, DeleteRequest, DonorError, DonorRuntime, GenerateCoordinates,
+    AccessContext, BeginRequest, CandidateShard, DeleteRequest, DonorError, GenerateCoordinates,
     GenerateEvidence, GenerateKeyMaterial, GenerateRequest, OperationRequest,
     RemoteOperationHandle, RkpKeyHandle,
     dispatch_codec::{encode_envelope, encode_identity},
@@ -9,12 +9,12 @@ use super::{
 };
 
 pub(super) fn preflight(
-    runtime: &DonorRuntime,
+    shard: &CandidateShard,
     frame: &Frame<'_>,
     previous: [u8; 32],
 ) -> Result<(), DonorError> {
-    let context = access_context(runtime, frame)?;
-    let service = runtime.service.as_ref().ok_or(DonorError::Unpaired)?;
+    let context = access_context(shard, frame)?;
+    let service = &shard.service;
     match &frame.body {
         FrameBody::Generate {
             identity,
@@ -24,7 +24,7 @@ pub(super) fn preflight(
         } => {
             let identity_bytes = encode_identity(identity);
             let envelope_bytes = encode_envelope(envelope)?;
-            let trust = runtime.trust.as_ref().ok_or(DonorError::Unpaired)?;
+            let trust = shard.trust.as_ref().ok_or(DonorError::Unpaired)?;
             let ordered = trust
                 .leases
                 .iter()
@@ -34,7 +34,7 @@ pub(super) fn preflight(
                 return Err(DonorError::EnvelopeMismatch);
             }
             let lease = trust.leases.first().ok_or(DonorError::Unpaired)?;
-            let root = runtime.state_root.as_deref().ok_or(DonorError::Storage)?;
+            let root = shard.replay_root.as_deref().ok_or(DonorError::Storage)?;
             let chain = load_verified_chain(root, lease)?;
             let chain_refs = chain.iter().map(Vec::as_slice).collect::<Vec<_>>();
             service.preflight_generate(&GenerateRequest::new(
@@ -64,14 +64,14 @@ pub(super) fn preflight(
             operation_handle,
             chunk,
         } if frame.kind == MessageKind::UpdateAad || frame.kind == MessageKind::Update => {
-            preflight_operation(runtime, frame, context, *operation_handle, chunk)
+            preflight_operation(shard, frame, context, *operation_handle, chunk)
         }
         FrameBody::Finish {
             operation_handle,
             final_input,
-        } => preflight_operation(runtime, frame, context, *operation_handle, final_input),
+        } => preflight_operation(shard, frame, context, *operation_handle, final_input),
         FrameBody::Handle(handle) if frame.kind == MessageKind::Abort => {
-            preflight_operation(runtime, frame, context, *handle, &[])
+            preflight_operation(shard, frame, context, *handle, &[])
         }
         FrameBody::Handle(alias) if frame.kind == MessageKind::Delete => service.preflight_key(
             DeleteRequest::new(frame.request_id.bytes(), context, *alias),
@@ -81,18 +81,17 @@ pub(super) fn preflight(
 }
 
 fn preflight_operation(
-    runtime: &DonorRuntime,
+    shard: &CandidateShard,
     frame: &Frame<'_>,
     context: AccessContext,
     operation_handle: [u8; 16],
     input: &[u8],
 ) -> Result<(), DonorError> {
-    let service = runtime.service.as_ref().ok_or(DonorError::Unpaired)?;
     let operation = RemoteOperationHandle::new(operation_handle);
-    let alias = service
+    let alias = shard
         .operation_owner(operation)
         .ok_or(DonorError::StaleHandle)?;
-    service.preflight_operation(&OperationRequest::new(
+    shard.service.preflight_operation(&OperationRequest::new(
         frame.request_id.bytes(),
         context,
         alias,
@@ -102,10 +101,10 @@ fn preflight_operation(
 }
 
 pub(super) fn access_context(
-    runtime: &DonorRuntime,
+    shard: &CandidateShard,
     frame: &Frame<'_>,
 ) -> Result<AccessContext, DonorError> {
-    let pair = runtime
+    let pair = shard
         .trust
         .as_ref()
         .map(|trust| trust.pair)

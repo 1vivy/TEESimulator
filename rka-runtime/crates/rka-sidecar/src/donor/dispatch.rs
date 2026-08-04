@@ -4,9 +4,9 @@ use rka_protocol::{
 };
 
 use super::{
-    AccessContext, BeginRequest, DeleteRequest, DonorError, DonorRuntime, FinishRequest,
-    GenerateCoordinates, GenerateEvidence, GenerateKeyMaterial, GenerateRequest, OperationRequest,
-    RemoteOperationHandle, RkpKeyHandle,
+    AccessContext, BeginRequest, DeleteRequest, DonorBroker, DonorError, DonorSupervisor,
+    FinishRequest, GenerateCoordinates, GenerateEvidence, GenerateKeyMaterial, GenerateRequest,
+    OperationRequest, RemoteOperationHandle, RkpKeyHandle,
     dispatch_codec::{
         begin_result, boolean_result, encode_envelope, encode_identity, finish_result,
         generate_result, update_result,
@@ -14,16 +14,24 @@ use super::{
     lease::load_verified_chain,
     state::PendingTranscript,
 };
+use crate::candidate::AuthenticatedCandidateContext;
 
-pub(super) fn dispatch(runtime: &mut DonorRuntime, encoded: &[u8]) -> Result<Vec<u8>, DonorError> {
+pub(super) fn dispatch<B: DonorBroker>(
+    runtime: &mut DonorSupervisor<B>,
+    authenticated: &AuthenticatedCandidateContext,
+    encoded: &[u8],
+) -> Result<Vec<u8>, DonorError> {
     let frame = decode_frame(encoded).map_err(|_| DonorError::InvalidFrame)?;
-    let trust = runtime.trust.as_ref().ok_or(DonorError::Unpaired)?;
-    if frame.profile_epoch != trust.pair.profile_epoch
-        || frame.session_id.bytes() != trust.pair.session_id
-    {
+    let shard = runtime.shard(authenticated)?;
+    let pair = shard
+        .trust
+        .as_ref()
+        .map(|trust| trust.pair)
+        .ok_or(DonorError::Unpaired)?;
+    if frame.profile_epoch != pair.profile_epoch || frame.session_id.bytes() != pair.session_id {
         return Err(DonorError::Unpaired);
     }
-    let previous = runtime
+    let previous = shard
         .transcript
         .as_ref()
         .ok_or(DonorError::Unpaired)?
@@ -33,8 +41,9 @@ pub(super) fn dispatch(runtime: &mut DonorRuntime, encoded: &[u8]) -> Result<Vec
     if frame.transcript_hash != expected {
         return Err(DonorError::TranscriptMismatch);
     }
-    super::dispatch_preflight::preflight(runtime, &frame, previous)?;
+    super::dispatch_preflight::preflight(shard, &frame, previous)?;
     runtime
+        .shard_mut(authenticated)?
         .transcript
         .as_mut()
         .ok_or(DonorError::Unpaired)?
@@ -42,12 +51,12 @@ pub(super) fn dispatch(runtime: &mut DonorRuntime, encoded: &[u8]) -> Result<Vec
             prior: previous,
             request_hash: hash_bytes(HashDomain::Frame, &canonical_request),
             next: expected,
-            peer: trust.pair.peer_spki_hash,
+            peer: pair.peer_spki_hash,
             epoch: frame.profile_epoch,
             session: frame.session_id.bytes(),
             request_id: frame.request_id.bytes(),
         })?;
-    let body = dispatch_body(runtime, &frame, previous)?;
+    let body = dispatch_body(runtime, authenticated, &frame, previous)?;
     let mut response = Frame::new(
         FrameContext::new(
             (frame.request_id, frame.session_id),
@@ -61,6 +70,7 @@ pub(super) fn dispatch(runtime: &mut DonorRuntime, encoded: &[u8]) -> Result<Vec
         &encode_frame_without_transcript(&response),
     );
     runtime
+        .shard_mut(authenticated)?
         .transcript
         .as_mut()
         .ok_or(DonorError::Unpaired)?
@@ -68,12 +78,13 @@ pub(super) fn dispatch(runtime: &mut DonorRuntime, encoded: &[u8]) -> Result<Vec
     Ok(encode_frame(&response))
 }
 
-fn dispatch_body(
-    runtime: &mut DonorRuntime,
+fn dispatch_body<B: DonorBroker>(
+    runtime: &mut DonorSupervisor<B>,
+    authenticated: &AuthenticatedCandidateContext,
     frame: &Frame<'_>,
     previous: [u8; 32],
 ) -> Result<Vec<u8>, DonorError> {
-    let context = super::dispatch_preflight::access_context(runtime, frame)?;
+    let context = super::dispatch_preflight::access_context(runtime.shard(authenticated)?, frame)?;
     match &frame.body {
         FrameBody::Generate {
             identity,
@@ -82,6 +93,7 @@ fn dispatch_body(
             encoded: _,
         } => generate(
             runtime,
+            authenticated,
             frame.request_id,
             context,
             identity,
@@ -90,8 +102,10 @@ fn dispatch_body(
             previous,
         ),
         FrameBody::Begin(alias) => {
-            let result =
-                runtime.begin(BeginRequest::new(frame.request_id.bytes(), context, *alias))?;
+            let result = runtime.begin(
+                authenticated,
+                BeginRequest::new(frame.request_id.bytes(), context, *alias),
+            )?;
             Ok(begin_result(result.operation_handle.as_array()))
         }
         FrameBody::Chunk {
@@ -100,16 +114,15 @@ fn dispatch_body(
         } if frame.kind == MessageKind::UpdateAad || frame.kind == MessageKind::Update => {
             let operation = RemoteOperationHandle::new(*operation_handle);
             let alias = runtime
-                .service
-                .as_ref()
-                .and_then(|service| service.operation_owner(operation))
+                .shard(authenticated)?
+                .operation_owner(operation)
                 .ok_or(DonorError::StaleHandle)?;
             let request =
                 OperationRequest::new(frame.request_id.bytes(), context, alias, operation, chunk);
             let (consumed, output) = if frame.kind == MessageKind::UpdateAad {
-                (runtime.update_aad(request)?, Vec::new())
+                (runtime.update_aad(authenticated, request)?, Vec::new())
             } else {
-                let output = runtime.update(request)?;
+                let output = runtime.update(authenticated, request)?;
                 (chunk.len(), output)
             };
             Ok(update_result(frame.kind, consumed, &output))
@@ -120,49 +133,47 @@ fn dispatch_body(
         } => {
             let operation = RemoteOperationHandle::new(*operation_handle);
             let alias = runtime
-                .service
-                .as_ref()
-                .and_then(|service| service.operation_owner(operation))
+                .shard(authenticated)?
+                .operation_owner(operation)
                 .ok_or(DonorError::StaleHandle)?;
-            let result = runtime.finish(FinishRequest::new(OperationRequest::new(
-                frame.request_id.bytes(),
-                context,
-                alias,
-                operation,
-                final_input,
-            )))?;
+            let result = runtime.finish(
+                authenticated,
+                FinishRequest::new(OperationRequest::new(
+                    frame.request_id.bytes(),
+                    context,
+                    alias,
+                    operation,
+                    final_input,
+                )),
+            )?;
             Ok(finish_result(&result.signature))
         }
         FrameBody::Handle(handle) if frame.kind == MessageKind::Abort => {
             let operation = RemoteOperationHandle::new(*handle);
             let alias = runtime
-                .service
-                .as_ref()
-                .and_then(|service| service.operation_owner(operation))
+                .shard(authenticated)?
+                .operation_owner(operation)
                 .ok_or(DonorError::StaleHandle)?;
-            runtime.abort(OperationRequest::new(
-                frame.request_id.bytes(),
-                context,
-                alias,
-                operation,
-                &[],
-            ))?;
+            runtime.abort(
+                authenticated,
+                OperationRequest::new(frame.request_id.bytes(), context, alias, operation, &[]),
+            )?;
             Ok(boolean_result(MessageKind::Abort))
         }
         FrameBody::Handle(alias) if frame.kind == MessageKind::Delete => {
-            runtime.delete(DeleteRequest::new(
-                frame.request_id.bytes(),
-                context,
-                *alias,
-            ))?;
+            runtime.delete(
+                authenticated,
+                DeleteRequest::new(frame.request_id.bytes(), context, *alias),
+            )?;
             Ok(boolean_result(MessageKind::Delete))
         }
         _ => Err(DonorError::InvalidFrame),
     }
 }
 
-fn generate(
-    runtime: &mut DonorRuntime,
+fn generate<B: DonorBroker>(
+    runtime: &mut DonorSupervisor<B>,
+    authenticated: &AuthenticatedCandidateContext,
     request_id: RequestId,
     context: AccessContext,
     identity: &rka_protocol::CandidateIdentity<'_>,
@@ -172,7 +183,8 @@ fn generate(
 ) -> Result<Vec<u8>, DonorError> {
     let identity_bytes = encode_identity(identity);
     let envelope_bytes = encode_envelope(envelope)?;
-    let trust = runtime.trust.as_ref().ok_or(DonorError::Unpaired)?;
+    let shard = runtime.shard(authenticated)?;
+    let trust = shard.trust.as_ref().ok_or(DonorError::Unpaired)?;
     let ordered = trust
         .leases
         .iter()
@@ -182,32 +194,35 @@ fn generate(
         return Err(DonorError::EnvelopeMismatch);
     }
     let lease = trust.leases.first().ok_or(DonorError::Unpaired)?;
-    let root = runtime.state_root.as_deref().ok_or(DonorError::Storage)?;
+    let root = shard.replay_root.as_deref().ok_or(DonorError::Storage)?;
     let chain = load_verified_chain(root, lease)?;
     let chain_refs = chain.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    runtime.generate(GenerateRequest::new(
-        GenerateCoordinates {
-            request_id: request_id.bytes(),
-            context,
-            alias: request.alias_handle,
-        },
-        GenerateEvidence {
-            candidate_identity: &identity_bytes,
-            envelope: &envelope_bytes,
-            ordered_rkp_public_hashes: &ordered,
-            phase_hashes: lease.phase_hashes,
-        },
-        GenerateKeyMaterial {
-            rkp_handle: RkpKeyHandle::new(*lease.remote_handle.as_bytes()),
-            rkp_chain: &chain_refs,
-            challenge: request.attestation_challenge,
-            prior_transcript_hash: previous,
-        },
-    ))?;
+    runtime.generate(
+        authenticated,
+        GenerateRequest::new(
+            GenerateCoordinates {
+                request_id: request_id.bytes(),
+                context,
+                alias: request.alias_handle,
+            },
+            GenerateEvidence {
+                candidate_identity: &identity_bytes,
+                envelope: &envelope_bytes,
+                ordered_rkp_public_hashes: &ordered,
+                phase_hashes: lease.phase_hashes,
+            },
+            GenerateKeyMaterial {
+                rkp_handle: RkpKeyHandle::new(*lease.remote_handle.as_bytes()),
+                rkp_chain: &chain_refs,
+                challenge: request.attestation_challenge,
+                prior_transcript_hash: previous,
+            },
+        ),
+    )?;
     let public = runtime
+        .shard(authenticated)?
         .service
-        .as_ref()
-        .and_then(|service| service.public_for_alias(request.alias_handle))
+        .public_for_alias(request.alias_handle)
         .ok_or(DonorError::Broker)?;
     Ok(generate_result(
         request.alias_handle,

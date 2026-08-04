@@ -105,10 +105,10 @@ pub(super) fn run_donor_once(
         return Ok(DonorIteration::Retry);
     };
     let dispatched = Cell::new(false);
-    let result = donor.serve_once(socket, |_authenticated, request| {
+    let result = donor.serve_once(socket, |authenticated, request| {
         dispatched.set(true);
         runtime
-            .dispatch_frame(request)
+            .dispatch(authenticated, request)
             .map_err(|_| rka_transport::TlsError::Admission)
     });
     match (result, dispatched.get()) {

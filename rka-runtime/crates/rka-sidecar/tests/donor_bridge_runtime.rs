@@ -4,6 +4,7 @@ use rka_sidecar::bridge::{
     BridgeMessage, CandidateBridgeOperation, ExchangeRole, PublicBytes, RequestId, decode_frame,
     encode_frame,
 };
+use rka_sidecar::candidate::{PairingAdmission, PairingCatalog};
 use rka_sidecar::donor::{DeleteRequest, DonorError, DonorRuntime};
 use rka_state::{PairedActivationRecord, StateError, StateStore};
 
@@ -37,6 +38,11 @@ const fn candidate_command_golden() -> &'static [u8] {
 
 #[test]
 fn production_donor_runtime_is_closed_until_authenticated_pairing() {
+    let mut catalog = PairingCatalog::empty();
+    catalog
+        .admit(PairingAdmission::new(([2; 32], [3; 32], 4), [8; 32]))
+        .unwrap();
+    let context = catalog.lookup([2; 32], [3; 32], 4).unwrap();
     let mut runtime = DonorRuntime::new(std::path::Path::new("/unused/broker.sock"));
     let request = DeleteRequest::new(
         [1; 16],
@@ -53,7 +59,7 @@ fn production_donor_runtime_is_closed_until_authenticated_pairing() {
         [10; 16],
     );
 
-    assert_eq!(runtime.get(request), Err(DonorError::Unpaired));
+    assert_eq!(runtime.get(&context, request), Err(DonorError::Unpaired));
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 #[allow(
     clippy::redundant_pub_crate,
@@ -13,9 +13,10 @@ use rka_protocol::{
 use rka_state::PairedActivationRecord;
 
 use super::{
-    BridgeDonorBroker, DonorError, DonorRkaService, DonorRuntime, PairedPolicy,
-    runtime::RuntimeTrust, state::TranscriptJournal,
+    BridgeDonorBroker, CandidateShard, DonorError, DonorRuntime, PairedPolicy,
+    runtime::RuntimeTrust, shard::DurableShardState, state::TranscriptJournal,
 };
+use crate::candidate::{PairingAdmission, PairingCatalog};
 
 #[test]
 fn rejected_request_never_reserves_the_durable_transcript() {
@@ -40,15 +41,44 @@ fn rejected_request_never_reserves_the_durable_transcript() {
         [9; 32],
         prior,
     );
+    let mut catalog = PairingCatalog::empty();
+    catalog
+        .admit(PairingAdmission::new(
+            (
+                pair.peer_spki_hash,
+                pair.profile_id_hash,
+                pair.profile_epoch,
+            ),
+            pair.candidate_identity_hash,
+        ))
+        .unwrap();
+    let context = catalog
+        .lookup(
+            pair.peer_spki_hash,
+            pair.profile_id_hash,
+            pair.profile_epoch,
+        )
+        .unwrap();
+    let shard = CandidateShard::durable(
+        &context,
+        policy,
+        DurableShardState {
+            trust: RuntimeTrust {
+                pair,
+                leases: Vec::new(),
+            },
+            replay_root: root.clone(),
+            transcript: TranscriptJournal::open(&root, prior).unwrap(),
+        },
+    )
+    .unwrap();
     let mut runtime = DonorRuntime {
-        service: Some(DonorRkaService::new(policy)),
+        shards: HashMap::from([(*context.candidate(), shard)]),
         broker: BridgeDonorBroker::new(root.join("unused.sock").as_path()),
-        trust: Some(RuntimeTrust {
-            pair,
-            leases: Vec::new(),
-        }),
+        catalog,
+        remote_keys: super::collision::RemoteKeyRegistry::default(),
         state_root: Some(root.clone()),
-        transcript: Some(TranscriptJournal::open(&root, prior).unwrap()),
+        local_candidate: Some(context),
     };
     let mut frame = Frame::new(
         FrameContext::new(
@@ -65,7 +95,17 @@ fn rejected_request_never_reserves_the_durable_transcript() {
 
     // Then
     assert_eq!(result, Err(DonorError::StaleHandle));
-    assert_eq!(runtime.transcript.unwrap().committed(), Ok(prior));
+    assert_eq!(
+        runtime
+            .shards
+            .get(context.candidate())
+            .unwrap()
+            .transcript
+            .as_ref()
+            .unwrap()
+            .committed(),
+        Ok(prior)
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 

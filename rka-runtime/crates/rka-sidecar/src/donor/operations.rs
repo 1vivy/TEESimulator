@@ -148,7 +148,7 @@ impl DonorRkaService {
         Ok(record.state)
     }
 
-    pub fn peer_died(&mut self, broker: &mut impl DonorBroker) {
+    pub(super) fn invalidate_all(&mut self, broker: &mut impl DonorBroker) {
         let aliases = self.aliases();
         for alias in aliases {
             self.invalidate(alias, broker);

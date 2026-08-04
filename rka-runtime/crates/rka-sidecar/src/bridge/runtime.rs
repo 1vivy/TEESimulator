@@ -58,7 +58,7 @@ pub struct RoleExecutor {
     #[cfg(test)]
     identity_sources: Mutex<VecDeque<super::identity_source::TestIdentitySource>>,
     #[cfg(test)]
-    successful_test_authentications: AtomicUsize,
+    successful_test_authentications: Arc<AtomicUsize>,
 }
 
 impl RoleExecutor {
@@ -70,14 +70,15 @@ impl RoleExecutor {
             #[cfg(test)]
             identity_sources: Mutex::new(VecDeque::new()),
             #[cfg(test)]
-            successful_test_authentications: AtomicUsize::new(0),
+            successful_test_authentications: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn new_with_test_identities(
+    pub(crate) fn new_with_test_identity_counter(
         role: SidecarRole,
         count: usize,
+        successful_test_authentications: Arc<AtomicUsize>,
     ) -> Result<Self, BridgeError> {
         let broker_role = match role {
             SidecarRole::Donor => BrokerRole::Donor,
@@ -94,13 +95,8 @@ impl RoleExecutor {
             role,
             shared: Shared::new(),
             identity_sources: Mutex::new(sources),
-            successful_test_authentications: AtomicUsize::new(0),
+            successful_test_authentications,
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn successful_test_authentications(&self) -> usize {
-        self.successful_test_authentications.load(Ordering::Acquire)
     }
 
     /// Returns the fixed topology role.

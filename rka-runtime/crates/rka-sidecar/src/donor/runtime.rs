@@ -1,10 +1,10 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use rka_state::{CertifiedLeaseMetadata, PairedActivationRecord, RkpLeaseBatch, StateStore};
 
 use super::{
     BridgeDonorBroker, CandidateShard, DonorBroker, DonorError, DonorSupervisor, PairedPolicy,
-    shard::DurableShardState, state::TranscriptJournal,
+    quota::DonorQuota, shard::DurableShardState, state::TranscriptJournal,
 };
 use crate::{
     candidate::{
@@ -121,6 +121,11 @@ impl DonorSupervisor<BridgeDonorBroker> {
         !self.shards.is_empty()
     }
 
+    /// Returns the candidate whose durable shard was selected at startup.
+    pub(crate) const fn local_candidate(&self) -> Option<&AuthenticatedCandidateContext> {
+        self.local_candidate.as_ref()
+    }
+
     pub(crate) fn dispatch_frame(&mut self, encoded: &[u8]) -> Result<Vec<u8>, DonorError> {
         let context = self.local_candidate.ok_or(DonorError::Unpaired)?;
         self.dispatch(&context, encoded)
@@ -154,10 +159,15 @@ impl DonorSupervisor<BridgeDonorBroker> {
         ) else {
             return Self::inactive(location.state_root, socket);
         };
-        let Ok(shard) = load_at(location.candidate_root, store, &context) else {
+        let mut runtime = Self::with_broker(catalog, BridgeDonorBroker::new(socket));
+        let Ok(shard) = load_at(
+            location.candidate_root,
+            store,
+            &context,
+            Arc::clone(&runtime.quota),
+        ) else {
             return Self::inactive(location.state_root, socket);
         };
-        let mut runtime = Self::with_broker(catalog, BridgeDonorBroker::new(socket));
         runtime.shards.insert(*context.candidate(), shard);
         runtime.state_root = Some(location.state_root.to_path_buf());
         runtime.local_candidate = Some(context);
@@ -177,16 +187,15 @@ impl<B: DonorBroker> DonorSupervisor<B> {
         let (shards, broker) = (&mut self.shards, &mut self.broker);
         if let Some(shard) = shards.get_mut(candidate) {
             broker.bind_candidate(candidate);
-            shard.service.invalidate_all(broker);
+            shard.service.invalidate_after_candidate_death(broker);
         }
     }
 
     /// Invalidates every shard after donor broker death.
     pub fn broker_died(&mut self) {
-        let (shards, broker) = (&mut self.shards, &mut self.broker);
-        for (candidate, shard) in shards {
-            broker.bind_candidate(candidate);
-            shard.service.invalidate_all(broker);
+        self.broker.broker_died();
+        for shard in self.shards.values_mut() {
+            shard.service.invalidate_after_broker_death();
         }
     }
 }
@@ -194,16 +203,18 @@ impl<B: DonorBroker> DonorSupervisor<B> {
 pub(super) fn load_candidate(
     state_root: &Path,
     context: &AuthenticatedCandidateContext,
+    quota: Arc<DonorQuota>,
 ) -> Result<CandidateShard, DonorError> {
     let layout = CandidateLayout::new(state_root, context.candidate());
     let store = FileStateStore::new(layout.root());
-    load_at(layout.root(), &store, context)
+    load_at(layout.root(), &store, context, quota)
 }
 
 fn load_at(
     candidate_root: &Path,
     store: &dyn StateStore,
     context: &AuthenticatedCandidateContext,
+    quota: Arc<DonorQuota>,
 ) -> Result<CandidateShard, DonorError> {
     let pair = PairedActivationRecord::load(store).map_err(|_| DonorError::Storage)?;
     if pair.peer_spki_hash != *context.peer_spki_hash()
@@ -247,6 +258,7 @@ fn load_at(
             },
             replay_root: candidate_root.to_path_buf(),
             transcript,
+            quota,
         },
     )
 }

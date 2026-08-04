@@ -133,7 +133,7 @@ fn malformed_uds_frame_reaches_runtime_rejection() -> Result<(), Box<dyn std::er
 fn unique_system_root() -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     PathBuf::from("/tmp").join(format!(
-        "rka-donor-ingress-{}-{}",
+        "rka-donor-ingress-system-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ))

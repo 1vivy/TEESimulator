@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 #[allow(
     clippy::redundant_pub_crate,
@@ -13,7 +13,7 @@ use rka_protocol::{
 use rka_state::PairedActivationRecord;
 
 use super::{
-    BridgeDonorBroker, CandidateShard, DonorError, DonorRuntime, PairedPolicy,
+    BridgeDonorBroker, CandidateShard, DonorError, DonorRuntime, PairedPolicy, quota::DonorQuota,
     runtime::RuntimeTrust, shard::DurableShardState, state::TranscriptJournal,
 };
 use crate::candidate::{PairingAdmission, PairingCatalog};
@@ -59,6 +59,7 @@ fn rejected_request_never_reserves_the_durable_transcript() {
             pair.profile_epoch,
         )
         .unwrap();
+    let quota = DonorQuota::shared();
     let shard = CandidateShard::durable(
         &context,
         policy,
@@ -69,6 +70,7 @@ fn rejected_request_never_reserves_the_durable_transcript() {
             },
             replay_root: root.clone(),
             transcript: TranscriptJournal::open(&root, prior).unwrap(),
+            quota: Arc::clone(&quota),
         },
     )
     .unwrap();
@@ -79,6 +81,7 @@ fn rejected_request_never_reserves_the_durable_transcript() {
         remote_keys: super::collision::RemoteKeyRegistry::default(),
         state_root: Some(root.clone()),
         local_candidate: Some(context),
+        quota,
     };
     let mut frame = Frame::new(
         FrameContext::new(

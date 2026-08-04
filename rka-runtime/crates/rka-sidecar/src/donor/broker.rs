@@ -85,4 +85,14 @@ pub trait DonorBroker {
     fn abort(&mut self, operation: RemoteOperationHandle) -> Result<(), BrokerFailure>;
     fn delete(&mut self, key: RemoteKeyHandle) -> Result<(), BrokerFailure>;
     fn get(&mut self, key: RemoteKeyHandle) -> Result<PublicKeyResult, BrokerFailure>;
+
+    fn enqueue_abort(&mut self, operation: RemoteOperationHandle) -> Result<(), BrokerFailure> {
+        self.abort(operation)
+    }
+
+    fn enqueue_delete(&mut self, key: RemoteKeyHandle) -> Result<(), BrokerFailure> {
+        self.delete(key)
+    }
+
+    fn broker_died(&mut self) {}
 }

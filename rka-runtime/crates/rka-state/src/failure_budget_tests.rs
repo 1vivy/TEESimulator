@@ -1,4 +1,12 @@
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
+    time::Duration,
+};
 
 use super::{FailureBudget, FailureBudgetError, MAX_PEERS};
 use crate::{StateError, StateStore};
@@ -37,6 +45,44 @@ fn exhausting_one_candidate_budget_does_not_rate_limit_another()
     Ok(())
 }
 
+#[test]
+fn slow_persistence_for_one_namespace_does_not_block_another_namespace()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let store = Arc::new(BlockingReplaceStore {
+        calls: AtomicUsize::new(0),
+        entered: entered_tx,
+        release: Mutex::new(release_rx),
+    });
+    let store_a = Arc::clone(&store);
+    let candidate_a =
+        std::thread::spawn(move || FailureBudget::load(&*store_a, [0x0a; 32], 1).is_ok());
+    entered_rx.recv()?;
+    let store_b = Arc::clone(&store);
+    let (candidate_b_tx, candidate_b_rx) = mpsc::channel();
+
+    // When
+    let candidate_b = std::thread::spawn(move || {
+        candidate_b_tx.send(FailureBudget::load(&*store_b, [0x0b; 32], 1).is_ok())
+    });
+    let candidate_b_completed = candidate_b_rx.recv_timeout(Duration::from_secs(1))?;
+
+    // Then
+    assert!(candidate_b_completed);
+    release_tx.send(())?;
+    assert!(
+        candidate_a
+            .join()
+            .map_err(|_| "candidate A failure-budget thread failed")?
+    );
+    candidate_b
+        .join()
+        .map_err(|_| "candidate B failure-budget thread failed")??;
+    Ok(())
+}
+
 fn namespace(value: usize) -> Result<[u8; 32], StateError> {
     let byte = u8::try_from(value).map_err(|_| StateError::Capacity)?;
     Ok([byte; 32])
@@ -62,6 +108,30 @@ impl StateStore for MemoryStore {
             .lock()
             .map_err(|_| StateError::Storage)?
             .insert(key.to_vec(), value.to_vec());
+        Ok(())
+    }
+}
+
+struct BlockingReplaceStore {
+    calls: AtomicUsize,
+    entered: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl StateStore for BlockingReplaceStore {
+    fn read(&self, _key: &[u8], _output: &mut [u8]) -> Result<usize, StateError> {
+        Err(StateError::Missing)
+    }
+
+    fn replace(&self, _key: &[u8], _value: &[u8]) -> Result<(), StateError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.entered.send(()).map_err(|_| StateError::Storage)?;
+            self.release
+                .lock()
+                .map_err(|_| StateError::Storage)?
+                .recv()
+                .map_err(|_| StateError::Storage)?;
+        }
         Ok(())
     }
 }

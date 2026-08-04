@@ -1,10 +1,10 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::candidate::{AuthenticatedCandidateContext, CandidateId, PairingCatalog};
 
 use super::{
     DonorBroker, DonorError, DonorRkaService, PairedPolicy, collision::RemoteKeyRegistry,
-    runtime::RuntimeTrust, state::TranscriptJournal,
+    quota::DonorQuota, runtime::RuntimeTrust, state::TranscriptJournal,
 };
 
 /// All donor state owned by one authenticated candidate.
@@ -22,6 +22,7 @@ pub(super) struct DurableShardState {
     pub(super) trust: RuntimeTrust,
     pub(super) replay_root: PathBuf,
     pub(super) transcript: TranscriptJournal,
+    pub(super) quota: Arc<DonorQuota>,
 }
 
 impl CandidateShard {
@@ -40,11 +41,12 @@ impl CandidateShard {
     pub(super) fn in_memory(
         context: &AuthenticatedCandidateContext,
         pair: PairedPolicy,
+        quota: Arc<DonorQuota>,
     ) -> Result<Self, DonorError> {
         validate_pair(context, pair)?;
         Ok(Self {
             id: *context.candidate(),
-            service: DonorRkaService::new(pair),
+            service: DonorRkaService::with_quota(pair, quota),
             transcript: None,
             replay_root: None,
             pair,
@@ -60,7 +62,7 @@ impl CandidateShard {
         validate_pair(context, pair)?;
         Ok(Self {
             id: *context.candidate(),
-            service: DonorRkaService::new_durable(pair, &state.replay_root),
+            service: DonorRkaService::new_durable_with_quota(pair, &state.replay_root, state.quota),
             transcript: Some(state.transcript),
             replay_root: Some(state.replay_root),
             pair,
@@ -85,12 +87,14 @@ pub struct DonorSupervisor<B: DonorBroker> {
     pub(super) remote_keys: RemoteKeyRegistry,
     pub(super) state_root: Option<PathBuf>,
     pub(super) local_candidate: Option<AuthenticatedCandidateContext>,
+    pub(super) quota: Arc<DonorQuota>,
 }
 
 impl<B: DonorBroker> DonorSupervisor<B> {
     /// Creates a supervisor over an already trusted pairing catalog.
     #[must_use]
     pub fn with_broker(catalog: PairingCatalog, broker: B) -> Self {
+        let quota = DonorQuota::shared();
         Self {
             shards: HashMap::new(),
             broker,
@@ -98,6 +102,7 @@ impl<B: DonorBroker> DonorSupervisor<B> {
             remote_keys: RemoteKeyRegistry::default(),
             state_root: None,
             local_candidate: None,
+            quota,
         }
     }
 
@@ -111,7 +116,7 @@ impl<B: DonorBroker> DonorSupervisor<B> {
         if self.shards.contains_key(context.candidate()) {
             return Err(DonorError::Replay);
         }
-        let shard = CandidateShard::in_memory(context, pair)?;
+        let shard = CandidateShard::in_memory(context, pair, Arc::clone(&self.quota))?;
         self.shards.insert(*context.candidate(), shard);
         Ok(())
     }
@@ -139,7 +144,7 @@ impl<B: DonorBroker> DonorSupervisor<B> {
         self.authenticate(context)?;
         if !self.shards.contains_key(context.candidate()) {
             let root = self.state_root.as_deref().ok_or(DonorError::Unpaired)?;
-            let shard = super::runtime::load_candidate(root, context)?;
+            let shard = super::runtime::load_candidate(root, context, Arc::clone(&self.quota))?;
             self.shards.insert(*context.candidate(), shard);
         }
         Ok(())

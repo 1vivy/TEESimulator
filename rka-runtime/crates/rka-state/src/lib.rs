@@ -3,6 +3,7 @@
 use thiserror::Error;
 
 mod failure_budget;
+pub(crate) mod failure_budget_codec;
 mod quarantine;
 mod replay;
 #[doc(hidden)]

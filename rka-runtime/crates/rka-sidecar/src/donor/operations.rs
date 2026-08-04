@@ -27,9 +27,9 @@ impl DonorRkaService {
         if record.operations == MAX_OPERATIONS {
             return Err(DonorError::Capacity);
         }
-        let Ok(operation) = broker.begin(BrokerBegin {
-            key_handle: record.remote,
-        }) else {
+        let operation_quota = self.quota.acquire_live_operation()?;
+        let remote = self.active_mut(request.alias)?.remote;
+        let Ok(operation) = broker.begin(BrokerBegin { key_handle: remote }) else {
             self.invalidate(request.alias, broker);
             return Err(DonorError::Broker);
         };
@@ -56,6 +56,7 @@ impl DonorRkaService {
         let record = self.active_mut(request.alias)?;
         record.operations = record.operations.saturating_add(1);
         record.live = Some(operation);
+        record.live_quota = Some(operation_quota);
         record.updates = 0;
         record.total_input = 0;
         Ok(BeginResult {
@@ -101,6 +102,7 @@ impl DonorRkaService {
         };
         let record = self.active_mut(request.0.alias)?;
         record.live = None;
+        drop(record.live_quota.take());
         record.successful_finishes = record.successful_finishes.saturating_add(1);
         Ok(FinishResult {
             signature,
@@ -119,6 +121,7 @@ impl DonorRkaService {
             return Err(DonorError::Broker);
         }
         self.active_mut(request.alias)?.live = None;
+        drop(self.active_mut(request.alias)?.live_quota.take());
         Ok(())
     }
 
@@ -136,6 +139,7 @@ impl DonorRkaService {
                 return Err(DonorError::Broker);
             }
             self.active_mut(request.alias)?.live = None;
+            drop(self.active_mut(request.alias)?.live_quota.take());
         }
         let remote = self.active_mut(request.alias)?.remote;
         if broker.delete(remote).is_err() {
@@ -146,12 +150,5 @@ impl DonorRkaService {
         record.broker_deleted = true;
         record.state = DonorKeyState::Deleted;
         Ok(record.state)
-    }
-
-    pub(super) fn invalidate_all(&mut self, broker: &mut impl DonorBroker) {
-        let aliases = self.aliases();
-        for alias in aliases {
-            self.invalidate(alias, broker);
-        }
     }
 }

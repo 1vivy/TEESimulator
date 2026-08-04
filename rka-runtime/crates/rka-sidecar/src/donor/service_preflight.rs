@@ -4,7 +4,8 @@ use super::{
     BeginRequest, DeleteRequest, DonorError, DonorKeyState, DonorRkaService, GenerateRequest,
     OperationRequest,
     operations::{MAX_OPERATIONS, MAX_SUCCESSFUL_FINISHES},
-    service::{MAX_CHUNK, MAX_KEYS, MAX_TOTAL_INPUT, MAX_UPDATES},
+    quota::{MAX_LIVE_OPERATIONS_PER_CANDIDATE, MAX_REMOTE_KEYS_PER_CANDIDATE},
+    service::{MAX_CHUNK, MAX_TOTAL_INPUT, MAX_UPDATES},
     validation::{authorize, validate_generate},
 };
 
@@ -13,7 +14,8 @@ impl DonorRkaService {
         &self,
         request: &GenerateRequest<'_>,
     ) -> Result<(), DonorError> {
-        if self.keys.len() >= MAX_KEYS {
+        if self.keys.len() >= MAX_REMOTE_KEYS_PER_CANDIDATE || !self.quota.has_remote_key_capacity()
+        {
             return Err(DonorError::Capacity);
         }
         if self.request_ids.contains(&request.request_id) {
@@ -37,6 +39,17 @@ impl DonorRkaService {
         }
         if record.live.is_some() {
             return Err(DonorError::ConcurrentOperation);
+        }
+        if MAX_LIVE_OPERATIONS_PER_CANDIDATE == 1
+            && self
+                .keys
+                .values()
+                .any(|candidate_key| candidate_key.live.is_some())
+        {
+            return Err(DonorError::ConcurrentOperation);
+        }
+        if !self.quota.has_live_operation_capacity() {
+            return Err(DonorError::Capacity);
         }
         if record.operations == MAX_OPERATIONS {
             return Err(DonorError::Capacity);

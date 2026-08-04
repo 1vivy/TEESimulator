@@ -1,10 +1,16 @@
 use core::fmt;
-use std::sync::{Mutex, MutexGuard};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock, Mutex, MutexGuard, Weak},
+};
 
-use rka_protocol::{CborWriter, validate_deterministic_cbor};
 use thiserror::Error;
 
-use crate::{MAX_STATE_BYTES, StateError, StateStore, replay_codec::Decoder, validate_record};
+use crate::{
+    MAX_STATE_BYTES, StateError, StateStore,
+    failure_budget_codec::{FailureState, PeerFailures, decode, encode},
+    validate_record,
+};
 
 const RECORD_KEY: &[u8] = b"rka-peer-failures-v1";
 const MAX_PEERS: usize = 32;
@@ -13,7 +19,10 @@ pub const FAILURE_THRESHOLD: usize = 8;
 /// Sliding window derived from the frozen Task 10 120-second session TTL.
 pub const FAILURE_WINDOW_SECONDS: u64 = 120;
 
-static FAILURE_LOCK: Mutex<()> = Mutex::new(());
+type NamespaceLocks = HashMap<[u8; 32], Weak<Mutex<()>>>;
+
+static NAMESPACE_LOCKS: LazyLock<Mutex<NamespaceLocks>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Typed source for one candidate's persistent failure-budget namespace.
 pub trait FailureBudgetNamespace {
@@ -31,6 +40,7 @@ impl FailureBudgetNamespace for [u8; 32] {
 pub struct FailureBudget<'a, S: StateStore> {
     store: &'a S,
     namespace: [u8; 32],
+    namespace_lock: Arc<Mutex<()>>,
 }
 
 impl<S: StateStore> fmt::Debug for FailureBudget<'_, S> {
@@ -50,19 +60,23 @@ impl<'a, S: StateStore> FailureBudget<'a, S> {
         candidate: impl FailureBudgetNamespace,
         now: u64,
     ) -> Result<Self, FailureBudgetError> {
-        let _guard = lock();
+        let namespace = candidate.failure_budget_namespace();
         let budget = Self {
             store,
-            namespace: candidate.failure_budget_namespace(),
+            namespace,
+            namespace_lock: namespace_lock(namespace),
         };
-        let state = budget.read_at(now)?;
-        budget.flush(&state)?;
+        {
+            let _guard = budget.lock_namespace();
+            let state = budget.read_at(now)?;
+            budget.flush(&state)?;
+        }
         Ok(budget)
     }
 
     /// Checks the same authoritative state while excluding concurrent failures.
-    pub fn admit(&self, now: u64) -> Result<FailureAdmission, FailureBudgetError> {
-        let guard = lock();
+    pub fn admit(&self, now: u64) -> Result<FailureAdmission<'_>, FailureBudgetError> {
+        let guard = self.lock_namespace();
         let state = self.read_at(now)?;
         self.flush(&state)?;
         if self.failure_count(&state) >= FAILURE_THRESHOLD {
@@ -73,7 +87,7 @@ impl<'a, S: StateStore> FailureBudget<'a, S> {
 
     /// Persists one failure before returning success to its caller.
     pub fn record(&self, now: u64) -> Result<(), FailureBudgetError> {
-        let _guard = lock();
+        let _guard = self.lock_namespace();
         let mut state = self.read_at(now)?;
         let index = match state
             .peers
@@ -144,14 +158,21 @@ impl<'a, S: StateStore> FailureBudget<'a, S> {
         self.store.replace(RECORD_KEY, &bytes)?;
         Ok(())
     }
+
+    fn lock_namespace(&self) -> MutexGuard<'_, ()> {
+        match self.namespace_lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
 }
 
 /// Guard proving the budget remained below threshold until permit creation.
-pub struct FailureAdmission {
-    _guard: MutexGuard<'static, ()>,
+pub struct FailureAdmission<'a> {
+    _guard: MutexGuard<'a, ()>,
 }
 
-impl fmt::Debug for FailureAdmission {
+impl fmt::Debug for FailureAdmission<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("FailureAdmission([redacted budget guard])")
     }
@@ -169,105 +190,18 @@ pub enum FailureBudgetError {
     State(#[from] StateError),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct PeerFailures {
-    namespace: [u8; 32],
-    timestamps: Vec<u64>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct FailureState {
-    observed_at: u64,
-    peers: Vec<PeerFailures>,
-}
-
-fn encode(state: &FailureState) -> Vec<u8> {
-    let timestamp_count = state
-        .peers
-        .iter()
-        .map(|peer| peer.timestamps.len())
-        .sum::<usize>();
-    let mut writer = CborWriter::with_capacity(
-        16_usize
-            .saturating_add(state.peers.len().saturating_mul(40))
-            .saturating_add(timestamp_count.saturating_mul(9)),
-    );
-    writer.array(2);
-    writer.unsigned(state.observed_at);
-    writer.array(state.peers.len());
-    for peer in &state.peers {
-        writer.array(2);
-        writer.bytes(&peer.namespace);
-        writer.array(peer.timestamps.len());
-        for timestamp in &peer.timestamps {
-            writer.unsigned(*timestamp);
-        }
-    }
-    writer.finish()
-}
-
-fn decode(
-    bytes: &[u8],
-    maximum_peers: usize,
-    maximum_timestamps: usize,
-) -> Result<FailureState, StateError> {
-    validate_deterministic_cbor(bytes).map_err(|_| StateError::Corrupt)?;
-    let mut decoder = Decoder::new(bytes);
-    if decoder.array()? != 2 {
-        return Err(StateError::Corrupt);
-    }
-    let observed_at = decoder.unsigned()?;
-    let count = decoder.array()?;
-    if count > maximum_peers {
-        return Err(StateError::Corrupt);
-    }
-    let mut peers = Vec::with_capacity(count);
-    for _ in 0..count {
-        if decoder.array()? != 2 {
-            return Err(StateError::Corrupt);
-        }
-        let namespace = decoder
-            .bytes()?
-            .try_into()
-            .map_err(|_| StateError::Corrupt)?;
-        let timestamp_count = decoder.array()?;
-        if timestamp_count == 0 || timestamp_count > maximum_timestamps {
-            return Err(StateError::Corrupt);
-        }
-        let mut timestamps = Vec::with_capacity(timestamp_count);
-        for _ in 0..timestamp_count {
-            let timestamp = decoder.unsigned()?;
-            if timestamp > observed_at
-                || timestamps
-                    .last()
-                    .is_some_and(|previous| timestamp < *previous)
-            {
-                return Err(StateError::Corrupt);
-            }
-            timestamps.push(timestamp);
-        }
-        if peers
-            .last()
-            .is_some_and(|previous: &PeerFailures| previous.namespace >= namespace)
-        {
-            return Err(StateError::Corrupt);
-        }
-        peers.push(PeerFailures {
-            namespace,
-            timestamps,
-        });
-    }
-    if !decoder.complete() {
-        return Err(StateError::Corrupt);
-    }
-    Ok(FailureState { observed_at, peers })
-}
-
-fn lock() -> MutexGuard<'static, ()> {
-    match FAILURE_LOCK.lock() {
-        Ok(guard) => guard,
+fn namespace_lock(namespace: [u8; 32]) -> Arc<Mutex<()>> {
+    let mut locks = match NAMESPACE_LOCKS.lock() {
+        Ok(locks) => locks,
         Err(poisoned) => poisoned.into_inner(),
+    };
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&namespace).and_then(Weak::upgrade) {
+        return lock;
     }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(namespace, Arc::downgrade(&lock));
+    lock
 }
 
 #[cfg(test)]

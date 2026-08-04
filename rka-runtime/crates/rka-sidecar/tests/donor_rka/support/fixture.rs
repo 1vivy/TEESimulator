@@ -9,7 +9,7 @@ use rka_sidecar::donor::{
 
 use super::encoding::{
     AAID, ALIAS, CANDIDATE_NONCE, CSR, DONOR_NONCE, IRPC, PEER, PEER_B, PROFILE, PROFILE_B,
-    PROFILE_EPOCH, SESSION, envelope, identity, identity_b, request_id,
+    PROFILE_EPOCH, SESSION, envelope, identity, identity_b, identity_for, request_id,
 };
 
 #[derive(Debug)]
@@ -30,6 +30,15 @@ impl Fixture {
 
     pub fn candidate_b() -> Self {
         Self::for_candidate(PEER_B, PROFILE_B, identity_b())
+    }
+
+    pub fn candidate(index: u8) -> Self {
+        let package = format!("com.example.candidate-{index}");
+        Self::for_candidate(
+            [PEER[0] + index; 32],
+            [PROFILE[0] + index; 32],
+            identity_for(&package),
+        )
     }
 
     fn for_candidate(
@@ -100,6 +109,10 @@ impl Fixture {
         let mut context = self.context();
         context.candidate_nonce = [0x34; 32];
         BeginRequest::new(request_id(request), context, [0xa2; 16])
+    }
+
+    pub fn begin_with_alias(&self, request: u8, alias: [u8; 16]) -> BeginRequest {
+        BeginRequest::new(request_id(request), self.context(), alias)
     }
 
     pub fn begin_with_identity(&self, request: u8, identity_hash: [u8; 32]) -> BeginRequest {

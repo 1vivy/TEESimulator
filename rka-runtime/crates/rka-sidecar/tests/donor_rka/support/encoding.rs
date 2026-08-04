@@ -34,7 +34,7 @@ pub fn identity_b() -> (Vec<u8>, [u8; 32]) {
     identity_for(IDENTITY_B)
 }
 
-fn identity_for(package_name: &str) -> (Vec<u8>, [u8; 32]) {
+pub(super) fn identity_for(package_name: &str) -> (Vec<u8>, [u8; 32]) {
     let mut unsigned = CborWriter::with_capacity(256);
     encode_identity_prefix(&mut unsigned, 5, package_name);
     unsigned.unsigned(5);

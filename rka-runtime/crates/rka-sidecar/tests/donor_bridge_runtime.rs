@@ -1,12 +1,124 @@
 #![allow(missing_docs, reason = "integration tests are behavior-named")]
 
+#[path = "donor_bridge_runtime/scheduler_support.rs"]
+mod scheduler_support;
+
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+    mpsc,
+};
+
 use rka_sidecar::bridge::{
     BridgeMessage, CandidateBridgeOperation, ExchangeRole, Hash32, PublicBytes, RequestId,
     decode_frame, encode_frame,
 };
 use rka_sidecar::candidate::{PairingAdmission, PairingCatalog};
-use rka_sidecar::donor::{DeleteRequest, DonorError, DonorRuntime};
+use rka_sidecar::donor::{DeleteRequest, DonorError, DonorRuntime, TeeCommand, TeeScheduler};
 use rka_state::{PairedActivationRecord, StateError, StateStore};
+use scheduler_support::CountingTee;
+
+#[test]
+fn the_scheduler_round_robins_across_candidates_and_runs_exactly_one_tee_command_at_a_time()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let mut catalog = PairingCatalog::empty();
+    catalog.admit(PairingAdmission::new(([1; 32], [0x41; 32], 9), [0x51; 32]))?;
+    catalog.admit(PairingAdmission::new(([2; 32], [0x42; 32], 9), [0x52; 32]))?;
+    let candidate_a = *catalog.lookup([1; 32], [0x41; 32], 9)?.candidate();
+    let candidate_b = *catalog.lookup([2; 32], [0x42; 32], 9)?.candidate();
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let active = Arc::new(AtomicUsize::new(0));
+    let maximum = Arc::new(AtomicUsize::new(0));
+    let entry_depths = Arc::new(Mutex::new(Vec::new()));
+    let (first_started_tx, first_started_rx) = mpsc::channel();
+    let (first_release_tx, first_release_rx) = mpsc::channel();
+    let scheduler = TeeScheduler::spawn(CountingTee {
+        order: Arc::clone(&order),
+        active: Arc::clone(&active),
+        maximum: Arc::clone(&maximum),
+        first_started: first_started_tx,
+        first_release: first_release_rx,
+        entry_depths,
+    })?;
+
+    // When
+    let a1 = scheduler.submit(TeeCommand::new(candidate_a, 1, b"a1".to_vec()))?;
+    first_started_rx.recv()?;
+    let a2 = scheduler.submit(TeeCommand::new(candidate_a, 2, b"a2".to_vec()))?;
+    let a3 = scheduler.submit(TeeCommand::new(candidate_a, 3, b"a3".to_vec()))?;
+    let b1 = scheduler.submit(TeeCommand::new(candidate_b, 1, b"b1".to_vec()))?;
+    first_release_tx.send(())?;
+    let replies = [a1.wait()?, a2.wait()?, a3.wait()?, b1.wait()?];
+
+    // Then
+    assert_eq!(
+        *order.lock().map_err(|_| "order lock poisoned")?,
+        vec![
+            (candidate_a, 1),
+            (candidate_a, 2),
+            (candidate_b, 1),
+            (candidate_a, 3)
+        ]
+    );
+    assert_eq!(maximum.load(Ordering::SeqCst), 1);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        replies.map(|reply| (*reply.candidate(), reply.internal_request_id())),
+        [
+            (candidate_a, 1),
+            (candidate_a, 2),
+            (candidate_a, 3),
+            (candidate_b, 1),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn no_shard_or_global_lock_is_held_across_a_broker_exchange()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let mut catalog = PairingCatalog::empty();
+    catalog.admit(PairingAdmission::new(([3; 32], [0x43; 32], 9), [0x53; 32]))?;
+    let candidate = *catalog.lookup([3; 32], [0x43; 32], 9)?.candidate();
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let active = Arc::new(AtomicUsize::new(0));
+    let maximum = Arc::new(AtomicUsize::new(0));
+    let entry_depths = Arc::new(Mutex::new(Vec::new()));
+    let (first_started_tx, first_started_rx) = mpsc::channel();
+    let (first_release_tx, first_release_rx) = mpsc::channel();
+    let scheduler = TeeScheduler::spawn(CountingTee {
+        order,
+        active,
+        maximum,
+        first_started: first_started_tx,
+        first_release: first_release_rx,
+        entry_depths: Arc::clone(&entry_depths),
+    })?;
+    let in_flight = scheduler.submit(TeeCommand::new(candidate, 1, b"a1".to_vec()))?;
+    first_started_rx.recv()?;
+    let (peer_death_tx, peer_death_rx) = mpsc::channel();
+
+    // When
+    let peer_death = std::thread::spawn(move || {
+        let result = scheduler.peer_died();
+        peer_death_tx.send(result)
+    });
+    peer_death_rx.recv_timeout(std::time::Duration::from_secs(1))??;
+
+    // Then
+    assert_eq!(
+        *entry_depths.lock().map_err(|_| "depth lock poisoned")?,
+        vec![0]
+    );
+    first_release_tx.send(())?;
+    in_flight.wait()?;
+    peer_death
+        .join()
+        .map_err(|_| "peer-death thread failed")??;
+    Ok(())
+}
 
 #[test]
 fn donor_bridge_candidate_command_matches_authenticated_jvm_wire_golden()

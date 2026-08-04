@@ -11,6 +11,98 @@ use rka_sidecar::{
 };
 
 #[test]
+fn per_candidate_and_donor_wide_quotas_are_enforced_independently()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let fixtures = (0..5).map(Fixture::candidate).collect::<Vec<_>>();
+    let mut catalog = PairingCatalog::empty();
+    for fixture in &fixtures {
+        catalog.admit(fixture.admission())?;
+    }
+    let contexts = fixtures
+        .iter()
+        .map(|fixture| fixture.authenticated(&catalog))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut donor = DonorSupervisor::with_broker(catalog, FakeBroker::default());
+    for (fixture, context) in fixtures.iter().zip(&contexts) {
+        donor.activate_candidate(context, fixture.policy())?;
+    }
+
+    // When
+    for (fixture, context) in fixtures.iter().zip(&contexts).take(4) {
+        for key in 0..4_u8 {
+            donor.generate(
+                context,
+                fixture.generate_with_alias(key + 1, [0xa1 + key; 16]),
+            )?;
+        }
+    }
+    let first_fixture = fixtures.first().ok_or("missing first fixture")?;
+    let first_context = contexts.first().ok_or("missing first context")?;
+    let seventeenth = donor.generate(
+        first_context,
+        first_fixture.generate_with_alias(5, [0xa5; 16]),
+    );
+
+    // Then
+    assert_eq!(donor.broker().generated_requests, 16);
+    assert_eq!(seventeenth, Err(DonorError::Capacity));
+
+    // When
+    let sessions = contexts
+        .iter()
+        .take(4)
+        .map(|context| donor.open_session(context))
+        .collect::<Result<Vec<_>, _>>()?;
+    let fifth_session = donor.open_session(contexts.get(4).ok_or("missing fifth context")?);
+
+    // Then
+    assert_eq!(sessions.len(), 4);
+    assert!(matches!(fifth_session, Err(DonorError::Capacity)));
+
+    // Given
+    let mut operation_catalog = PairingCatalog::empty();
+    for fixture in &fixtures {
+        operation_catalog.admit(fixture.admission())?;
+    }
+    let operation_contexts = fixtures
+        .iter()
+        .map(|fixture| fixture.authenticated(&operation_catalog))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut operation_donor =
+        DonorSupervisor::with_broker(operation_catalog, FakeBroker::default());
+    for (fixture, context) in fixtures.iter().zip(&operation_contexts) {
+        operation_donor.activate_candidate(context, fixture.policy())?;
+        operation_donor.generate(context, fixture.generate(1))?;
+        operation_donor.generate(context, fixture.generate_with_alias(2, [0xa2; 16]))?;
+    }
+
+    // When
+    let mut operations = Vec::new();
+    for (fixture, context) in fixtures.iter().zip(&operation_contexts).take(4) {
+        operations.push(operation_donor.begin(context, fixture.begin(3))?);
+    }
+    let second_for_candidate = operation_donor.begin(
+        operation_contexts
+            .first()
+            .ok_or("missing first operation context")?,
+        first_fixture.begin_with_alias(4, [0xa2; 16]),
+    );
+    let fifth_operation = operation_donor.begin(
+        operation_contexts
+            .get(4)
+            .ok_or("missing fifth operation context")?,
+        fixtures.get(4).ok_or("missing fifth fixture")?.begin(3),
+    );
+
+    // Then
+    assert_eq!(operations.len(), 4);
+    assert_eq!(second_for_candidate, Err(DonorError::ConcurrentOperation));
+    assert_eq!(fifth_operation, Err(DonorError::Capacity));
+    Ok(())
+}
+
+#[test]
 fn candidate_b_policy_shares_no_identity_material_with_candidate_a() {
     // Given
     let candidate_a = Fixture::new();

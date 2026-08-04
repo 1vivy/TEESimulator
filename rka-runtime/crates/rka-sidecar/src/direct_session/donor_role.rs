@@ -6,9 +6,10 @@ use crate::{
         BridgeError, ExchangeRole, decode_frame as decode_bridge_frame,
         encode_frame as encode_bridge_frame,
     },
+    candidate::AuthenticatedCandidateContext,
     direct_bridge::DirectBridgeAdapter,
     direct_profile::{DialMode, DirectProfile},
-    donor::DonorRuntime,
+    donor::{DonorRuntime, actor::CandidateActor},
 };
 
 use super::{
@@ -22,20 +23,56 @@ pub(super) enum DonorIteration {
 }
 
 #[doc(hidden)]
-pub fn run_donor(runtime: &mut DonorRuntime) -> Result<(), DirectSessionError> {
+pub fn run_donor(mut runtime: DonorRuntime) -> Result<(), DirectSessionError> {
     let (state, profile, _) =
         crate::direct_profile::load(LifecycleRole::Donor).map_err(|_| DirectSessionError::State)?;
     if profile.dial_mode != DialMode::DonorDials {
         return Err(DirectSessionError::State);
     }
+    let candidate = *runtime
+        .local_candidate()
+        .ok_or(DirectSessionError::State)?
+        .candidate();
+    let actor = CandidateActor::spawn(candidate, move |(authenticated, request): ActorFrame| {
+        runtime.dispatch(&authenticated, &request)
+    })
+    .map_err(|_| DirectSessionError::State)?;
     loop {
-        match run_donor_once(
-            (runtime, &state, &profile),
+        match run_donor_actor_once(
+            (&actor, &state, &profile),
             SocketAddrV4::new(profile.endpoint, PORT),
         )? {
             DonorIteration::Served => {}
             DonorIteration::Retry => std::thread::sleep(Duration::from_secs(1)),
         }
+    }
+}
+
+type ActorFrame = (AuthenticatedCandidateContext, Vec<u8>);
+
+fn run_donor_actor_once(
+    context: (&CandidateActor<ActorFrame>, &Path, &DirectProfile),
+    remote: SocketAddrV4,
+) -> Result<DonorIteration, DirectSessionError> {
+    let (actor, state, profile) = context;
+    let donor = donor_client(state, profile)?;
+    let Ok(socket) = connect_bound(profile.listen_interface, remote, BUDGET) else {
+        return Ok(DonorIteration::Retry);
+    };
+    let dispatched = Cell::new(false);
+    let result = donor.serve_once(socket, |authenticated, request| {
+        dispatched.set(true);
+        actor
+            .dispatch(
+                authenticated.candidate(),
+                (*authenticated, request.to_vec()),
+            )
+            .map_err(|_| rka_transport::TlsError::Admission)
+    });
+    match (result, dispatched.get()) {
+        (Ok(()), _) => Ok(DonorIteration::Served),
+        (Err(_), true) => Err(DirectSessionError::Ambiguous),
+        (Err(_), false) => Ok(DonorIteration::Retry),
     }
 }
 
@@ -95,6 +132,7 @@ pub fn run_donor_bridge() -> Result<(), DirectSessionError> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn run_donor_once(
     context: (&mut DonorRuntime, &Path, &DirectProfile),
     remote: SocketAddrV4,

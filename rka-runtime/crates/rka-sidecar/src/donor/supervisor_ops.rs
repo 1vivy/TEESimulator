@@ -3,10 +3,19 @@ use crate::candidate::AuthenticatedCandidateContext;
 use super::{
     BeginRequest, BeginResult, DeleteRequest, DonorBroker, DonorError, DonorKeyState,
     DonorSupervisor, FinishRequest, FinishResult, GenerateRequest, GenerateResult,
-    OperationRequest, PublicKeyResult, shard::shard_mut,
+    OperationRequest, PublicKeyResult, SessionPermit, shard::shard_mut,
 };
 
 impl<B: DonorBroker> DonorSupervisor<B> {
+    /// Acquires one authenticated candidate session slot.
+    pub fn open_session(
+        &self,
+        context: &AuthenticatedCandidateContext,
+    ) -> Result<SessionPermit, DonorError> {
+        self.authenticate(context)?;
+        self.quota.acquire_session(context.candidate())
+    }
+
     /// Dispatches one frame only inside its authenticated candidate shard.
     pub fn dispatch(
         &mut self,
@@ -53,6 +62,9 @@ impl<B: DonorBroker> DonorSupervisor<B> {
         request: BeginRequest,
     ) -> Result<BeginResult, DonorError> {
         self.ensure_candidate(context)?;
+        if self.shard(context)?.service.has_live_operation() {
+            return Err(DonorError::ConcurrentOperation);
+        }
         let (shards, broker) = (&mut self.shards, &mut self.broker);
         broker.bind_candidate(context.candidate());
         shard_mut(shards, context)?.service.begin(request, broker)

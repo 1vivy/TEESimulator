@@ -8,6 +8,8 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::PathBuf,
+    sync::mpsc,
+    time::Duration,
 };
 
 use rka_protocol::{FrameBody, MessageKind, decode_frame};
@@ -24,9 +26,93 @@ use crate::{
     LifecycleRole,
     candidate::{PairingAdmission, PairingCatalog},
     direct_profile::DirectProfile,
-    donor::dispatch_tests::support::Fixture,
+    donor::{DonorError, actor::CandidateActor, dispatch_tests::support::Fixture},
     provisioning_io::FileStateStore,
 };
+
+#[test]
+fn a_slow_candidate_does_not_block_another_candidates_frame_from_being_accepted()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let mut catalog = PairingCatalog::empty();
+    catalog.admit(PairingAdmission::new(
+        ([0x11; 32], [0x21; 32], 1),
+        [0x31; 32],
+    ))?;
+    catalog.admit(PairingAdmission::new(
+        ([0x12; 32], [0x22; 32], 1),
+        [0x32; 32],
+    ))?;
+    let slow_candidate = *catalog.lookup([0x11; 32], [0x21; 32], 1)?.candidate();
+    let fast_candidate = *catalog.lookup([0x12; 32], [0x22; 32], 1)?.candidate();
+    let (accepted_tx, accepted_rx) = mpsc::channel();
+    let (gate_tx, gate_rx) = mpsc::channel();
+    let accepted_a = accepted_tx.clone();
+    let candidate_a = CandidateActor::spawn(slow_candidate, move |frame| {
+        accepted_a.send(frame).map_err(|_| DonorError::Broker)?;
+        gate_rx.recv().map_err(|_| DonorError::Broker)?;
+        Ok(b"candidate-a-response".to_vec())
+    })?;
+    let candidate_b = CandidateActor::spawn(fast_candidate, move |frame| {
+        accepted_tx.send(frame).map_err(|_| DonorError::Broker)?;
+        Ok(b"candidate-b-response".to_vec())
+    })?;
+    let (result_a_tx, result_a_rx) = mpsc::channel();
+    let slow_supervisor = std::thread::spawn(move || {
+        result_a_tx.send(candidate_a.dispatch(&slow_candidate, b"candidate-a-frame".to_vec()))
+    });
+    assert_eq!(accepted_rx.recv()?, b"candidate-a-frame");
+    let (result_b_tx, result_b_rx) = mpsc::channel();
+
+    // When
+    let fast_supervisor = std::thread::spawn(move || {
+        result_b_tx.send(candidate_b.dispatch(&fast_candidate, b"candidate-b-frame".to_vec()))
+    });
+    let accepted_b = accepted_rx.recv_timeout(Duration::from_secs(1))?;
+    let response_b = result_b_rx.recv_timeout(Duration::from_secs(1))??;
+
+    // Then
+    assert_eq!(accepted_b, b"candidate-b-frame");
+    assert_eq!(response_b, b"candidate-b-response");
+    assert!(matches!(
+        result_a_rx.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    gate_tx.send(())?;
+    assert_eq!(result_a_rx.recv()??, b"candidate-a-response");
+    slow_supervisor
+        .join()
+        .map_err(|_| "candidate A supervisor failed")??;
+    fast_supervisor
+        .join()
+        .map_err(|_| "candidate B supervisor failed")??;
+    Ok(())
+}
+
+#[test]
+fn candidate_actor_rejects_a_frame_for_another_candidate() -> Result<(), Box<dyn std::error::Error>>
+{
+    // Given
+    let mut catalog = PairingCatalog::empty();
+    catalog.admit(PairingAdmission::new(
+        ([0x13; 32], [0x23; 32], 1),
+        [0x33; 32],
+    ))?;
+    catalog.admit(PairingAdmission::new(
+        ([0x14; 32], [0x24; 32], 1),
+        [0x34; 32],
+    ))?;
+    let actor_candidate = *catalog.lookup([0x13; 32], [0x23; 32], 1)?.candidate();
+    let foreign_candidate = *catalog.lookup([0x14; 32], [0x24; 32], 1)?.candidate();
+    let actor = CandidateActor::spawn(actor_candidate, |_| Ok(Vec::new()))?;
+
+    // When
+    let result = actor.dispatch(&foreign_candidate, b"wrong-candidate".to_vec());
+
+    // Then
+    assert_eq!(result, Err(DonorError::Unpaired));
+    Ok(())
+}
 
 struct RunnerFixture {
     donor: Fixture,

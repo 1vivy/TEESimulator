@@ -9,6 +9,7 @@ use super::{
     lifecycle::{ActiveGuard, QueuedGuard, ResourceGuard, ResourceKind},
 };
 
+// These limits are donor-wide because every executor shares this state.
 const MAX_ACTIVE: usize = 4;
 const MAX_QUEUED: usize = 4;
 

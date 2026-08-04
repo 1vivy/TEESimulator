@@ -9,6 +9,59 @@ import org.junit.Test
 
 class DevicePairCliTest {
     @Test
+    fun bindAcceptsTwoCandidatesAndEmitsSchemaVersionTwo() {
+        // Given
+        val root = Files.createTempDirectory("pair-cli-")
+        val profileA = Files.writeString(root.resolve("profile-a.json"), "{\"candidate\":\"A\"}")
+        val profileB = Files.writeString(root.resolve("profile-b.json"), "{\"candidate\":\"B\"}")
+
+        // When
+        val exit =
+            HostCli.run(
+                arrayOf(
+                    "device-pair",
+                    "bind",
+                    "--donor",
+                    "DONOR_D",
+                    "--candidate",
+                    "CANDIDATE_A",
+                    "--profile",
+                    profileA.toString(),
+                    "--candidate",
+                    "CANDIDATE_B",
+                    "--profile",
+                    profileB.toString(),
+                ),
+                root,
+            )
+        val duplicateExit =
+            HostCli.run(
+                arrayOf(
+                    "device-pair",
+                    "bind",
+                    "--donor",
+                    "DONOR_D",
+                    "--candidate",
+                    "CANDIDATE_A",
+                    "--profile",
+                    profileA.toString(),
+                    "--candidate",
+                    "CANDIDATE_A",
+                    "--profile",
+                    profileB.toString(),
+                ),
+                Files.createTempDirectory("pair-cli-duplicate-"),
+            )
+
+        // Then
+        assertEquals(0, exit)
+        val descriptor = Files.readString(root.resolve("device-pair.json"))
+        assertTrue(descriptor.contains("\"schema_version\":2"))
+        assertEquals(2, Regex("\"serial\":").findAll(descriptor).count())
+        assertNotEquals(0, duplicateExit)
+    }
+
+    @Test
     fun rejectsSameSerial() {
         val root = Files.createTempDirectory("pair-cli-")
         val profile = Files.writeString(root.resolve("profile.json"), "{}")

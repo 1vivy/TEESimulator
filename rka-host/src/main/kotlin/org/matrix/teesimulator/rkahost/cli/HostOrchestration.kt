@@ -21,7 +21,7 @@ class HostOrchestrator(
 
     fun profilePair() {
         control(pair.donor, "profile-pair", "DONOR")
-        control(pair.candidate, "profile-pair", "CANDIDATE")
+        pair.candidates.forEach { control(it.serial, "profile-pair", "CANDIDATE") }
     }
 
     fun deployNoReboot(releaseZip: String) {
@@ -70,18 +70,41 @@ class HostOrchestrator(
         val journal = PersistentAdbTrace.create(path, binding, sentinelId, nonce, deploySurface)
         trace = journal
         val initialTraceBinding = journal.validateClean().binding
+        val candidateBootIds =
+            if (scope == SentinelScope.PAIR && pair.schemaVersion == 2) {
+                pair.candidates.associate { it.serial.value to bootIdentityHash(it.serial) }
+            } else {
+                emptyMap()
+            }
+        val candidateStartMillis =
+            if (scope == SentinelScope.PAIR && pair.schemaVersion == 2) {
+                pair.candidates.associate { it.serial.value to monotonicMillis(it.serial) }
+            } else {
+                emptyMap()
+            }
+        val candidateBootId =
+            if (scope == SentinelScope.PAIR) {
+                candidateBootIds.values.firstOrNull()
+                    ?: bootIdentityHash(pair.candidates.single().serial)
+            } else {
+                "DONOR_SCOPE"
+            }
+        val candidateStart =
+            if (scope == SentinelScope.PAIR) {
+                candidateStartMillis.values.firstOrNull()
+                    ?: monotonicMillis(pair.candidates.single().serial)
+            } else {
+                0
+            }
         val baseline =
             SentinelBaseline(
                 sentinelId = sentinelId,
                 nonce = nonce,
                 binding = binding,
                 donorBootId = bootIdentityHash(pair.donor),
-                candidateBootId =
-                    if (scope == SentinelScope.PAIR) bootIdentityHash(pair.candidate)
-                    else "DONOR_SCOPE",
+                candidateBootId = candidateBootId,
                 donorStartMillis = monotonicMillis(pair.donor),
-                candidateStartMillis =
-                    if (scope == SentinelScope.PAIR) monotonicMillis(pair.candidate) else 0,
+                candidateStartMillis = candidateStart,
                 authority = SentinelPhase.ROOT_AUTHORITATIVE,
                 samplerSha256 = sentinelScriptHash,
                 scope = scope,
@@ -90,11 +113,15 @@ class HostOrchestrator(
                 commandTraceInitialHeadSha256 = initialTraceBinding.headSha256,
                 commandTraceInitialEventCount = initialTraceBinding.eventCount,
                 deploySurface = deploySurface,
+                candidateBootIds = candidateBootIds,
+                candidateStartMillisBySerial = candidateStartMillis,
             )
         BaselineStore.createPending(path, baseline)
         try {
             sentinelOne(pair.donor, baseline, "start")
-            if (scope == SentinelScope.PAIR) sentinelOne(pair.candidate, baseline, "start")
+            if (scope == SentinelScope.PAIR) {
+                pair.candidates.forEach { sentinelOne(it.serial, baseline, "start") }
+            }
             validateStarted(baseline)
             BaselineStore.commitPending(path, baseline)
             return baseline
@@ -107,6 +134,8 @@ class HostOrchestrator(
                     baseline.donorStartMillis + 1,
                     baseline.candidateStartMillis + 1,
                     SentinelPhase.ROOT_AUTHORITATIVE,
+                    baseline.candidateBootIds,
+                    baseline.candidateStartMillisBySerial.mapValues { it.value + 1 },
                 )
             )
             if (cleanupSentinel(baseline)) {
@@ -139,14 +168,24 @@ class HostOrchestrator(
         val current = sample(baseline, sentinelAction(baseline, "assert-live"))
         if (
             current.donorBootId != baseline.donorBootId ||
-                current.candidateBootId != baseline.candidateBootId
+                if (pair.schemaVersion == 2) {
+                    current.candidateBootIds != baseline.candidateBootIds
+                } else {
+                    current.candidateBootId != baseline.candidateBootId
+                }
         ) {
             throw HostCliException("BOOT_ID_DRIFT")
         }
         if (
             current.donorMillis <= baseline.donorStartMillis ||
                 (baseline.scope == SentinelScope.PAIR &&
-                    current.candidateMillis <= baseline.candidateStartMillis)
+                    if (pair.schemaVersion == 2) {
+                        current.candidateMillisBySerial.any {
+                            it.value <= baseline.candidateStartMillisBySerial.getValue(it.key)
+                        }
+                    } else {
+                        current.candidateMillis <= baseline.candidateStartMillis
+                    })
         ) {
             throw HostCliException("SENTINEL_MONOTONIC_INVALID")
         }
@@ -182,17 +221,42 @@ class HostOrchestrator(
     private fun sample(
         baseline: SentinelBaseline,
         phase: SentinelPhase = SentinelPhase.ROOT_AUTHORITATIVE,
-    ): SentinelSample =
-        SentinelSample(
+    ): SentinelSample {
+        val candidateBootIds =
+            if (baseline.scope == SentinelScope.PAIR && pair.schemaVersion == 2) {
+                pair.candidates.associate { it.serial.value to bootIdentityHash(it.serial) }
+            } else {
+                baseline.candidateBootIds
+            }
+        val candidateMillis =
+            if (baseline.scope == SentinelScope.PAIR && pair.schemaVersion == 2) {
+                pair.candidates.associate { it.serial.value to monotonicMillis(it.serial) }
+            } else {
+                baseline.candidateStartMillisBySerial
+            }
+        val candidateBootId =
+            if (baseline.scope == SentinelScope.PAIR && pair.schemaVersion == 1) {
+                bootIdentityHash(pair.candidates.single().serial)
+            } else {
+                candidateBootIds.values.firstOrNull() ?: baseline.candidateBootId
+            }
+        val candidateEndMillis =
+            if (baseline.scope == SentinelScope.PAIR && pair.schemaVersion == 1) {
+                monotonicMillis(pair.candidates.single().serial)
+            } else {
+                candidateMillis.values.firstOrNull() ?: baseline.candidateStartMillis
+            }
+        return SentinelSample(
             baseline.sentinelId,
             bootIdentityHash(pair.donor),
-            if (baseline.scope == SentinelScope.PAIR) bootIdentityHash(pair.candidate)
-            else baseline.candidateBootId,
+            candidateBootId,
             monotonicMillis(pair.donor),
-            if (baseline.scope == SentinelScope.PAIR) monotonicMillis(pair.candidate)
-            else baseline.candidateStartMillis,
+            candidateEndMillis,
             phase,
+            candidateBootIds,
+            candidateMillis,
         )
+    }
 
     private fun sentinelAction(baseline: SentinelBaseline, action: String): SentinelPhase =
         sentinelSerials(baseline)
@@ -258,14 +322,29 @@ class HostOrchestrator(
         if (
             bootIdentityHash(pair.donor) != baseline.donorBootId ||
                 (baseline.scope == SentinelScope.PAIR &&
-                    bootIdentityHash(pair.candidate) != baseline.candidateBootId)
+                    if (pair.schemaVersion == 2) {
+                        pair.candidates.any {
+                            bootIdentityHash(it.serial) !=
+                                baseline.candidateBootIds.getValue(it.serial.value)
+                        }
+                    } else {
+                        bootIdentityHash(pair.candidates.single().serial) != baseline.candidateBootId
+                    })
         ) {
             throw HostCliException("BOOT_ID_DRIFT")
         }
         if (
             monotonicMillis(pair.donor) < baseline.donorStartMillis ||
                 (baseline.scope == SentinelScope.PAIR &&
-                    monotonicMillis(pair.candidate) < baseline.candidateStartMillis)
+                    if (pair.schemaVersion == 2) {
+                        pair.candidates.any {
+                            monotonicMillis(it.serial) <
+                                baseline.candidateStartMillisBySerial.getValue(it.serial.value)
+                        }
+                    } else {
+                        monotonicMillis(pair.candidates.single().serial) <
+                            baseline.candidateStartMillis
+                    })
         ) {
             throw HostCliException("SENTINEL_MONOTONIC_INVALID")
         }
@@ -334,7 +413,7 @@ class HostOrchestrator(
         return result
     }
 
-    private fun serials(): List<BoundSerial> = listOf(pair.donor, pair.candidate)
+    private fun serials(): List<BoundSerial> = listOf(pair.donor) + pair.candidates.map { it.serial }
 
     private fun sentinelSerials(baseline: SentinelBaseline): List<BoundSerial> =
         if (baseline.scope == SentinelScope.DONOR) listOf(pair.donor) else serials()

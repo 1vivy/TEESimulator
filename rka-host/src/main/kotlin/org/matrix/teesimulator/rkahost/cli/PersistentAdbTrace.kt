@@ -43,6 +43,7 @@ private constructor(
         val baselinePathSha256: String,
         val sessionId: String,
         val deploySurface: DeploySurfaceBinding,
+        val candidateSha256s: Set<String> = setOf(candidateSha256),
     )
 
     fun execute(argv: List<String>, block: () -> HostCommandResult): HostCommandResult {
@@ -68,7 +69,7 @@ private constructor(
         val operation = operation(argv)
         val boundSerial =
             argv.getOrNull(2)?.let { Hashes.sha256(it.toByteArray()) } in
-                setOf(expected.donorSha256, expected.candidateSha256)
+                expected.candidateSha256s + expected.donorSha256
         val allowed =
             try {
                 AdbCommandTracePolicy.requireAllowed(argv)
@@ -291,6 +292,7 @@ private constructor(
                     baselinePathHash(baselinePath),
                     session,
                     deploySurface,
+                    pair.candidateSerialHashes,
                 )
             val path = pathFor(baselinePath)
             val lockPath = lockPathFor(path)
@@ -330,6 +332,7 @@ private constructor(
                     baselinePathHash(baselinePath),
                     baseline.commandTraceSessionId,
                     baseline.deploySurface,
+                    baseline.binding.candidateSerialHashes,
                 )
             val path = pathFor(baselinePath)
             requireSafe(lockPathFor(path))
@@ -356,6 +359,7 @@ private constructor(
                     baselinePathHash(baselinePath),
                     baseline.commandTraceSessionId,
                     baseline.deploySurface,
+                    baseline.binding.candidateSerialHashes,
                 ),
                 false,
             )

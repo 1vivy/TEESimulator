@@ -51,17 +51,27 @@ object HostCli {
         }
 
     private fun bind(arguments: Array<String>, runtime: Path): Int {
-        val values = options(arguments.drop(2))
-        requireKeys(values, setOf("--donor", "--candidate", "--profile"))
+        val arguments = arguments.drop(2)
+        if (arguments.size % 2 != 0) invalid()
+        val pairs = arguments.chunked(2).map { it[0] to it[1] }
+        if (
+            pairs.any { it.first !in setOf("--donor", "--candidate", "--profile") } ||
+                pairs.any { it.second.isBlank() } ||
+                pairs.count { it.first == "--donor" } != 1
+        ) {
+            invalid()
+        }
+        val candidates = pairs.filter { it.first == "--candidate" }.map(Pair<String, String>::second)
+        val profiles = pairs.filter { it.first == "--profile" }.map(Pair<String, String>::second)
+        if (candidates.isEmpty() || candidates.size != profiles.size) invalid()
         val snapshot =
             DevicePairStore(runtime)
                 .bind(
-                    values.getValue("--donor"),
-                    values.getValue("--candidate"),
-                    Path.of(values.getValue("--profile")),
+                    pairs.single { it.first == "--donor" }.second,
+                    candidates.zip(profiles.map(Path::of)),
                 )
         println(
-            """{"candidate_serial_sha256":"${Hashes.sha256(snapshot.candidate.value.toByteArray())}","donor_serial_sha256":"${Hashes.sha256(snapshot.donor.value.toByteArray())}","result":"BOUND"}"""
+            """{"candidate_count":${snapshot.candidates.size},"donor_serial_sha256":"${Hashes.sha256(snapshot.donor.value.toByteArray())}","result":"BOUND"}"""
         )
         return 0
     }

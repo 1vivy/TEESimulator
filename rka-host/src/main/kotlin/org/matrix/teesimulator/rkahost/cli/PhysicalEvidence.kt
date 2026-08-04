@@ -8,14 +8,20 @@ data class PairBinding(
     val donorSerialHash: String,
     val candidateSerialHash: String,
     val profileSha256: String,
+    val candidateCount: Int = 1,
+    val candidateSerialHashes: Set<String> = setOf(candidateSerialHash),
 ) {
     companion object {
         fun from(pair: DevicePairSnapshot): PairBinding =
             PairBinding(
                 Hashes.sha256(pair.canonical().toByteArray()),
                 Hashes.sha256(pair.donor.value.toByteArray()),
-                Hashes.sha256(pair.candidate.value.toByteArray()),
-                pair.profileSha256,
+                Hashes.sha256(pair.candidates.first().serial.value.toByteArray()),
+                pair.candidates.first().profileSha256,
+                pair.candidates.size,
+                pair.candidates.mapTo(mutableSetOf()) {
+                    Hashes.sha256(it.serial.value.toByteArray())
+                },
             )
     }
 }
@@ -37,18 +43,30 @@ data class SentinelBaseline(
     val commandTraceInitialHeadSha256: String = "0".repeat(64),
     val commandTraceInitialEventCount: Int = 0,
     val deploySurface: DeploySurfaceBinding = DeploySurfaceBinding.TEST,
+    val candidateBootIds: Map<String, String> = emptyMap(),
+    val candidateStartMillisBySerial: Map<String, Long> = emptyMap(),
 ) {
     fun canonical(): String =
-        """{"authority":"${authority.name}","candidate_boot_id":"$candidateBootId","candidate_serial_sha256":"${binding.candidateSerialHash}","candidate_start_millis":$candidateStartMillis,"command_trace_genesis_sha256":"$commandTraceGenesisSha256","command_trace_initial_event_count":$commandTraceInitialEventCount,"command_trace_initial_head_sha256":"$commandTraceInitialHeadSha256","command_trace_policy_sha256":"$commandTracePolicySha256","command_trace_session_id":"$commandTraceSessionId","deploy_entrypoint_path_sha256":"${deploySurface.entrypointPathSha256}","deploy_entrypoint_sha256":"${deploySurface.entrypointSha256}","deploy_surface_sha256":"${deploySurface.surfaceSha256}","donor_boot_id":"$donorBootId","donor_serial_sha256":"${binding.donorSerialHash}","donor_start_millis":$donorStartMillis,"nonce":"$nonce","pair_sha256":"${binding.pairHash}","profile_sha256":"${binding.profileSha256}","sampler_sha256":"$samplerSha256","scope":"${scope.name}","sentinel_id":"$sentinelId","version":7}
+        if (binding.candidateCount == 1) {
+            """{"authority":"${authority.name}","candidate_boot_id":"$candidateBootId","candidate_serial_sha256":"${binding.candidateSerialHash}","candidate_start_millis":$candidateStartMillis,"command_trace_genesis_sha256":"$commandTraceGenesisSha256","command_trace_initial_event_count":$commandTraceInitialEventCount,"command_trace_initial_head_sha256":"$commandTraceInitialHeadSha256","command_trace_policy_sha256":"$commandTracePolicySha256","command_trace_session_id":"$commandTraceSessionId","deploy_entrypoint_path_sha256":"${deploySurface.entrypointPathSha256}","deploy_entrypoint_sha256":"${deploySurface.entrypointSha256}","deploy_surface_sha256":"${deploySurface.surfaceSha256}","donor_boot_id":"$donorBootId","donor_serial_sha256":"${binding.donorSerialHash}","donor_start_millis":$donorStartMillis,"nonce":"$nonce","pair_sha256":"${binding.pairHash}","profile_sha256":"${binding.profileSha256}","sampler_sha256":"$samplerSha256","scope":"${scope.name}","sentinel_id":"$sentinelId","version":7}
 """
+        } else {
+            """{"authority":"${authority.name}","candidate_boot_ids":"${encode(candidateBootIds)}","candidate_count":${binding.candidateCount},"candidate_serial_sha256":"${binding.candidateSerialHash}","candidate_start_millis_by_serial":"${encode(candidateStartMillisBySerial)}","command_trace_genesis_sha256":"$commandTraceGenesisSha256","command_trace_initial_event_count":$commandTraceInitialEventCount,"command_trace_initial_head_sha256":"$commandTraceInitialHeadSha256","command_trace_policy_sha256":"$commandTracePolicySha256","command_trace_session_id":"$commandTraceSessionId","deploy_entrypoint_path_sha256":"${deploySurface.entrypointPathSha256}","deploy_entrypoint_sha256":"${deploySurface.entrypointSha256}","deploy_surface_sha256":"${deploySurface.surfaceSha256}","donor_boot_id":"$donorBootId","donor_serial_sha256":"${binding.donorSerialHash}","donor_start_millis":$donorStartMillis,"nonce":"$nonce","pair_sha256":"${binding.pairHash}","profile_sha256":"${binding.profileSha256}","sampler_sha256":"$samplerSha256","scope":"${scope.name}","sentinel_id":"$sentinelId","version":8}
+"""
+        }
 
     companion object {
         private val pattern =
             Regex(
                 """\{"authority":"(ROOT_AUTHORITATIVE)","candidate_boot_id":"([A-Za-z0-9._-]{1,128})","candidate_serial_sha256":"([0-9a-f]{64})","candidate_start_millis":([0-9]+),"command_trace_genesis_sha256":"([0-9a-f]{64})","command_trace_initial_event_count":(0),"command_trace_initial_head_sha256":"([0-9a-f]{64})","command_trace_policy_sha256":"([0-9a-f]{64})","command_trace_session_id":"([0-9a-f]{32})","deploy_entrypoint_path_sha256":"([0-9a-f]{64})","deploy_entrypoint_sha256":"([0-9a-f]{64})","deploy_surface_sha256":"([0-9a-f]{64})","donor_boot_id":"([A-Za-z0-9._-]{1,128})","donor_serial_sha256":"([0-9a-f]{64})","donor_start_millis":([0-9]+),"nonce":"([A-Za-z0-9._-]{1,128})","pair_sha256":"([0-9a-f]{64})","profile_sha256":"([0-9a-f]{64})","sampler_sha256":"([0-9a-f]{64})","scope":"(PAIR|DONOR)","sentinel_id":"([A-Za-z0-9._-]{1,128})","version":7\}\n"""
             )
+        private val patternV8 =
+            Regex(
+                """\{"authority":"(ROOT_AUTHORITATIVE)","candidate_boot_ids":"([A-Za-z0-9._=,:-]+)","candidate_count":([2-9][0-9]*),"candidate_serial_sha256":"([0-9a-f]{64})","candidate_start_millis_by_serial":"([A-Za-z0-9._=,:-]+)","command_trace_genesis_sha256":"([0-9a-f]{64})","command_trace_initial_event_count":(0),"command_trace_initial_head_sha256":"([0-9a-f]{64})","command_trace_policy_sha256":"([0-9a-f]{64})","command_trace_session_id":"([0-9a-f]{32})","deploy_entrypoint_path_sha256":"([0-9a-f]{64})","deploy_entrypoint_sha256":"([0-9a-f]{64})","deploy_surface_sha256":"([0-9a-f]{64})","donor_boot_id":"([A-Za-z0-9._-]{1,128})","donor_serial_sha256":"([0-9a-f]{64})","donor_start_millis":([0-9]+),"nonce":"([A-Za-z0-9._-]{1,128})","pair_sha256":"([0-9a-f]{64})","profile_sha256":"([0-9a-f]{64})","sampler_sha256":"([0-9a-f]{64})","scope":"(PAIR|DONOR)","sentinel_id":"([A-Za-z0-9._-]{1,128})","version":8\}\n"""
+            )
 
         fun parse(raw: String): SentinelBaseline {
+            patternV8.matchEntire(raw)?.groupValues?.let { return parseV8(it) }
             val value =
                 pattern.matchEntire(raw)?.groupValues ?: throw HostCliException("BASELINE_INVALID")
             return SentinelBaseline(
@@ -70,6 +88,46 @@ data class SentinelBaseline(
                 DeploySurfaceBinding(value[11], value[10], value[12]),
             )
         }
+
+        private fun parseV8(value: List<String>): SentinelBaseline {
+            val bootIds = decode(value[2])
+            val starts = decode(value[5]).mapValues { it.value.toLong() }
+            return SentinelBaseline(
+                value[22],
+                value[17],
+                PairBinding(
+                    value[18],
+                    value[15],
+                    value[4],
+                    value[19],
+                    value[3].toInt(),
+                    bootIds.keys.mapTo(mutableSetOf()) { Hashes.sha256(it.toByteArray()) },
+                ),
+                value[14],
+                bootIds.values.first(),
+                value[16].toLong(),
+                starts.values.first(),
+                SentinelPhase.valueOf(value[1]),
+                value[20],
+                SentinelScope.valueOf(value[21]),
+                value[9],
+                value[6],
+                value[10],
+                value[8],
+                value[7].toInt(),
+                DeploySurfaceBinding(value[12], value[11], value[13]),
+                bootIds,
+                starts,
+            )
+        }
+
+        private fun decode(raw: String): Map<String, String> =
+            raw.split(',').associate { entry ->
+                entry.substringBefore('=') to entry.substringAfter('=')
+            }
+
+        private fun <T> encode(values: Map<String, T>): String =
+            values.toSortedMap().entries.joinToString(",") { "${it.key}=${it.value}" }
     }
 }
 

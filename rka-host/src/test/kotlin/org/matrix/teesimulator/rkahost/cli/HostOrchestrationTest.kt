@@ -16,6 +16,33 @@ class HostOrchestrationTest {
         )
 
     @Test
+    fun serialsAndSentinelBaselinesCoverEveryCandidate() {
+        // Given
+        val multiCandidatePair =
+            DevicePairSnapshot(
+                BoundSerial.parse("DONOR_A"),
+                listOf(
+                    DevicePairCandidate(BoundSerial.parse("CANDIDATE_B"), "a".repeat(64)),
+                    DevicePairCandidate(BoundSerial.parse("CANDIDATE_C"), "b".repeat(64)),
+                ),
+                2,
+            )
+        val path = Files.createTempDirectory("sentinel-multi-candidate-").resolve("baseline.json")
+        val runner = RecordingRunner()
+
+        // When
+        val baseline = HostOrchestrator(multiCandidatePair, runner).sentinelStart(path, "nonce-A")
+
+        // Then
+        assertEquals(
+            setOf("DONOR_A", "CANDIDATE_B", "CANDIDATE_C"),
+            runner.calls.mapNotNull { it.getOrNull(2) }.toSet(),
+        )
+        assertEquals(setOf("CANDIDATE_B", "CANDIDATE_C"), baseline.candidateBootIds.keys)
+        assertEquals(setOf("CANDIDATE_B", "CANDIDATE_C"), baseline.candidateStartMillisBySerial.keys)
+    }
+
+    @Test
     fun everyAdvertisedCommandUsesRoleBoundNoRebootArgv() {
         val runner = RecordingRunner()
         val host = HostOrchestrator(pair, runner)

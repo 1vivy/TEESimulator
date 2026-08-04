@@ -156,58 +156,126 @@ def main():
             fail("PAIR_SNAPSHOT_INVALID")
         lines = raw_env.decode("ascii").splitlines()
         env = unique_object(line.split("=", 1) for line in lines)
-        donor = decode_serial(env["RKA_DONOR_SERIAL_B64"])
-        candidate = decode_serial(env["RKA_CANDIDATE_SERIAL_B64"])
     except (ValueError, KeyError, UnicodeError, json.JSONDecodeError, TypeError):
         fail("PAIR_SNAPSHOT_INVALID")
-    if set(env) != PAIR_ENVIRONMENT_NAMES:
-        fail("PAIR_ENV_INVALID")
-    if (
-        env["RKA_DEVICE_PAIR_VERSION"] != "1"
-        or type(pair.get("schema_version")) is not int
-        or pair.get("schema_version") != 1
-        or donor != pair.get("donor_serial")
-        or candidate != pair.get("candidate_serial")
-        or env["RKA_PROFILE_SHA256"] != pair.get("profile_sha256")
-    ):
+    version = pair.get("schema_version")
+    if type(version) is not int or str(version) != env.get("RKA_DEVICE_PAIR_VERSION"):
         fail("PAIR_SNAPSHOT_MISMATCH")
-    legacy_keys = {
-        "candidate_serial",
-        "donor_serial",
-        "profile_sha256",
-        "schema_version",
-    }
-    canonical_keys = legacy_keys | {
-        "candidate_serial_sha256",
-        "donor_serial_sha256",
-    }
-    if set(pair) not in (legacy_keys, canonical_keys):
-        fail("PAIR_SNAPSHOT_INVALID")
-    if donor == candidate:
-        fail("PAIR_SNAPSHOT_INVALID")
-    if not isinstance(pair["profile_sha256"], str) or not re.fullmatch(
-        r"[0-9a-f]{64}", pair["profile_sha256"]
-    ):
-        fail("PAIR_SNAPSHOT_INVALID")
+    donor = decode_serial(env.get("RKA_DONOR_SERIAL_B64"))
     donor_hash = hashlib.sha256(donor.encode("ascii")).hexdigest()
-    candidate_hash = hashlib.sha256(candidate.encode("ascii")).hexdigest()
-    if set(pair) == canonical_keys and (
-        pair["donor_serial_sha256"] != donor_hash
-        or pair["candidate_serial_sha256"] != candidate_hash
-    ):
-        fail("PAIR_SNAPSHOT_MISMATCH")
-    canonical = json.dumps(
-        {
+    if version == 1:
+        if set(env) != PAIR_ENVIRONMENT_NAMES:
+            fail("PAIR_ENV_INVALID")
+        candidate = decode_serial(env["RKA_CANDIDATE_SERIAL_B64"])
+        legacy_keys = {
+            "candidate_serial",
+            "donor_serial",
+            "profile_sha256",
+            "schema_version",
+        }
+        canonical_keys = legacy_keys | {
+            "candidate_serial_sha256",
+            "donor_serial_sha256",
+        }
+        if set(pair) not in (legacy_keys, canonical_keys):
+            fail("PAIR_SNAPSHOT_INVALID")
+        if donor == candidate:
+            fail("PAIR_SNAPSHOT_INVALID")
+        if (
+            donor != pair.get("donor_serial")
+            or candidate != pair.get("candidate_serial")
+            or env["RKA_PROFILE_SHA256"] != pair.get("profile_sha256")
+            or not isinstance(pair["profile_sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", pair["profile_sha256"])
+        ):
+            fail("PAIR_SNAPSHOT_MISMATCH")
+        candidate_hash = hashlib.sha256(candidate.encode("ascii")).hexdigest()
+        if set(pair) == canonical_keys and (
+            pair["donor_serial_sha256"] != donor_hash
+            or pair["candidate_serial_sha256"] != candidate_hash
+        ):
+            fail("PAIR_SNAPSHOT_MISMATCH")
+        canonical_value = {
             "candidate_serial": candidate,
             "candidate_serial_sha256": candidate_hash,
             "donor_serial": donor,
             "donor_serial_sha256": donor_hash,
             "profile_sha256": pair["profile_sha256"],
             "schema_version": 1,
-        },
+        }
+    elif version == 2:
+        if set(pair) != {
+            "candidates",
+            "donor_serial",
+            "donor_serial_sha256",
+            "schema_version",
+        }:
+            fail("PAIR_SNAPSHOT_INVALID")
+        try:
+            count = int(env["RKA_CANDIDATE_COUNT"])
+        except (KeyError, ValueError):
+            fail("PAIR_ENV_INVALID")
+        expected_env = {
+            "RKA_DEVICE_PAIR_VERSION",
+            "RKA_DONOR_SERIAL_B64",
+            "RKA_CANDIDATE_COUNT",
+        } | {
+            name
+            for index in range(count)
+            for name in (
+                f"RKA_CANDIDATE_{index}_SERIAL_B64",
+                f"RKA_CANDIDATE_{index}_PROFILE_SHA256",
+            )
+        }
+        if count < 1 or set(env) != expected_env or not isinstance(pair["candidates"], list):
+            fail("PAIR_ENV_INVALID")
+        candidates = []
+        for index, item in enumerate(pair["candidates"]):
+            if not isinstance(item, dict) or set(item) != {
+                "serial",
+                "serial_sha256",
+                "profile_sha256",
+            }:
+                fail("PAIR_SNAPSHOT_INVALID")
+            serial = decode_serial(env[f"RKA_CANDIDATE_{index}_SERIAL_B64"])
+            profile = env[f"RKA_CANDIDATE_{index}_PROFILE_SHA256"]
+            serial_hash = hashlib.sha256(serial.encode("ascii")).hexdigest()
+            if (
+                serial != item["serial"]
+                or serial_hash != item["serial_sha256"]
+                or profile != item["profile_sha256"]
+                or not re.fullmatch(r"[0-9a-f]{64}", profile)
+            ):
+                fail("PAIR_SNAPSHOT_MISMATCH")
+            candidates.append(
+                {
+                    "serial": serial,
+                    "serial_sha256": serial_hash,
+                    "profile_sha256": profile,
+                }
+            )
+        serials = [item["serial"] for item in candidates]
+        if (
+            len(candidates) != count
+            or donor != pair["donor_serial"]
+            or donor_hash != pair["donor_serial_sha256"]
+            or donor in serials
+            or len(set(serials)) != len(serials)
+        ):
+            fail("PAIR_SNAPSHOT_MISMATCH")
+        canonical_value = {
+            "candidates": candidates,
+            "donor_serial": donor,
+            "donor_serial_sha256": donor_hash,
+            "schema_version": 2,
+        }
+    else:
+        fail("PAIR_SNAPSHOT_INVALID")
+    canonical = json.dumps(
+        canonical_value,
         ensure_ascii=True,
         separators=(",", ":"),
-        sort_keys=True,
+        sort_keys=False,
     ).encode("ascii") + b"\n"
     host_cli_child = (
         os.path.basename(command[0]) == "rka-host"
@@ -235,6 +303,7 @@ def main():
     for name in tuple(environment):
         if (
             name.startswith("RKA_DEVICE_PAIR_")
+            or name.startswith("RKA_CANDIDATE_")
             or name.startswith("RKA_TRACE_")
             or name in PAIR_ENVIRONMENT_NAMES
         ):

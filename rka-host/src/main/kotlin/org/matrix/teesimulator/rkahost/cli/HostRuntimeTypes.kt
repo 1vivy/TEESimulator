@@ -365,6 +365,8 @@ data class SentinelSample(
     val donorMillis: Long,
     val candidateMillis: Long,
     val phase: SentinelPhase = SentinelPhase.ROOT_AUTHORITATIVE,
+    val candidateBootIds: Map<String, String> = emptyMap(),
+    val candidateMillisBySerial: Map<String, Long> = emptyMap(),
 )
 
 enum class SentinelPhase {

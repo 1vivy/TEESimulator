@@ -50,6 +50,7 @@ pair_fd="${!pair_fd_env-}"
 mapfile -t pair_values < <(
     python3 - "$pair_fd" <<'PY'
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -80,32 +81,50 @@ if len(raw) > 65536:
 value = json.loads(raw)
 legacy_keys = {"candidate_serial", "donor_serial", "profile_sha256", "schema_version"}
 canonical_keys = legacy_keys | {"candidate_serial_sha256", "donor_serial_sha256"}
-if set(value) not in (legacy_keys, canonical_keys):
+if value.get("schema_version") == 1:
+    if set(value) not in (legacy_keys, canonical_keys):
+        raise SystemExit(2)
+    candidates = [{"serial": value["candidate_serial"], "profile_sha256": value["profile_sha256"]}]
+elif value.get("schema_version") == 2:
+    if set(value) != {"candidates", "donor_serial", "donor_serial_sha256", "schema_version"}:
+        raise SystemExit(2)
+    candidates = value["candidates"]
+    if not isinstance(candidates, list) or not candidates:
+        raise SystemExit(2)
+else:
     raise SystemExit(2)
-if value["schema_version"] != 1 or not re.fullmatch(r"[0-9a-f]{64}", value["profile_sha256"]):
-    raise SystemExit(2)
-for name in ("donor_serial", "candidate_serial"):
-    serial = value[name]
+for serial in [value["donor_serial"]] + [candidate.get("serial") for candidate in candidates]:
     if not isinstance(serial, str) or not serial or len(serial) > 255 or "\n" in serial or "\0" in serial:
         raise SystemExit(2)
-    print(serial)
-if set(value) == canonical_keys:
-    import hashlib
-    if (
-        value["donor_serial_sha256"]
-        != hashlib.sha256(value["donor_serial"].encode("ascii")).hexdigest()
-        or value["candidate_serial_sha256"]
-        != hashlib.sha256(value["candidate_serial"].encode("ascii")).hexdigest()
-    ):
+serials = [candidate["serial"] for candidate in candidates]
+if value["donor_serial"] in serials or len(set(serials)) != len(serials):
+    raise SystemExit(2)
+if "donor_serial_sha256" in value and value["donor_serial_sha256"] != hashlib.sha256(value["donor_serial"].encode("ascii")).hexdigest():
+    raise SystemExit(2)
+if value["schema_version"] == 1 and set(value) == canonical_keys:
+    if value["candidate_serial_sha256"] != hashlib.sha256(value["candidate_serial"].encode("ascii")).hexdigest():
         raise SystemExit(2)
-print(value["profile_sha256"])
+print(value["donor_serial"])
+for candidate in candidates:
+    if set(candidate) not in ({"serial", "profile_sha256"}, {"serial", "serial_sha256", "profile_sha256"}):
+        raise SystemExit(2)
+    if not re.fullmatch(r"[0-9a-f]{64}", candidate["profile_sha256"]):
+        raise SystemExit(2)
+    if "serial_sha256" in candidate and candidate["serial_sha256"] != hashlib.sha256(candidate["serial"].encode("ascii")).hexdigest():
+        raise SystemExit(2)
+    print(candidate["serial"])
+    print(candidate["profile_sha256"])
 PY
 ) || fail PAIR_DESCRIPTOR_INVALID
-[[ "${#pair_values[@]}" -eq 3 && "${pair_values[0]}" != "${pair_values[1]}" ]] ||
+[[ "${#pair_values[@]}" -ge 3 && $(( (${#pair_values[@]} - 1) % 2 )) -eq 0 ]] ||
     fail PAIR_DESCRIPTOR_INVALID
 donor_serial="${pair_values[0]}"
-candidate_serial="${pair_values[1]}"
-profile_sha="${pair_values[2]}"
+candidate_serials=()
+profile_shas=()
+for ((pair_index = 1; pair_index < ${#pair_values[@]}; pair_index += 2)); do
+    candidate_serials+=("${pair_values[pair_index]}")
+    profile_shas+=("${pair_values[pair_index + 1]}")
+done
 
 [[ -z "$(git -C "$project_root" status --porcelain --untracked-files=no)" ]] ||
     fail SOURCE_WORKTREE_DIRTY
@@ -1274,12 +1293,19 @@ preflight_one() {
 }
 
 donor_preflight="$(preflight_one "$donor_serial")"
-candidate_preflight="$(preflight_one "$candidate_serial")"
 donor_boot="$(sed -n 's/.* boot_hash=\([0-9a-f]\{64\}\).*/\1/p' <<<"$donor_preflight")"
-candidate_boot="$(sed -n 's/.* boot_hash=\([0-9a-f]\{64\}\).*/\1/p' <<<"$candidate_preflight")"
 donor_ksu_profile="$(sed -n 's/.* profile=\([A-Z0-9_]*\).*/\1/p' <<<"$donor_preflight")"
-candidate_ksu_profile="$(sed -n 's/.* profile=\([A-Z0-9_]*\).*/\1/p' <<<"$candidate_preflight")"
-[[ -n "$donor_boot" && -n "$candidate_boot" ]] || fail KSU_PREFLIGHT_INVALID 3
+candidate_boots=()
+candidate_ksu_profiles=()
+for candidate_serial in "${candidate_serials[@]}"; do
+    candidate_preflight="$(preflight_one "$candidate_serial")"
+    candidate_boot="$(sed -n 's/.* boot_hash=\([0-9a-f]\{64\}\).*/\1/p' <<<"$candidate_preflight")"
+    candidate_ksu_profile="$(sed -n 's/.* profile=\([A-Z0-9_]*\).*/\1/p' <<<"$candidate_preflight")"
+    [[ -n "$candidate_boot" ]] || fail KSU_PREFLIGHT_INVALID 3
+    candidate_boots+=("$candidate_boot")
+    candidate_ksu_profiles+=("$candidate_ksu_profile")
+done
+[[ -n "$donor_boot" ]] || fail KSU_PREFLIGHT_INVALID 3
 
 authorize_next_manager() {
     local serial="$1" role="$2" boot="$3" profile="$4" authorization_mode="$5"
@@ -1305,7 +1331,12 @@ authorize_next_manager() {
     [[ "$result" == RESULT=AUTHORIZED\ *probe_cleanup=REMOVED ]] || fail KSU_MANAGER_AUTHORIZATION_FAILED 3
 }
 
-if [[ "$donor_ksu_profile" == "$KSU_NEXT_PROFILE" || "$candidate_ksu_profile" == "$KSU_NEXT_PROFILE" ]]; then
+requires_manager_probe=false
+[[ "$donor_ksu_profile" != "$KSU_NEXT_PROFILE" ]] || requires_manager_probe=true
+for candidate_ksu_profile in "${candidate_ksu_profiles[@]}"; do
+    [[ "$candidate_ksu_profile" != "$KSU_NEXT_PROFILE" ]] || requires_manager_probe=true
+done
+if [[ "$requires_manager_probe" == true ]]; then
     probe_sha="$(unzip -p -- "$zip_path" META-INF/rka-artifacts.sha256 | awk '$2 == "rka-sidecar" {print $1}')"
     [[ "$probe_sha" =~ ^[0-9a-f]{64}$ ]] || fail ARCHIVE_INVALID
     probe_parent="${evidence%/*}"
@@ -1317,25 +1348,35 @@ if [[ "$donor_ksu_profile" == "$KSU_NEXT_PROFILE" || "$candidate_ksu_profile" ==
     chmod 700 "$local_probe"
     [[ "$(sha256sum -- "$local_probe" | awk '{print $1}')" == "$probe_sha" ]] || fail ARCHIVE_INVALID
     authorize_next_manager "$donor_serial" DONOR "$donor_boot" "$donor_ksu_profile" "$donor_manager_mode"
-    authorize_next_manager "$candidate_serial" CANDIDATE "$candidate_boot" "$candidate_ksu_profile" "$candidate_manager_mode"
+    for candidate_index in "${!candidate_serials[@]}"; do
+        authorize_next_manager "${candidate_serials[candidate_index]}" CANDIDATE "${candidate_boots[candidate_index]}" "${candidate_ksu_profiles[candidate_index]}" "$candidate_manager_mode"
+    done
     rm -f -- "$local_probe"
     trap - EXIT
 fi
 donor_network="$(remote "$donor_serial" network DONOR_DIALS DONOR SOURCE)" || fail DIRECT_PATH_UNAVAILABLE 3
-candidate_network="$(remote "$candidate_serial" network DONOR_DIALS CANDIDATE TARGET)" || fail DIRECT_PATH_UNAVAILABLE 3
 donor_endpoint="${donor_network##* endpoint=}"
-candidate_endpoint="${candidate_network##* endpoint=}"
-[[ "$donor_endpoint" =~ ^[0-9.]+$ && "$candidate_endpoint" =~ ^[0-9.]+$ ]] ||
-    fail DIRECT_PATH_UNAVAILABLE 3
+[[ "$donor_endpoint" =~ ^[0-9.]+$ ]] || fail DIRECT_PATH_UNAVAILABLE 3
+candidate_endpoints=()
+for candidate_serial in "${candidate_serials[@]}"; do
+    candidate_network="$(remote "$candidate_serial" network DONOR_DIALS CANDIDATE TARGET)" || fail DIRECT_PATH_UNAVAILABLE 3
+    candidate_endpoint="${candidate_network##* endpoint=}"
+    [[ "$candidate_endpoint" =~ ^[0-9.]+$ ]] || fail DIRECT_PATH_UNAVAILABLE 3
+    candidate_endpoints+=("$candidate_endpoint")
+done
 
 remote "$donor_serial" prepare-upload >/dev/null
-remote "$candidate_serial" prepare-upload >/dev/null
+for candidate_serial in "${candidate_serials[@]}"; do
+    remote "$candidate_serial" prepare-upload >/dev/null
+done
 source_receipt_sha="$(sha256sum -- "$zip_path.source-sha" | awk '{print $1}')"
 [[ "$source_receipt_sha" =~ ^[0-9a-f]{64}$ ]] || fail ARCHIVE_INVALID
 rka_adb_protected_push "$adb_command" "$donor_serial" "$zip_path" "$REMOTE_ZIP" "$archive_sha" 600 "$transaction_id" DONOR-archive
-rka_adb_protected_push "$adb_command" "$candidate_serial" "$zip_path" "$REMOTE_ZIP" "$archive_sha" 600 "$transaction_id" CANDIDATE-archive
 rka_adb_protected_push "$adb_command" "$donor_serial" "$zip_path.source-sha" "$REMOTE_ZIP.source-sha" "$source_receipt_sha" 600 "$transaction_id" DONOR-source
-rka_adb_protected_push "$adb_command" "$candidate_serial" "$zip_path.source-sha" "$REMOTE_ZIP.source-sha" "$source_receipt_sha" 600 "$transaction_id" CANDIDATE-source
+for candidate_serial in "${candidate_serials[@]}"; do
+    rka_adb_protected_push "$adb_command" "$candidate_serial" "$zip_path" "$REMOTE_ZIP" "$archive_sha" 600 "$transaction_id" CANDIDATE-archive
+    rka_adb_protected_push "$adb_command" "$candidate_serial" "$zip_path.source-sha" "$REMOTE_ZIP.source-sha" "$source_receipt_sha" 600 "$transaction_id" CANDIDATE-source
+done
 
 reconnect_for_rollback() {
     local serial=$1
@@ -1358,7 +1399,10 @@ rollback_device() (
 rollback_pair() (
     set +e
     local candidate_status=0 donor_status=0
-    rollback_device "$candidate_serial" CANDIDATE || candidate_status=$?
+    local candidate_serial
+    for candidate_serial in "${candidate_serials[@]}"; do
+        rollback_device "$candidate_serial" CANDIDATE || candidate_status=$?
+    done
     rollback_device "$donor_serial" DONOR || donor_status=$?
     [ "$candidate_status" -eq 0 ] && [ "$donor_status" -eq 0 ]
 )
@@ -1372,24 +1416,37 @@ trap 'rollback_pair >/dev/null 2>&1 || :' ERR INT TERM
 donor_result="$(remote "$donor_serial" deploy "$transaction_id" "$REMOTE_ZIP" DONOR "$archive_sha" "$source_sha")" || {
     fail_after_rollback DEPLOY_TRANSACTION_FAILED
 }
-candidate_result="$(remote "$candidate_serial" deploy "$transaction_id" "$REMOTE_ZIP" CANDIDATE "$archive_sha" "$source_sha")" || {
-    fail_after_rollback DEPLOY_TRANSACTION_FAILED
-}
 donor_pin="$(sed -n 's/.* pin=\([0-9a-f]\{64\}\).*/\1/p' <<<"$donor_result")"
-candidate_pin="$(sed -n 's/.* pin=\([0-9a-f]\{64\}\).*/\1/p' <<<"$candidate_result")"
 donor_identity="$(remote "$donor_serial" identity-public)" || fail_after_rollback PAIR_PIN_INVALID
-candidate_identity="$(remote "$candidate_serial" identity-public)" || fail_after_rollback PAIR_PIN_INVALID
 donor_certificate="${donor_identity##* certificate_hex=}"
-candidate_certificate="${candidate_identity##* certificate_hex=}"
 donor_staged="$(sed -n 's/.* staged_hash=\([0-9a-f]\{64\}\).*/\1/p' <<<"$donor_result")"
-candidate_staged="$(sed -n 's/.* staged_hash=\([0-9a-f]\{64\}\).*/\1/p' <<<"$candidate_result")"
-[[ -n "$donor_pin" && -n "$candidate_pin" && "$donor_pin" != "$candidate_pin" && -n "$donor_staged" && -n "$candidate_staged" &&
+[[ -n "$donor_pin" && -n "$donor_staged" &&
     "$donor_identity" == "RESULT=IDENTITY_PUBLIC certificate_hex=$donor_certificate" &&
-    "$candidate_identity" == "RESULT=IDENTITY_PUBLIC certificate_hex=$candidate_certificate" &&
-    "$donor_certificate" =~ ^[0-9a-f]+$ && "$candidate_certificate" =~ ^[0-9a-f]+$ &&
-    ${#donor_certificate} -le 32768 && ${#candidate_certificate} -le 32768 ]] || {
+    "$donor_certificate" =~ ^[0-9a-f]+$ && ${#donor_certificate} -le 32768 ]] || {
     fail_after_rollback PAIR_PIN_INVALID
 }
+candidate_results=()
+candidate_pins=()
+candidate_certificates=()
+candidate_staged_manifests=()
+for candidate_serial in "${candidate_serials[@]}"; do
+    candidate_result="$(remote "$candidate_serial" deploy "$transaction_id" "$REMOTE_ZIP" CANDIDATE "$archive_sha" "$source_sha")" || {
+        fail_after_rollback DEPLOY_TRANSACTION_FAILED
+    }
+    candidate_pin="$(sed -n 's/.* pin=\([0-9a-f]\{64\}\).*/\1/p' <<<"$candidate_result")"
+    candidate_identity="$(remote "$candidate_serial" identity-public)" || fail_after_rollback PAIR_PIN_INVALID
+    candidate_certificate="${candidate_identity##* certificate_hex=}"
+    candidate_staged="$(sed -n 's/.* staged_hash=\([0-9a-f]\{64\}\).*/\1/p' <<<"$candidate_result")"
+    [[ -n "$candidate_pin" && "$donor_pin" != "$candidate_pin" && -n "$candidate_staged" &&
+        "$candidate_identity" == "RESULT=IDENTITY_PUBLIC certificate_hex=$candidate_certificate" &&
+        "$candidate_certificate" =~ ^[0-9a-f]+$ && ${#candidate_certificate} -le 32768 ]] || {
+        fail_after_rollback PAIR_PIN_INVALID
+    }
+    candidate_results+=("$candidate_result")
+    candidate_pins+=("$candidate_pin")
+    candidate_certificates+=("$candidate_certificate")
+    candidate_staged_manifests+=("$candidate_staged")
+done
 split_certificate() {
     local value=$1
     while [[ -n "$value" ]]; do
@@ -1398,18 +1455,31 @@ split_certificate() {
     done
 }
 mapfile -t donor_certificate_arguments < <(split_certificate "$donor_certificate")
-mapfile -t candidate_certificate_arguments < <(split_certificate "$candidate_certificate")
 complete_pair() {
-    pair_failure_stage=CANDIDATE_PAIR
-    candidate_pair_result="$(remote "$candidate_serial" pair "$transaction_id" CANDIDATE "$donor_pin" "$candidate_endpoint" "$candidate_endpoint" "${donor_certificate_arguments[@]}")" || return 1
-    pair_failure_stage=DONOR_PAIR
-    donor_pair_result="$(remote "$donor_serial" pair "$transaction_id" DONOR "$candidate_pin" "$candidate_endpoint" "$donor_endpoint" "${candidate_certificate_arguments[@]}")" || return 1
-    pair_failure_stage=DIRECT_PROBE
-    remote "$donor_serial" direct-probe "$transaction_id" DONOR >/dev/null || return 1
-    pair_failure_stage=DONOR_VERIFY
-    remote "$donor_serial" verify "$transaction_id" "$donor_boot" >/dev/null || return 1
-    pair_failure_stage=CANDIDATE_VERIFY
-    remote "$candidate_serial" verify "$transaction_id" "$candidate_boot" >/dev/null || return 1
+    candidate_pair_results=()
+    donor_pair_results=()
+    local candidate_index candidate_serial candidate_endpoint candidate_pin candidate_certificate candidate_boot
+    local -a candidate_certificate_arguments
+    for candidate_index in "${!candidate_serials[@]}"; do
+        candidate_serial="${candidate_serials[candidate_index]}"
+        candidate_endpoint="${candidate_endpoints[candidate_index]}"
+        candidate_pin="${candidate_pins[candidate_index]}"
+        candidate_certificate="${candidate_certificates[candidate_index]}"
+        candidate_boot="${candidate_boots[candidate_index]}"
+        mapfile -t candidate_certificate_arguments < <(split_certificate "$candidate_certificate")
+        pair_failure_stage=CANDIDATE_PAIR
+        candidate_pair_result="$(remote "$candidate_serial" pair "$transaction_id" CANDIDATE "$donor_pin" "$candidate_endpoint" "$candidate_endpoint" "${donor_certificate_arguments[@]}")" || return 1
+        pair_failure_stage=DONOR_PAIR
+        donor_pair_result="$(remote "$donor_serial" pair "$transaction_id" DONOR "$candidate_pin" "$candidate_endpoint" "$donor_endpoint" "${candidate_certificate_arguments[@]}")" || return 1
+        pair_failure_stage=DIRECT_PROBE
+        remote "$donor_serial" direct-probe "$transaction_id" DONOR >/dev/null || return 1
+        pair_failure_stage=DONOR_VERIFY
+        remote "$donor_serial" verify "$transaction_id" "$donor_boot" >/dev/null || return 1
+        pair_failure_stage=CANDIDATE_VERIFY
+        remote "$candidate_serial" verify "$transaction_id" "$candidate_boot" >/dev/null || return 1
+        candidate_pair_results+=("$candidate_pair_result")
+        donor_pair_results+=("$donor_pair_result")
+    done
     pair_failure_stage=NONE
 }
 pair_failure_stage=UNSTARTED
@@ -1423,8 +1493,13 @@ evidence_parent="${evidence%/*}"
 mkdir -p -- "$evidence_parent"
 temporary="$(mktemp "$evidence_parent/.rka-deploy.XXXXXX")"
 trap 'rm -f -- "$temporary"' EXIT
-printf '{"archive_sha256":"%s","boot_ids_unchanged":true,"candidate_pair_receipt_sha256":"%s","candidate_receipt_sha256":"%s","candidate_role":"CANDIDATE","candidate_staged_manifest":"%s","direct_path_verified":true,"donor_pair_receipt_sha256":"%s","donor_receipt_sha256":"%s","donor_role":"DONOR","donor_staged_manifest":"%s","network":"DIRECT","profile_sha256":"%s","result":"DEPLOYED_NO_REBOOT","source_sha":"%s","transaction_sha256":"%s","version":1}\n' \
-    "$archive_sha" "$(printf %s "$candidate_pair_result" | sha256sum | awk '{print $1}')" "$(printf %s "$candidate_result" | sha256sum | awk '{print $1}')" "$candidate_staged" "$(printf %s "$donor_pair_result" | sha256sum | awk '{print $1}')" "$(printf %s "$donor_result" | sha256sum | awk '{print $1}')" "$donor_staged" "$profile_sha" "$source_sha" "$(printf '%s' "$transaction_id" | sha256sum | awk '{print $1}')" > "$temporary"
+if [[ ${#candidate_serials[@]} -eq 1 ]]; then
+    printf '{"archive_sha256":"%s","boot_ids_unchanged":true,"candidate_pair_receipt_sha256":"%s","candidate_receipt_sha256":"%s","candidate_role":"CANDIDATE","candidate_staged_manifest":"%s","direct_path_verified":true,"donor_pair_receipt_sha256":"%s","donor_receipt_sha256":"%s","donor_role":"DONOR","donor_staged_manifest":"%s","network":"DIRECT","profile_sha256":"%s","result":"DEPLOYED_NO_REBOOT","source_sha":"%s","transaction_sha256":"%s","version":1}\n' \
+        "$archive_sha" "$(printf %s "${candidate_pair_results[0]}" | sha256sum | awk '{print $1}')" "$(printf %s "${candidate_results[0]}" | sha256sum | awk '{print $1}')" "${candidate_staged_manifests[0]}" "$(printf %s "${donor_pair_results[0]}" | sha256sum | awk '{print $1}')" "$(printf %s "$donor_result" | sha256sum | awk '{print $1}')" "$donor_staged" "${profile_shas[0]}" "$source_sha" "$(printf '%s' "$transaction_id" | sha256sum | awk '{print $1}')" > "$temporary"
+else
+    printf '{"archive_sha256":"%s","boot_ids_unchanged":true,"candidate_count":%s,"direct_path_verified":true,"donor_receipt_sha256":"%s","donor_role":"DONOR","donor_staged_manifest":"%s","network":"DIRECT","result":"DEPLOYED_NO_REBOOT","source_sha":"%s","transaction_sha256":"%s","version":2}\n' \
+        "$archive_sha" "${#candidate_serials[@]}" "$(printf %s "$donor_result" | sha256sum | awk '{print $1}')" "$donor_staged" "$source_sha" "$(printf '%s' "$transaction_id" | sha256sum | awk '{print $1}')" > "$temporary"
+fi
 chmod 600 "$temporary"
 mv -f -- "$temporary" "$evidence"
 trap - EXIT

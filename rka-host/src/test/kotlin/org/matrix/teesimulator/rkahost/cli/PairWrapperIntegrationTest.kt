@@ -12,6 +12,45 @@ import org.junit.Test
 
 class PairWrapperIntegrationTest {
     @Test
+    fun wrapperPassesTwoCandidatesThroughTheSealedDescriptor() {
+        // Given
+        withFixture { root ->
+            writePairV2(root)
+            val adapter = root.resolve("deploy-adapter.py")
+            Files.writeString(
+                adapter,
+                """#!/usr/bin/python3
+import json
+
+with open("/proc/self/fd/3", encoding="ascii") as descriptor:
+    pair = json.load(descriptor)
+assert pair["schema_version"] == 2
+assert len(pair["candidates"]) == 2
+for candidate in pair["candidates"]:
+    for phase in ("preflight", "upload", "pair", "verify"):
+        print(f"{candidate['serial']}:{phase}")
+""",
+            )
+            Files.setPosixFilePermissions(adapter, PosixFilePermissions.fromString("rwx------"))
+
+            // When
+            val result = runWrapper(root, listOf(adapter.toString()))
+
+            // Then
+            assertEquals(result.stderr, 0, result.exitCode)
+            assertEquals(
+                setOf(CANDIDATE, CANDIDATE_2),
+                result.stdout.lineSequence().filter(String::isNotBlank).map { it.substringBefore(':') }.toSet(),
+            )
+            listOf(CANDIDATE, CANDIDATE_2).forEach { serial ->
+                listOf("preflight", "upload", "pair", "verify").forEach { phase ->
+                    assertTrue(result.stdout.contains("$serial:$phase\n"))
+                }
+            }
+        }
+    }
+
+    @Test
     fun modifiedStandardDeploySourceIsRejectedBeforeExecutionWhenTraceIsActive() {
         withFixture { root ->
             Files.writeString(root.resolve("active-adb-trace-v1"), "active\n")
@@ -446,11 +485,33 @@ print("ORDINARY_ENV_PRESERVED=" + str(os.environ.get("RKA_SYNTH_KEEP") == "prese
         }
     }
 
+    private fun writePairV2(root: Path) {
+        val encoder = Base64.getUrlEncoder().withoutPadding()
+        val profileA = "a".repeat(64)
+        val profileB = "b".repeat(64)
+        Files.writeString(
+            root.resolve("device-pair.json"),
+            """{"candidates":[{"serial":"$CANDIDATE","serial_sha256":"${Hashes.sha256(CANDIDATE.toByteArray())}","profile_sha256":"$profileA"},{"serial":"$CANDIDATE_2","serial_sha256":"${Hashes.sha256(CANDIDATE_2.toByteArray())}","profile_sha256":"$profileB"}],"donor_serial":"$DONOR","donor_serial_sha256":"${Hashes.sha256(DONOR.toByteArray())}","schema_version":2}
+""",
+        )
+        Files.writeString(
+            root.resolve("device-pair.env"),
+            "RKA_DEVICE_PAIR_VERSION=2\n" +
+                "RKA_DONOR_SERIAL_B64=${encoder.encodeToString(DONOR.toByteArray())}\n" +
+                "RKA_CANDIDATE_COUNT=2\n" +
+                "RKA_CANDIDATE_0_SERIAL_B64=${encoder.encodeToString(CANDIDATE.toByteArray())}\n" +
+                "RKA_CANDIDATE_0_PROFILE_SHA256=$profileA\n" +
+                "RKA_CANDIDATE_1_SERIAL_B64=${encoder.encodeToString(CANDIDATE_2.toByteArray())}\n" +
+                "RKA_CANDIDATE_1_PROFILE_SHA256=$profileB\n",
+        )
+    }
+
     private data class Result(val exitCode: Int, val stdout: String, val stderr: String)
 
     private companion object {
         const val DONOR = "SYNTH_DONOR"
         const val CANDIDATE = "SYNTH_CANDIDATE"
+        const val CANDIDATE_2 = "SYNTH_CANDIDATE_TWO"
         val SENSITIVE_ENVIRONMENT_NAMES =
             listOf(
                 "RKA_DEVICE_PAIR_VERSION",

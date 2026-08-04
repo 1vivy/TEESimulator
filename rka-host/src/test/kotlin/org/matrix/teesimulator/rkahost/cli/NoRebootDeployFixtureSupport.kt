@@ -492,6 +492,7 @@ case "${'$'}{1-}" in
   stop)
     [ "${'$'}{RKA_FAKE_BUSY_UMOUNT:-}" != live ] || exit 1
     rm -rf "${'$'}state/run/pids"
+    mkdir -p "${'$'}state/run"
     printf 'STOPPED\n' > "${'$'}state/run/supervisor.state"
     [ "${'$'}{RKA_FAKE_FAULT:-}" != after-stop ] || exit 1
     ;;

@@ -83,6 +83,12 @@ if [ "${'$'}{1-}" = direct-identity ]; then
   printf 'RESULT=IDENTITY spki_sha256=%s\n' "${'$'}(cat "${'$'}RKA_STATE_ROOT/trust/transport.pin")"
   exit 0
 fi
+if [ "${'$'}{1-}" = activate-direct ]; then
+  epoch=${'$'}(sed -n '3s/^profile_epoch=//p' "${'$'}RKA_PROFILE_PATH")
+  [ "${'$'}epoch" = "${'$'}RKA_EXPECTED_PROFILE_EPOCH" ] || exit 2
+  printf 'RESULT=ACTIVATED profile_epoch=%s\n' "${'$'}epoch"
+  exit 0
+fi
 if [ "${'$'}{1-}" = direct-probe ]; then
   [ "${'$'}{RKA_FAKE_PROBE_STATUS-}" != unavailable ] || exit 2
   if [ "${'$'}{RKA_FAKE_PROBE_STATUS-}" = stale ]; then

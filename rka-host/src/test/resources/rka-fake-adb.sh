@@ -597,6 +597,11 @@ if [ "${RKA_FAKE_PACKAGE_RUNTIME:-}" = true ]; then
       chmod 600 "$RKA_STATE_ROOT/secrets/transport.key" "$RKA_STATE_ROOT/trust/transport-self.pem" "$RKA_STATE_ROOT/trust/transport-trust.pem" "$RKA_STATE_ROOT/trust/transport.pin" "$RKA_STATE_ROOT/trust/transport-identity.commit"
       printf "RESULT=IDENTITY spki_sha256=%s\\n" "$(cat "$RKA_STATE_ROOT/trust/transport.pin")"
       exit 0 ;;
+    */rka-sidecar:activate-direct)
+      epoch=$(/usr/bin/sed -n "3s/^profile_epoch=//p" "$RKA_PROFILE_PATH")
+      [ "$epoch" = "$RKA_EXPECTED_PROFILE_EPOCH" ] || exit 2
+      printf "RESULT=ACTIVATED profile_epoch=%s\\n" "$epoch"
+      exit 0 ;;
     */rka-sidecar:direct-probe)
       profile_digest=$(/usr/bin/sha256sum "$RKA_PROFILE_PATH")
       profile_sha=${profile_digest%% *}

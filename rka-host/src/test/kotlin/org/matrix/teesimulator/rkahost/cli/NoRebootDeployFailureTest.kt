@@ -160,7 +160,7 @@ class NoRebootDeployFailureTest {
         Fixture().use { fixture ->
             val result = fixture.run()
 
-            assertEquals(result.stderr, 0, result.exitCode)
+            assertEquals("${result.stderr}\ntrace=${fixture.trace()}", 0, result.exitCode)
             assertTrue(fixture.directProfile("DONOR_A").contains("dial_endpoint=192.168.50.10\n"))
             assertTrue(fixture.directProfile("DONOR_A").contains("listen_interface=192.168.50.9\n"))
             assertTrue(fixture.directProfile("CANDIDATE_B").contains("dial_endpoint=192.168.50.10\n"))
@@ -196,7 +196,7 @@ class NoRebootDeployFailureTest {
     fun wifiInterfaceSuffixIsNormalizedWithoutAcceptingMalformedCandidates() {
         Fixture(FixtureMutation.WIFI_SUFFIX).use { fixture ->
             val result = fixture.run()
-            assertEquals(result.stderr, 0, result.exitCode)
+            assertEquals("${result.stderr}\ntrace=${fixture.trace()}", 0, result.exitCode)
         }
         listOf(
                 FixtureMutation.WIFI_MULTIPLE,

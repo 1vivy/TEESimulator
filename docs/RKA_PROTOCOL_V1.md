@@ -1,6 +1,21 @@
 # Normalized RKA protocol v1
 
-Status: fixed implementation contract for the fixture-only two-device RKA route.
+Status: fixed implementation contract for the fixture-only donor-to-candidate
+RKA route.
+
+> [!IMPORTANT]
+> **v1 is TEST-REFERENCE-ONLY.** Production speaks v2. This document is kept as
+> a frozen reference for the v1 hash pins and golden vectors; it is not the
+> protocol a shipped donor and candidate negotiate.
+
+> [!NOTE]
+> A donor may serve several candidates concurrently, but **candidate routing is
+> never a wire field**. Neither v1 nor v2 carries a candidate identifier. The
+> donor resolves the candidate by an internal lookup: it maps the verified TLS
+> peer SPKI plus the selected profile through a pairing catalog to exactly one
+> candidate identity. Because routing lives entirely off the wire, the frame
+> layout, the 21 canonical v2 golden vectors, and the 6 v1 hash pins are
+> byte-identical to before multi-candidate support.
 
 RKA v1 is a normalized, big-endian, bounded request/response protocol. It is
 independent of Binder and Android parcel layouts. The donor retains the Android

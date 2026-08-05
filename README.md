@@ -11,7 +11,7 @@
 ---
 
 > [!NOTE]
-> This beta continues [Enginex0/TEESimulator-RS](https://github.com/Enginex0/TEESimulator-RS), itself based on [JingMatrix/TEESimulator](https://github.com/JingMatrix/TEESimulator). It adds certificate generation written in Rust, persistent keys, and two-device RKA.
+> This beta continues [Enginex0/TEESimulator-RS](https://github.com/Enginex0/TEESimulator-RS), itself based on [JingMatrix/TEESimulator](https://github.com/JingMatrix/TEESimulator). It adds certificate generation written in Rust, persistent keys, and donor-backed RKA in which one donor phone serves several candidate phones.
 
 ## What it does
 
@@ -29,7 +29,7 @@ The module keeps the `tricky_store` module ID and its familiar configuration fil
 1. Android 10 or newer
 2. A root manager: KernelSU, Magisk, or APatch
 3. Zygisk for the keystore interception path
-4. Either a local `keybox.xml` or the two-device RKA setup described below
+4. Either a local `keybox.xml` or the donor-backed RKA setup described below, which needs one donor phone plus one or more candidate phones
 
 ## Local keybox quick start
 
@@ -69,41 +69,82 @@ The module keeps the `tricky_store` module ID and its familiar configuration fil
 
 **Per-app rate limit.** Each app may request at most 2 hardware-backed keys per 30 seconds, and only 2 at a time. Past that, it receives a software-only certificate.
 
-## Two-device RKA mode
+## Donor-backed RKA mode
 
-The experimental RKA beta uses two rooted arm64 devices running the same
-role-neutral module ZIP:
+The experimental RKA beta uses one rooted arm64 **donor** phone and one or more
+rooted arm64 **candidate** phones. Every device runs the same role-neutral
+module ZIP; pairing assigns the roles at runtime.
 
 ```text
-Phone A (donor)                 Phone B (candidate)
-fresh Google RKP key      <---  fresh candidate lease key
-        |
-        +-- TEE imports and certifies the lease key
-        +-- temporary imported blob is deleted
-        |
-        +====== pinned TLS 1.3 ======> persistent synthetic lease
-                                       local attestation while A is offline
+                      donor phone
+              fresh Google RKP keys, real TEE
+                            |
+        +-------------------+-------------------+
+        |                   |                   |
+        |  each candidate's lease key is imported as a TEE ATTEST_KEY,
+        |  certified beneath a fresh RKP key, then the temporary
+        |  imported blob is deleted
+        |                   |                   |
+   pinned TLS 1.3      pinned TLS 1.3      pinned TLS 1.3
+    (TCP 37373)         (TCP 37373)         (TCP 37373)
+        |                   |                   |
+        v                   v                   v
+  candidate 1         candidate 2         candidate N
+  own lease +         own lease +         own lease +
+  own key space       own key space       own key space
+        |                   |                   |
+        +-------------------+-------------------+
+                            |
+        each candidate attests locally for 7 days,
+        with the donor offline
 ```
 
-Phone B creates the synthetic lease key and sends its bounded PKCS#8 material to
-Phone A over mutually authenticated TLS. Phone A imports it as a TEE
-`ATTEST_KEY`, certifies it beneath a freshly provisioned RKP key, deletes the
-temporary imported KeyMint blob, and returns the chain. Phone B validates and
-stores the resulting lease. The donor is needed for issuance and renewal, not
+Each candidate creates its own synthetic lease key and sends the bounded PKCS#8
+material to the donor over mutually authenticated TLS. The donor imports it as a
+TEE `ATTEST_KEY`, certifies it beneath a freshly provisioned RKP key, deletes the
+temporary imported KeyMint blob, and returns the chain. The candidate validates
+and stores the resulting lease. The donor is needed for issuance and renewal, not
 for each application operation. Current leases are valid for seven days.
 
-On Phone B, an explicit `?` entry in `target.txt` selects the active synthetic
-lease. Add or remove applications locally without re-pairing the two phones.
-The candidate preserves its native application key and signature operations;
-the lease supplies the attestation chain. StrongBox, unlisted callers, and
+**How the donor tells candidates apart.** Nothing on the wire names the
+candidate. The public v2 wire protocol did not change. When a candidate
+connects, the donor takes the TLS peer key it just verified (its SPKI) plus the
+selected profile and looks that pair up in a pairing catalog to find the
+candidate identity. One authenticated TLS credential maps to exactly one
+candidate, and the catalog rejects a duplicate pin when it is admitted, using a
+constant-time comparison. Each candidate then gets its own identity, its own
+pinned trust, its own activation record, and its own isolated lease and key
+namespace. A handle that belongs to another candidate is rejected the same way
+an unknown handle is.
+
+**Doing several candidates at once.** Each candidate is served by its own actor,
+and all of their work funnels through a single donor-wide fair round-robin
+scheduler that runs exactly one physical TEE command at a time. That buys fair
+interleaving and network progress that does not block, not parallel TEE
+throughput. The real security chip still does one thing at a time.
+
+**Limits.** The catalog holds 32 paired candidates. Donor-wide there are at most
+4 live sessions and 16 keys; per candidate, at most 4 keys and 1 live operation.
+Exactly 1 physical TEE command is in flight at any moment.
+
+**Configuration on each side.** The donor reads one profile per candidate from
+`profiles/direct.d/<candidate>.conf`. Each candidate phone keeps its existing
+single `profiles/direct.conf`, so from a candidate's own point of view nothing
+changed. On a candidate, an explicit `?` entry in `target.txt` selects the active
+synthetic lease. Add or remove applications locally without re-pairing. The
+candidate preserves its native application key and signature operations; the
+lease supplies the attestation chain. StrongBox, unlisted callers, and
 unsupported requests stay on the normal platform path.
 
-The beta's automatic network path uses direct routed Wi-Fi: Phone A dials Phone
-B on TCP 37373. ADB is used to install and configure the pair but is not the RKA
-data path. See the [RKA beta guide](docs/RKA_BETA_GUIDE.md) for installation,
-pairing, renewal, verification, and recovery, and the
+The WebUI shows one status card per candidate, each with its own lease controls.
+
+The beta's automatic network path uses direct routed Wi-Fi: the donor dials each
+candidate on TCP 37373. ADB is used to install and configure the devices but is
+not the RKA data path. See the [RKA beta guide](docs/RKA_BETA_GUIDE.md) for
+installation, pairing, renewal, verification, and recovery, and the
 [beta release notes](docs/RKA_BETA_RELEASE_NOTES.md) for validated scope and
-known limitations.
+known limitations. Note that the multi-candidate paths are covered by automated
+tests only and have not yet been exercised on physical hardware.
 
 ## Configuration
 
@@ -177,8 +218,10 @@ The ZIPs land in `out/`. Gradle runs `cargo ndk` for you to cross-compile `libce
 | Magisk | Supported |
 | APatch | Supported |
 
-The RKA beta is physically validated on KernelSU/Zygisk only. The compatibility
-table otherwise describes the original local module path.
+The RKA beta is physically validated on KernelSU/Zygisk only, and only for one
+donor paired with one candidate. The multi-candidate paths are covered by
+automated tests only. The compatibility table otherwise describes the original
+local module path.
 
 ## Community
 

@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -9,6 +10,196 @@ const evidence = resolve(
       "../../../TEESimulator-RS/.omo/evidence/two-device-rkp-rka-rust-runtime/round8/task-26-executor",
     ),
 );
+
+const candidateStatus = (candidate: string, readiness: "NOT_READY" | "READY") =>
+  [
+    `candidate_begin=${candidate}`,
+    `candidate_id=${candidate}`,
+    "role=CANDIDATE",
+    "phone_role=PHONE_B_CANDIDATE",
+    "profile_epoch=0",
+    "direct_profile=DIRECT_NETWORK",
+    `direct_readiness=${readiness}`,
+    "pairing=PAIRED",
+    "diagnostic=DIAGNOSTIC_ONLY",
+    "runtime=RUNNING",
+    "sentinel=LIVE",
+    "rkp_provisioning=NOT_APPLICABLE",
+    "synthetic_lease=NOT_READY",
+    "lease_epoch=NOT_APPLICABLE",
+    "lease_next=EMPTY",
+    "lease_valid_until_millis=NOT_APPLICABLE",
+    "quarantine_count=0",
+    `candidate_end=${candidate}`,
+  ].join("\n");
+
+const installBridge = (page: Page) =>
+  page.addInitScript(() => {
+    globalThis.ksu = {
+      exec: async (command: string, callback: string) => {
+        const response = await fetch("/api/exec", {
+          body: JSON.stringify({ command }),
+          headers: { "content-type": "application/json" },
+          method: "POST",
+        });
+        const result = await response.json();
+        const callbackName = callback.slice(callback.lastIndexOf(".") + 1);
+        globalThis.__teesimulatorRkaCallbacks[callbackName](
+          result.errno,
+          result.stdout,
+          result.stderr ?? "",
+        );
+      },
+    };
+  });
+
+test("rendersOneStatusCardPerPairedCandidateWithIndependentLeaseButtons", async ({ page }) => {
+  let statusCalls = 0;
+  await page.route("/api/exec", async (route) => {
+    const command = route.request().postData() ?? "";
+    if (command.includes(" webui renew-synthetic-lease ")) {
+      await route.fulfill({
+        body: JSON.stringify({ errno: 1, stdout: "" }),
+        contentType: "application/json",
+        status: 200,
+      });
+      return;
+    }
+    if (!command.includes(" webui status ")) {
+      await route.continue();
+      return;
+    }
+    statusCalls += 1;
+    const candidateA = candidateStatus("candidate-a", statusCalls === 1 ? "NOT_READY" : "READY");
+    await route.fulfill({
+      body: JSON.stringify({
+        errno: 0,
+        stdout: `${candidateA}\n${candidateStatus("candidate-b", "NOT_READY")}`,
+      }),
+      contentType: "application/json",
+      status: 200,
+    });
+  });
+  await installBridge(page);
+
+  await page.goto("/");
+  const cards = page.locator(".candidate-status-card");
+  await expect(cards).toHaveCount(2);
+  await expect(cards.nth(0).getByRole("heading", { name: "candidate-a" })).toBeVisible();
+  await expect(cards.nth(1).getByRole("heading", { name: "candidate-b" })).toBeVisible();
+  const candidateA = cards.nth(0).getByRole("button", { name: "Issue / renew candidate lease" });
+  const candidateB = cards.nth(1).getByRole("button", { name: "Issue / renew candidate lease" });
+  await expect(candidateA).toBeDisabled();
+  await expect(candidateB).toBeDisabled();
+
+  await page.getByRole("button", { name: "Refresh status" }).click();
+  await expect(candidateA).toBeEnabled();
+  await expect(candidateB).toBeDisabled();
+  const request = page.waitForRequest((value) =>
+    (value.postData() ?? "").includes(" webui renew-synthetic-lease "),
+  );
+  await candidateA.click();
+  await expect((await request).postData() ?? "").toContain(" --candidate candidate-a");
+});
+
+test("returnsFocusToTheTriggeringCandidateControlAfterTheDialogCloses", async ({ page }) => {
+  const cards = `${candidateStatus("candidate-a", "READY")}\n${candidateStatus("candidate-b", "NOT_READY")}`;
+  await page.route("/api/exec", async (route) => {
+    const command = route.request().postData() ?? "";
+    if (command.includes(" webui renew-synthetic-lease ")) {
+      await route.fulfill({
+        body: JSON.stringify({ errno: 0, stdout: `${cards}\nconfirmation_token=abcdef` }),
+        contentType: "application/json",
+        status: 200,
+      });
+      return;
+    }
+    if (!command.includes(" webui status ")) {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      body: JSON.stringify({ errno: 0, stdout: cards }),
+      contentType: "application/json",
+      status: 200,
+    });
+  });
+  await installBridge(page);
+
+  // Given: a ready candidate whose protected action opens the confirmation dialog.
+  await page.goto("/");
+  const statusCards = page.locator(".candidate-status-card");
+  await expect(statusCards).toHaveCount(2);
+  const candidateA = statusCards
+    .nth(0)
+    .getByRole("button", { name: "Issue / renew candidate lease" });
+  await expect(candidateA).toBeEnabled();
+
+  // When: the dialog is opened from that control and then closed.
+  await candidateA.click();
+  await expect(page.locator("#confirmation-dialog")).toHaveAttribute("open", "");
+  await page.evaluate(() => {
+    document.querySelector("#confirmation-dialog").close();
+  });
+
+  // Then: focus returns to that candidate's own live control, not to the document body.
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const active = document.activeElement;
+        return active instanceof HTMLElement
+          ? `${active.dataset.action ?? ""}:${active.dataset.candidateId ?? ""}`
+          : "";
+      }),
+    )
+    .toBe("renew-synthetic-lease:candidate-a");
+});
+
+test("keepsTwoCandidateCardsResponsiveWithCardMajorFocusOrder", async ({ page }) => {
+  await page.route("/api/exec", async (route) => {
+    const command = route.request().postData() ?? "";
+    if (!command.includes(" webui status ")) {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      body: JSON.stringify({
+        errno: 0,
+        stdout: `${candidateStatus("candidate-a", "READY")}\n${candidateStatus("candidate-b", "READY")}`,
+      }),
+      contentType: "application/json",
+      status: 200,
+    });
+  });
+  await installBridge(page);
+  await page.goto("/");
+  const cards = page.locator(".candidate-status-card");
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const wideA = await cards.nth(0).boundingBox();
+  const wideB = await cards.nth(1).boundingBox();
+  if (wideA === null || wideB === null || wideA.x + wideA.width > wideB.x || wideA.y !== wideB.y) {
+    throw new Error("candidate status cards overlap or do not form a wide row");
+  }
+
+  await page.setViewportSize({ width: 375, height: 812 });
+  const narrowA = await cards.nth(0).boundingBox();
+  const narrowB = await cards.nth(1).boundingBox();
+  if (narrowA === null || narrowB === null || narrowA.y + narrowA.height > narrowB.y) {
+    throw new Error("candidate status cards overlap at narrow width");
+  }
+  const hasHorizontalOverflow = await page.evaluate(
+    () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+  );
+  expect(hasHorizontalOverflow).toBe(false);
+
+  const candidateA = cards.nth(0).getByRole("button", { name: "Issue / renew candidate lease" });
+  const candidateB = cards.nth(1).getByRole("button", { name: "Issue / renew candidate lease" });
+  await candidateA.focus();
+  await page.keyboard.press("Tab");
+  await expect(candidateB).toBeFocused();
+  await expect(candidateB).toHaveCSS("outline-width", "3px");
+});
 
 test("live fixed controls expose stable accessible state", async ({ page }) => {
   await page.addInitScript(() => {
@@ -31,6 +222,37 @@ test("live fixed controls expose stable accessible state", async ({ page }) => {
     page.getByRole("button", { name: "Request direct pairing" }).click(),
   ]);
   await expect(page.getByLabel("rka-last-operation")).toHaveText("Request accepted");
+  await page.route("/api/exec", async (route) => {
+    const command = route.request().postData() ?? "";
+    if (!command.includes(" webui start ")) {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      body: JSON.stringify({
+        errno: 0,
+        stdout: [
+          "role=DONOR",
+          "phone_role=PHONE_A_DONOR",
+          "profile_epoch=0",
+          "direct_profile=DIRECT_NETWORK",
+          "direct_readiness=READY",
+          "pairing=PAIRED",
+          "diagnostic=DIAGNOSTIC_ONLY",
+          "runtime=RUNNING",
+          "sentinel=LIVE",
+          "rkp_provisioning=NOT_READY",
+          "synthetic_lease=NOT_APPLICABLE",
+          "lease_epoch=NOT_APPLICABLE",
+          "lease_next=EMPTY",
+          "lease_valid_until_millis=NOT_APPLICABLE",
+          "quarantine_count=0",
+        ].join("\n"),
+      }),
+      contentType: "application/json",
+      status: 200,
+    });
+  }, { times: 1 });
   await Promise.all([
     page.waitForResponse((response) => response.url().endsWith("/api/exec")),
     page.getByLabel("rka-start").click(),
@@ -140,7 +362,6 @@ test("live fixed controls expose stable accessible state", async ({ page }) => {
           "lease_next=EMPTY",
           "lease_valid_until_millis=NOT_APPLICABLE",
           "quarantine_count=0",
-          "next_nonce=11111111111111111111111111111111",
         ].join("\n"),
       }),
       contentType: "application/json",
@@ -173,7 +394,6 @@ test("live fixed controls expose stable accessible state", async ({ page }) => {
           "lease_next=EMPTY",
           "lease_valid_until_millis=1800000000000",
           "quarantine_count=0",
-          "next_nonce=22222222222222222222222222222222",
         ].join("\n"),
       }),
       contentType: "application/json",

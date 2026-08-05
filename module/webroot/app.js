@@ -69,11 +69,14 @@
 
   let nonce = "";
   let pending = "";
+  let pendingCandidate = "";
+  let focusAction = "";
+  let focusCandidate = "";
   let profileRole = "";
   let callbackSequence = 0;
   const bridgeCallbacks = Object.create(null);
   globalThis.__teesimulatorRkaCallbacks = bridgeCallbacks;
-  const status = document.querySelector("#rka-status");
+  const statusList = document.querySelector("#rka-status-list");
   const operation = document.querySelector("#command-state");
   const dialog = document.querySelector("#confirmation-dialog");
   const dialogState = document.querySelector("#confirmation-state");
@@ -81,19 +84,41 @@
   const input = document.querySelector("#confirmation-input");
   const submit = document.querySelector("#confirmation-submit");
   const provision = document.querySelector('button[data-action="provision-rkp"]');
-  const renew = document.querySelector('button[data-action="renew-synthetic-lease"]');
+  const candidateLeaseAction = document.querySelector("#candidate-lease-action");
+  const candidateStates = new Map();
   let currentRole = "";
-  let directReadiness = "";
-  let syntheticLease = "";
-  let leaseNext = "";
 
   function parse(stdout) {
     const values = new Map();
+    const candidates = [];
+    let candidate = null;
     for (const line of String(stdout).split("\n")) {
       const index = line.indexOf("=");
-      if (index > 0) values.set(line.slice(0, index), line.slice(index + 1));
+      if (index <= 0) continue;
+      const name = line.slice(0, index);
+      const value = line.slice(index + 1);
+      if (name === "candidate_begin") {
+        if (candidate !== null) throw new Error("Candidate status blocks overlapped");
+        candidate = new Map([[name, value]]);
+      } else if (name === "candidate_end") {
+        if (
+          candidate === null ||
+          candidate.get("candidate_begin") !== value ||
+          candidate.get("candidate_id") !== value
+        ) {
+          throw new Error("Candidate status block was invalid");
+        }
+        candidates.push(candidate);
+        candidate = null;
+      } else {
+        (candidate ?? values).set(name, value);
+      }
     }
-    return values;
+    if (candidate !== null) throw new Error("Candidate status block was incomplete");
+    if (candidates.length === 0 && displayed.some((name) => values.has(name))) {
+      candidates.push(values);
+    }
+    return { values, candidates };
   }
 
   function readable(value) {
@@ -114,32 +139,74 @@
 
   function updateRoleControls() {
     provision.disabled = currentRole !== "DONOR";
-    renew.disabled = !(
-      currentRole === "CANDIDATE" &&
-      directReadiness === "READY" &&
-      (syntheticLease === "NOT_READY" || syntheticLease === "ACTIVE") &&
-      leaseNext === "EMPTY"
-    );
+    for (const renew of statusList.querySelectorAll('button[data-action="renew-synthetic-lease"]')) {
+      const candidate = candidateStates.get(renew.dataset.candidateId ?? "");
+      renew.disabled = !(
+        candidate?.get("role") === "CANDIDATE" &&
+        candidate.get("direct_readiness") === "READY" &&
+        (candidate.get("synthetic_lease") === "NOT_READY" ||
+          candidate.get("synthetic_lease") === "ACTIVE") &&
+        candidate.get("lease_next") === "EMPTY"
+      );
+    }
   }
 
-  function render(values) {
-    currentRole = values.get("role") ?? "";
-    directReadiness = values.get("direct_readiness") ?? "";
-    syntheticLease = values.get("synthetic_lease") ?? "";
-    leaseNext = values.get("lease_next") ?? "";
-    updateRoleControls();
-    status.replaceChildren();
-    for (const name of displayed) {
-      const box = document.createElement("div");
-      const dt = document.createElement("dt");
-      const dd = document.createElement("dd");
-      dt.textContent = name.replaceAll("_", " ");
-      dd.textContent = readableStatus(name, values.get(name) ?? "UNAVAILABLE");
-      if (name === "role") dd.setAttribute("aria-label", "rka-role-value");
-      if (name === "direct_readiness") dd.setAttribute("aria-label", "rka-connection-value");
-      box.append(dt, dd);
-      status.append(box);
+  function render(candidates) {
+    currentRole = candidates[0]?.get("role") ?? "";
+    candidateStates.clear();
+    statusList.replaceChildren();
+    for (const [candidateIndex, values] of candidates.entries()) {
+      const candidateId = values.get("candidate_id") ?? "";
+      const candidateKey = candidateId === "" ? `legacy-${candidateIndex}` : candidateId;
+      const headingId = `candidate-status-heading-${candidateIndex}`;
+      candidateStates.set(candidateId, values);
+      const card = document.createElement("section");
+      card.className = "candidate-status-card";
+      card.dataset.candidateId = candidateId;
+      card.setAttribute("aria-labelledby", headingId);
+      const heading = document.createElement("div");
+      heading.className = "candidate-card-heading";
+      const label = document.createElement("p");
+      label.className = "eyebrow";
+      label.textContent = candidateId === "" ? "Local status" : "Paired candidate";
+      const title = document.createElement("h3");
+      title.id = headingId;
+      title.textContent = candidateId === "" ? "Current device" : candidateId;
+      heading.append(label, title);
+      const status = document.createElement("dl");
+      status.className = "status-grid";
+      status.setAttribute("aria-live", "polite");
+      for (const name of displayed) {
+        const box = document.createElement("div");
+        const dt = document.createElement("dt");
+        const dd = document.createElement("dd");
+        dt.textContent = name.replaceAll("_", " ");
+        dd.textContent = readableStatus(name, values.get(name) ?? "UNAVAILABLE");
+        if (name === "role") {
+          dd.setAttribute(
+            "aria-label",
+            candidateId === "" ? "rka-role-value" : `rka-role-value-${candidateKey}`,
+          );
+        }
+        if (name === "direct_readiness") {
+          dd.setAttribute(
+            "aria-label",
+            candidateId === "" ? "rka-connection-value" : `rka-connection-value-${candidateKey}`,
+          );
+        }
+        box.append(dt, dd);
+        status.append(box);
+      }
+      const renew = candidateLeaseAction.content.firstElementChild?.cloneNode(true);
+      if (!(renew instanceof HTMLButtonElement)) throw new Error("Candidate lease action was unavailable");
+      if (candidateId !== "") renew.dataset.candidateId = candidateId;
+      renew.addEventListener("click", () => {
+        void handle(renew);
+      });
+      card.append(heading, status, renew);
+      statusList.append(card);
     }
+    updateRoleControls();
   }
 
   function setConfirmationState(state, message) {
@@ -155,12 +222,21 @@
     return new Promise((resolve, reject) => {
       callbackSequence += 1;
       const name = `request${callbackSequence}`;
-      bridgeCallbacks[name] = (errno, stdout, stderr) => {
+      let settled = false;
+      const settle = (value) => {
+        if (settled) return;
+        settled = true;
         delete bridgeCallbacks[name];
-        resolve({ errno, stdout, stderr });
+        resolve(value);
+      };
+      bridgeCallbacks[name] = (errno, stdout, stderr) => {
+        settle({ errno, stdout, stderr });
       };
       try {
-        bridge.exec(command, `globalThis.__teesimulatorRkaCallbacks.${name}`);
+        const returned = bridge.exec(command, `globalThis.__teesimulatorRkaCallbacks.${name}`);
+        if (returned && typeof returned.then === "function") {
+          returned.then(settle, reject);
+        }
       } catch (error) {
         delete bridgeCallbacks[name];
         reject(error);
@@ -186,26 +262,36 @@
     return { errno, stdout: value.stdout, stderr: value.stderr };
   }
 
-  async function invoke(action, confirmation = "") {
+  async function invoke(action, confirmation = "", candidate = "") {
     if (!Object.hasOwn(actions, action) || nonce === "") throw new Error("WebUI request was rejected");
+    if (candidate !== "" && !/^[A-Za-z0-9._:-]+$/.test(candidate)) {
+      throw new Error("Candidate selector was invalid");
+    }
     let commandAction = actions[action];
     if (action === "profile-validate" || action === "profile-apply") {
       if (profileRole === "") throw new Error("Select a valid profile first");
       commandAction = `${commandAction}-${profileRole.toLowerCase()}`;
     }
     const suffix = confirmation === "" ? "" : ` ${confirmation}`;
-    const response = checked(await exec(`${control} webui ${commandAction} ${nonce}${suffix}`));
+    const candidateSuffix = candidate === "" ? "" : ` --candidate ${candidate}`;
+    const response = checked(
+      await exec(`${control} webui ${commandAction} ${nonce}${suffix}${candidateSuffix}`),
+    );
     if (response.errno !== 0) throw new Error("Fixed control request failed");
-    const values = parse(response.stdout);
+    const parsed = parse(response.stdout);
+    const values = parsed.values;
     const next = values.get("next_nonce");
     if (next !== undefined) {
       if (!/^[0-9a-f]{32}$/.test(next)) throw new Error("WebUI session rotation was invalid");
       nonce = next;
     }
-    render(values);
+    render(parsed.candidates);
     const requested = values.get("confirmation_token");
     if (requested !== undefined) {
       pending = action;
+      pendingCandidate = candidate;
+      focusAction = action;
+      focusCandidate = candidate;
       token.textContent = requested;
       input.value = "";
       submit.textContent = "Confirm action";
@@ -222,7 +308,7 @@
   async function handle(button) {
     button.disabled = true;
     try {
-      await invoke(button.dataset.action);
+      await invoke(button.dataset.action, "", button.dataset.candidateId ?? "");
     } catch (error) {
       operation.textContent = error instanceof Error ? error.message : "WebUI request failed";
     } finally {
@@ -247,14 +333,16 @@
       input.disabled = true;
       setConfirmationState("busy", "Applying protected action");
       try {
-        await invoke(action, input.value);
+        await invoke(action, input.value, pendingCandidate);
         pending = "";
+        pendingCandidate = "";
         token.textContent = "";
         input.value = "";
         submit.textContent = "Close";
         setConfirmationState("accepted", "Protected action accepted");
       } catch (error) {
         pending = "";
+        pendingCandidate = "";
         token.textContent = "";
         input.value = "";
         submit.textContent = "Close";
@@ -265,6 +353,20 @@
         input.disabled = false;
       }
     })();
+  });
+
+  // Re-rendering candidate cards detaches the triggering control, so the dialog's native
+  // return-focus has nothing to restore; re-resolve the equivalent live control instead.
+  dialog.addEventListener("close", () => {
+    if (focusAction === "") return;
+    const restored = Array.from(document.querySelectorAll("button[data-action]")).find(
+      (control) =>
+        control.dataset.action === focusAction &&
+        (control.dataset.candidateId ?? "") === focusCandidate,
+    );
+    focusAction = "";
+    focusCandidate = "";
+    if (restored instanceof HTMLButtonElement) restored.focus();
   });
 
   for (const button of document.querySelectorAll("button[data-action]")) {
@@ -303,7 +405,7 @@
 
   void (async () => {
     const opened = checked(await exec(`${control} webui-open`));
-    nonce = parse(opened.stdout).get("nonce") ?? "";
+    nonce = parse(opened.stdout).values.get("nonce") ?? "";
     if (opened.errno !== 0 || !/^[0-9a-f]{32}$/.test(nonce)) {
       throw new Error("WebUI session was rejected");
     }

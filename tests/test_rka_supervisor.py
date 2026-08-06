@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import select
@@ -172,7 +173,7 @@ class RkaSupervisorTest(unittest.TestCase):
         root.mkdir()
         child = root / "fake-child.sh"
         child.write_text(
-            "#!/bin/sh\nprintf '%s %s RKA_PROFILE_PATH=%s RKA_EXPECTED_PROFILE_EPOCH=%s RKA_PROFILE_RECEIPT_PATH=%s RKA_DONOR_SOCKET=%s\\n' \"$0\" \"$*\" \"${RKA_PROFILE_PATH-}\" \"${RKA_EXPECTED_PROFILE_EPOCH-}\" \"${RKA_PROFILE_RECEIPT_PATH-}\" \"${RKA_DONOR_SOCKET-}\" >> \"$RKA_CHILD_LOG\"\nif [ -n \"${RKA_PROFILE_RECEIPT_PATH-}\" ]; then profile_hash=$(sha256sum \"$RKA_PROFILE_PATH\" | awk '{print $1}'); printf 'version=1\\nprofile_sha256=%s\\nprofile_epoch=%s\\npeer_pin_sha256=%064d\\ndial_mode=DONOR_DIALS\\ntransport=DIRECT\\n' \"$profile_hash\" \"$RKA_EXPECTED_PROFILE_EPOCH\" 0 > \"$RKA_PROFILE_RECEIPT_PATH\"; chmod 600 \"$RKA_PROFILE_RECEIPT_PATH\"; fi\n[ \"${RKA_CHILD_MODE:-hold}\" = crash ] && exit 7\nif [ \"${RKA_CHILD_MODE:-hold}\" = crash-once ] && [ ! -e \"$RKA_CRASH_ONCE_FILE\" ]; then : > \"$RKA_CRASH_ONCE_FILE\"; sleep 1; exit 7; fi\nif [ \"${RKA_CHILD_MODE:-hold}\" = ignore-term ]; then trap '' TERM INT; else trap 'printf term\\n >> \"$RKA_CHILD_LOG\"; exit 0' TERM INT; fi\nwhile :; do sleep 1; done\n",
+            "#!/bin/sh\nprintf '%s %s RKA_PROFILE_PATH=%s RKA_EXPECTED_PROFILE_EPOCH=%s RKA_PROFILE_RECEIPT_PATH=%s RKA_DONOR_SOCKET=%s\\n' \"$0\" \"$*\" \"${RKA_PROFILE_PATH-}\" \"${RKA_EXPECTED_PROFILE_EPOCH-}\" \"${RKA_PROFILE_RECEIPT_PATH-}\" \"${RKA_DONOR_SOCKET-}\" >> \"$RKA_CHILD_LOG\"\nif [ -n \"${RKA_PROFILE_RECEIPT_PATH-}\" ]; then profile_hash=$(sha256sum \"$RKA_PROFILE_PATH\" | awk '{print $1}'); printf 'version=1\\nprofile_sha256=%s\\nprofile_epoch=%s\\npeer_pin_sha256=%064d\\ndial_mode=DONOR_DIALS\\ntransport=DIRECT\\n' \"$profile_hash\" \"$RKA_EXPECTED_PROFILE_EPOCH\" 0 > \"$RKA_PROFILE_RECEIPT_PATH\"; chmod 600 \"$RKA_PROFILE_RECEIPT_PATH\"; if [ \"${RKA_TEST_SOCKET_OWNER:-sidecar}\" != broker ]; then python3 -c 'import os, socket, sys, time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); os.chmod(sys.argv[1], 0o600); s.listen(); time.sleep(3600)' \"$RKA_DONOR_SOCKET\" & fi; fi\nif [ \"${RKA_TEST_SOCKET_OWNER:-sidecar}\" = broker ] && [ -z \"${RKA_PROFILE_RECEIPT_PATH-}\" ] && [ -n \"${RKA_TEST_BROKER_SOCKET-}\" ]; then case \" $* \" in *\" --rka-role donor \"*) python3 -c 'import os, socket, sys, time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); os.chmod(sys.argv[1], 0o600); s.listen(); time.sleep(3600)' \"$RKA_TEST_BROKER_SOCKET\" & ;; esac; fi\nif [ \"${RKA_CHILD_MODE:-hold}\" = crash ]; then sleep 2; exit 7; fi\nif [ \"${RKA_CHILD_MODE:-hold}\" = crash-once ] && [ ! -e \"$RKA_CRASH_ONCE_FILE\" ]; then : > \"$RKA_CRASH_ONCE_FILE\"; sleep 2; exit 7; fi\nif [ \"${RKA_CHILD_MODE:-hold}\" = ignore-term ]; then trap '' TERM INT; elif [ \"${RKA_CHILD_MODE:-hold}\" = slow-term ]; then trap 'printf terminating\\n >> \"$RKA_CHILD_LOG\"; sleep 2; printf term\\n >> \"$RKA_CHILD_LOG\"; exit 0' TERM INT; else trap 'printf term\\n >> \"$RKA_CHILD_LOG\"; exit 0' TERM INT; fi\nwhile :; do sleep 1; done\n",
             encoding="utf-8",
         )
         child.chmod(0o755)
@@ -208,6 +209,30 @@ class RkaSupervisorTest(unittest.TestCase):
             self.clean(root, state)
             temporary.cleanup()
 
+    def test_local_launches_daemon_with_module_directory(self) -> None:
+        temporary, root, state = self.fixture("LOCAL")
+        try:
+            result = self.command(root, state, "start")
+            child_log = (root / "children.log").read_text(encoding="utf-8")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(
+                child_log.startswith(f"{root / 'fake-child.sh'} {SUPERVISOR.parent} "),
+                child_log,
+            )
+        finally:
+            self.clean(root, state)
+            temporary.cleanup()
+
+    def test_supervisor_canonicalizes_module_directory_before_detach(self) -> None:
+        source = SUPERVISOR.read_text(encoding="utf-8")
+        self.assertIn('module_directory=$(CDPATH=\'\' cd -- "${0%/*}" && pwd)', source)
+
+    def test_local_liveness_does_not_require_remote_identity_record(self) -> None:
+        source = SUPERVISOR.read_text(encoding="utf-8")
+        record_live = source[source.index("record_live() {") : source.index("profile_valid() {")]
+        self.assertIn("legacy) return 0", record_live)
+
     def test_donor_process_graph(self) -> None:
         temporary, root, state = self.fixture("DONOR")
         try:
@@ -223,6 +248,60 @@ class RkaSupervisorTest(unittest.TestCase):
             )
             self.assertNotIn("--rka-candidate", child_log)
             self.assertNotIn("legacy=RUNNING", status.stdout)
+        finally:
+            self.clean(root, state)
+            temporary.cleanup()
+
+    def test_donor_starts_broker_before_waiting_for_broker_owned_socket(self) -> None:
+        temporary, root, state = self.fixture("DONOR")
+        socket_path = state / "run" / "sockets" / "broker.sock"
+        environment = {
+            "RKA_TEST_SOCKET_OWNER": "broker",
+            "RKA_TEST_BROKER_SOCKET": str(socket_path),
+        }
+        try:
+            started = self.command(root, state, "start", environment=environment)
+            status = self.command(root, state, "status", environment=environment)
+
+            self.assertEqual(started.returncode, 0, started.stderr)
+            self.assertIn("broker=RUNNING", status.stdout)
+            self.assertIn("sidecar=RUNNING", status.stdout)
+            self.assertTrue(socket_path.is_socket())
+        finally:
+            self.clean(root, state)
+            temporary.cleanup()
+
+    def test_stop_publishes_stopped_only_after_children_exit(self) -> None:
+        temporary, root, state = self.fixture("DONOR")
+        environment = {"RKA_CHILD_MODE": "slow-term"}
+        try:
+            self.assertEqual(
+                self.command(root, state, "start", environment=environment).returncode,
+                0,
+            )
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                stopping = executor.submit(
+                    self.command,
+                    root,
+                    state,
+                    "stop",
+                    environment=environment,
+                )
+                deadline = monotonic() + 3
+                while monotonic() < deadline:
+                    if "terminating" in (root / "children.log").read_text(encoding="utf-8"):
+                        break
+                    sleep(0.01)
+                self.assertEqual(
+                    (state / "run" / "supervisor.state").read_text(encoding="utf-8"),
+                    "STOPPING\n",
+                )
+                stopped = stopping.result(timeout=15)
+            self.assertEqual(stopped.returncode, 0, stopped.stderr)
+            self.assertEqual(
+                (state / "run" / "supervisor.state").read_text(encoding="utf-8"),
+                "STOPPED\n",
+            )
         finally:
             self.clean(root, state)
             temporary.cleanup()
@@ -245,12 +324,6 @@ class RkaSupervisorTest(unittest.TestCase):
             ]
             sockets = [state / "run" / "sockets" / f"broker-{candidate}.sock" for candidate in candidates]
             sidecar_pids = [state / "run" / "pids" / f"sidecar-{candidate}.pid" for candidate in candidates]
-            for socket_path in sockets:
-                listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                listener.bind(str(socket_path))
-                socket_path.chmod(0o600)
-                listeners.append(listener)
-
             stopped = self.command(root, state, "stop", candidates[0])
 
             self.assertEqual(started.returncode, 0, started.stderr)
@@ -637,8 +710,8 @@ class RkaSupervisorTest(unittest.TestCase):
                 os.kill(child_pid, 0)
             source = SUPERVISOR.read_text(encoding="utf-8")
             sigkill = source.index('kill -KILL "$pid"')
-            self.assertIn('while record_live "$record"', source[sigkill:])
-            self.assertIn('record_live "$record" && return 1', source[sigkill:])
+            self.assertIn('while record_generation_live "$record"', source[sigkill:])
+            self.assertIn('record_generation_live "$record" && return 1', source[sigkill:])
         finally:
             self.clean(root, state)
             temporary.cleanup()
@@ -647,8 +720,13 @@ class RkaSupervisorTest(unittest.TestCase):
         temporary, root, state = self.fixture("LOCAL")
         try:
             result = self.command(root, state, "start", environment={"RKA_CHILD_MODE": "crash"})
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("state=FAILED_CRASH_CAP", self.command(root, state, "status").stdout)
+            self.assertEqual(result.returncode, 0)
+            deadline = monotonic() + 12
+            status = self.command(root, state, "status").stdout
+            while "state=FAILED_CRASH_CAP" not in status and monotonic() < deadline:
+                sleep(0.05)
+                status = self.command(root, state, "status").stdout
+            self.assertIn("state=FAILED_CRASH_CAP", status)
         finally:
             self.clean(root, state)
             temporary.cleanup()
@@ -660,12 +738,17 @@ class RkaSupervisorTest(unittest.TestCase):
             marker.parent.mkdir(parents=True)
             marker.write_text("RKP_KEY_GENERATING\n", encoding="utf-8")
             result = self.command(root, state, "start", environment={"RKA_CHILD_MODE": "crash"})
-            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.returncode, 0)
+            deadline = monotonic() + 5
+            status = self.command(root, state, "status").stdout
+            while "state=QUARANTINED_AMBIGUOUS_MUTATION" not in status and monotonic() < deadline:
+                sleep(0.05)
+                status = self.command(root, state, "status").stdout
             self.assertIn(
                 "state=QUARANTINED_AMBIGUOUS_MUTATION",
-                self.command(root, state, "status").stdout,
+                status,
             )
-            self.assertEqual((root / "children.log").read_text(encoding="utf-8").count("legacy"), 1)
+            self.assertEqual(len((root / "children.log").read_text(encoding="utf-8").splitlines()), 1)
         finally:
             self.clean(root, state)
             temporary.cleanup()
@@ -692,11 +775,18 @@ class RkaSupervisorTest(unittest.TestCase):
                     ).returncode,
                     0,
                 )
-                deadline = monotonic() + 3
-                while "state=RUNNING" in self.command(root, state, "status").stdout and monotonic() < deadline:
-                    sleep(0.02)
+                deadline = monotonic() + 5
                 status = self.command(root, state, "status").stdout
-                launches = (root / "children.log").read_text(encoding="utf-8").count("legacy")
+                launches = len((root / "children.log").read_text(encoding="utf-8").splitlines())
+                while monotonic() < deadline:
+                    if marker_value in quarantined:
+                        if "state=QUARANTINED_AMBIGUOUS_MUTATION" in status:
+                            break
+                    elif launches >= 2 and "legacy=RUNNING" in status:
+                        break
+                    sleep(0.02)
+                    status = self.command(root, state, "status").stdout
+                    launches = len((root / "children.log").read_text(encoding="utf-8").splitlines())
                 if marker_value in quarantined:
                     self.assertIn("state=QUARANTINED_AMBIGUOUS_MUTATION", status)
                     self.assertEqual(launches, 1)
@@ -743,5 +833,5 @@ class RkaSupervisorTest(unittest.TestCase):
     def test_module_installer_ships_supervisor(self) -> None:
         source = CUSTOMIZE.read_text(encoding="utf-8")
         self.assertIn("rka-supervisor.sh", source)
-        self.assertIn('chmod 755 "$MODPATH/rka-supervisor.sh"', source)
+        self.assertIn('set_perm "$MODPATH/$file" 0 0 0755', source)
         self.assertIn("rka-sidecar", source)

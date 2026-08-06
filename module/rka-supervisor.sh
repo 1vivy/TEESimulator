@@ -8,7 +8,7 @@ readonly MAX_CRASHES=3
 
 root=$DEFAULT_ROOT
 state=$DEFAULT_STATE
-module_directory=${0%/*}
+module_directory=$(CDPATH='' cd -- "${0%/*}" && pwd)
 control=${RKA_CONTROL:-${0%/*}/rka-control.sh}
 daemon=${RKA_DAEMON:-${0%/*}/daemon}
 sidecar=${RKA_SIDECAR:-${0%/*}/rka-sidecar}
@@ -224,10 +224,37 @@ $selected_role"
     trap - EXIT HUP INT TERM
 }
 
-record_live() {
+record_generation_live() {
     [ -f "$1" ] || return 1
     IFS=' ' read -r pid pgid start < "$1" || return 1
     [ "$(proc_stamp "$pid")" = "$pid $pgid $start" ] || return 1
+}
+
+record_live() {
+    record_generation_live "$1" || return 1
+    record_name=${1##*/}
+    record_name=${record_name%.pid}
+    case $record_name in legacy) return 0 ;; esac
+    identity_contract_required || return 0
+    identity=$pids/$record_name.identity
+    [ -f "$identity" ] && [ ! -L "$identity" ] || return 1
+    [ "$(stat -c '%u:%a' "$identity")" = "$(id -u):600" ] || return 1
+    [ "$(wc -l < "$identity")" -eq 10 ] || return 1
+    [ "$(sed -n '1p' "$identity")" = version=1 ] || return 1
+    [ "$(sed -n '4p' "$identity")" = "uid=$(id -u)" ] || return 1
+    [ "$(sed -n '5p' "$identity")" = "gid=$(id -g)" ] || return 1
+    [ "$(sed -n '6p' "$identity")" = "pid=$pid" ] || return 1
+    [ "$(sed -n '7p' "$identity")" = "start_time_ticks=$start" ] || return 1
+    identity_inode_line=$(sed -n '8p' "$identity") || return 1
+    case $identity_inode_line in executable_inode=*) ;; *) return 1 ;; esac
+    identity_inode=${identity_inode_line#executable_inode=}
+    case $identity_inode in ''|*[!0-9]*) return 1 ;; esac
+    identity_path_line=$(sed -n '9p' "$identity") || return 1
+    case $identity_path_line in executable_path=*) ;; *) return 1 ;; esac
+    identity_path=${identity_path_line#executable_path=}
+    [ -n "$identity_path" ] || return 1
+    [ "$(readlink "/proc/$pid/exe")" = "$identity_path" ] || return 1
+    [ "$(stat -Lc '%i' "/proc/$pid/exe")" = "$identity_inode" ]
 }
 
 profile_valid() {
@@ -299,6 +326,14 @@ write_record() {
     chmod 600 "$pids/$name.pid"
 }
 
+write_supervisor_state() {
+    target_state_file=$1
+    next_state=$2
+    [ ! -L "$target_state_file" ] || return 1
+    printf '%s\n' "$next_state" > "$target_state_file" || return 1
+    chmod 600 "$target_state_file"
+}
+
 child_loop() {
     name=$1
     selected_role=$2
@@ -368,11 +403,11 @@ start_one() {
         --root "$root" --state-root "$state" __child-loop "$name" "$selected_role" \
         "$selected_candidate" "$@" || return 1
     attempts=0
-    while [ ! -f "$pids/$name.pid" ] && [ "$attempts" -lt 5 ]; do
-        sleep 1
+    while ! record_live "$pids/$name.pid" && [ "$attempts" -lt 100 ]; do
+        sleep 0.1
         attempts=$((attempts + 1))
     done
-    [ -f "$pids/$name.pid" ]
+    record_live "$pids/$name.pid"
 }
 
 profile_receipt_valid() {
@@ -429,16 +464,87 @@ start_sidecar() {
     profile_receipt_valid "$receipt_path" "$profile_hash" "$selected_epoch"
 }
 
+wait_sidecar_socket() {
+    selected_candidate=${1:-}
+    if [ -n "$selected_candidate" ]; then
+        process_name=sidecar-$selected_candidate
+    else
+        process_name=sidecar
+    fi
+    attempts=0
+    while ! runtime_socket_ready "$selected_candidate" && [ "$attempts" -lt 5 ]; do
+        record_live "$pids/$process_name.pid" || return 1
+        sleep 1
+        attempts=$((attempts + 1))
+    done
+    runtime_socket_ready "$selected_candidate"
+}
+
 start_donor_candidate() {
     selected_candidate=$1
+    selected_state_file=$run/supervisor-$selected_candidate.state
+    write_supervisor_state "$selected_state_file" STARTING || return 1
     profile_path=$state/profiles/direct.d/$selected_candidate.conf
     direct_profile_valid DONOR "$active_epoch" "$profile_path" || return 1
     start_sidecar donor "$active_epoch" "$selected_candidate" || return 1
     start_one "broker-$selected_candidate" donor "$selected_candidate" env \
         RKA_DONOR_SOCKET="$run/sockets/broker-$selected_candidate.sock" \
         "$daemon" "$module_directory" --rka-role donor || return 1
-    printf '%s\n' RUNNING > "$run/supervisor-$selected_candidate.state"
-    chmod 600 "$run/supervisor-$selected_candidate.state"
+    wait_sidecar_socket "$selected_candidate" || return 1
+    candidate_graph_ready "$selected_candidate" || return 1
+    write_supervisor_state "$selected_state_file" RUNNING
+}
+
+runtime_socket_ready() {
+    selected_candidate=${1:-}
+    if [ -n "$selected_candidate" ]; then
+        candidate_is_valid "$selected_candidate" || return 1
+        selected_socket=$run/sockets/broker-$selected_candidate.sock
+    else
+        selected_socket=$run/sockets/broker.sock
+    fi
+    [ -S "$selected_socket" ] && [ ! -L "$selected_socket" ] &&
+        [ "$(stat -c '%u:%g:%a' "$selected_socket")" = "$(id -u):$(id -g):600" ]
+}
+
+candidate_graph_ready() {
+    selected_candidate=$1
+    candidate_is_valid "$selected_candidate" || return 1
+    profile_path=$state/profiles/direct.d/$selected_candidate.conf
+    receipt_path=$run/direct-profile-$selected_candidate.receipt
+    profile_hash=$(sha256sum "$profile_path" | awk '{print $1}') || return 1
+    record_live "$pids/broker-$selected_candidate.pid" &&
+        record_live "$pids/sidecar-$selected_candidate.pid" &&
+        profile_receipt_valid "$receipt_path" "$profile_hash" "$active_epoch" &&
+        runtime_socket_ready "$selected_candidate"
+}
+
+global_graph_ready() {
+    selected_role=$1
+    case $selected_role in
+        LOCAL) record_live "$pids/legacy.pid" ;;
+        DONOR|CANDIDATE)
+            profile_path=$state/profiles/direct.conf
+            receipt_path=$run/direct-profile.receipt
+            profile_hash=$(sha256sum "$profile_path" | awk '{print $1}') || return 1
+            record_live "$pids/broker.pid" &&
+                record_live "$pids/sidecar.pid" &&
+                profile_receipt_valid "$receipt_path" "$profile_hash" "$active_epoch" &&
+                runtime_socket_ready
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+all_candidate_graphs_ready() {
+    selected_candidates=$(donor_candidates) || return 1
+    [ -n "$selected_candidates" ] || return 1
+    while IFS= read -r selected_candidate; do
+        [ -n "$selected_candidate" ] || continue
+        candidate_graph_ready "$selected_candidate" || return 1
+    done <<EOF
+$selected_candidates
+EOF
 }
 
 start() {
@@ -467,12 +573,15 @@ start() {
         *) return 1 ;;
     esac
     umask 077
-    mkdir -p "$pids" || return 1
-    chmod 700 "$run" "$pids" || return 1
+    socket_directory=$run/sockets
+    mkdir -p "$pids" "$socket_directory" || return 1
+    chmod 700 "$run" "$pids" "$socket_directory" || return 1
+    private_directory "$socket_directory" || return 1
+    ensure_socket_directory_context "$socket_directory" || return 1
     [ "$(cat "$state_file" 2>/dev/null)" = FAILED_CRASH_CAP ] && return 1
-    printf '%s\n' RUNNING > "$state_file"
+    write_supervisor_state "$state_file" STARTING || return 1
     case $role in
-        LOCAL) start_one legacy '' '' "$daemon" legacy ;;
+        LOCAL) start_one legacy '' '' "$daemon" "$module_directory" ;;
         DONOR)
             materialize_sidecar || { stop; return 1; }
             selected_candidates=$(donor_candidates) || { stop; return 1; }
@@ -487,12 +596,26 @@ EOF
                 direct_profile_valid DONOR "$active_epoch" || { stop; return 1; }
                 start_sidecar donor "$active_epoch" || { stop; return 1; }
                 start_one broker donor '' "$daemon" "$module_directory" --rka-role donor || { stop; return 1; }
+                wait_sidecar_socket || { stop; return 1; }
             fi
             ;;
         CANDIDATE)
             materialize_sidecar || { stop; return 1; }
             start_sidecar candidate "$active_epoch" || { stop; return 1; }
+            wait_sidecar_socket || { stop; return 1; }
             start_one broker candidate '' "$daemon" "$module_directory" --rka-role candidate || { stop; return 1; }
+            ;;
+    esac
+    case $role in
+        DONOR)
+            if [ -n "${selected_candidates:-}" ]; then
+                write_supervisor_state "$state_file" RUNNING
+            else
+                global_graph_ready "$role" && write_supervisor_state "$state_file" RUNNING
+            fi
+            ;;
+        LOCAL|CANDIDATE)
+            global_graph_ready "$role" && write_supervisor_state "$state_file" RUNNING
             ;;
     esac
 }
@@ -515,32 +638,50 @@ $donor_pid_paths
 EOF
         selected_state_file=$state_file
     fi
-    printf '%s\n' STOPPED > "$selected_state_file"
-    chmod 600 "$selected_state_file"
+    stopping_state_files=$selected_state_file
+    if [ -z "$candidate_selector" ]; then
+        candidate_state_paths=$(find "$run" -mindepth 1 -maxdepth 1 -name 'supervisor-*.state' -print 2>/dev/null) || return 1
+        while IFS= read -r candidate_state_path; do
+            [ -n "$candidate_state_path" ] || continue
+            candidate_state_name=${candidate_state_path##*/}
+            stopping_candidate=${candidate_state_name#supervisor-}
+            stopping_candidate=${stopping_candidate%.state}
+            candidate_is_valid "$stopping_candidate" || return 1
+            stopping_state_files="$stopping_state_files $candidate_state_path"
+        done <<EOF
+$candidate_state_paths
+EOF
+    fi
+    for stopping_state_file in $stopping_state_files; do
+        write_supervisor_state "$stopping_state_file" STOPPING || return 1
+    done
     for name in $stop_names; do
         record=$pids/$name.pid
         [ -f "$record" ] || {
             rm -f "$pids/$name.identity"
             continue
         }
+        if record_generation_live "$record" && ! record_live "$record"; then
+            return 1
+        fi
         if record_live "$record"; then
             IFS=' ' read -r pid pgid start < "$record"
             kill -TERM "$pid" 2>/dev/null
             kill -TERM "-$pgid" 2>/dev/null
             attempts=0
-            while record_live "$record" && [ "$attempts" -lt 3 ]; do
+            while record_generation_live "$record" && [ "$attempts" -lt 3 ]; do
                 sleep 1
                 attempts=$((attempts + 1))
             done
-            if record_live "$record"; then
+            if record_generation_live "$record"; then
                 IFS=' ' read -r pid pgid start < "$record"
                 kill -KILL "$pid" 2>/dev/null
                 attempts=0
-                while record_live "$record" && [ "$attempts" -lt 3 ]; do
+                while record_generation_live "$record" && [ "$attempts" -lt 3 ]; do
                     sleep 1
                     attempts=$((attempts + 1))
                 done
-                record_live "$record" && return 1
+                record_generation_live "$record" && return 1
             fi
         fi
         rm -f "$record" "$pids/$name.identity"
@@ -555,6 +696,9 @@ EOF
 $stopped_candidates
 EOF
     fi
+    for stopping_state_file in $stopping_state_files; do
+        write_supervisor_state "$stopping_state_file" STOPPED || return 1
+    done
 }
 
 remove_runtime_socket() {
@@ -600,10 +744,102 @@ remove_owned_runtime_socket() {
     rm -f "$socket_path" || return 1
 }
 
+component_status() {
+    selected_record=$1
+    if record_live "$selected_record"; then
+        component_state=RUNNING
+    elif record_generation_live "$selected_record"; then
+        component_state=UNVERIFIABLE
+    else
+        component_state=STOPPED
+    fi
+}
+
+status_state() {
+    selected_marker=$1
+    shift
+    selected_state=$selected_marker
+    case $selected_marker in
+        RUNNING)
+            for selected_component in "$@"; do
+                [ "$selected_component" = RUNNING ] || selected_state=NOT_READY
+            done
+            ;;
+        STOPPED)
+            for selected_component in "$@"; do
+                [ "$selected_component" = STOPPED ] || selected_state=NOT_READY
+            done
+            ;;
+    esac
+}
+
 status() {
-    printf 'state=%s\n' "$(cat "$state_file" 2>/dev/null || printf STOPPED)"
+    if [ -n "$candidate_selector" ]; then
+        candidate_is_valid "$candidate_selector" || return 1
+        state_file=$run/supervisor-$candidate_selector.state
+        component_status "$pids/broker-$candidate_selector.pid"
+        broker_state=$component_state
+        component_status "$pids/sidecar-$candidate_selector.pid"
+        sidecar_state=$component_state
+        status_state "$(cat "$state_file" 2>/dev/null || printf STOPPED)" \
+            "$broker_state" "$sidecar_state"
+        if [ "$selected_state" = RUNNING ]; then
+            profile_valid DONOR && candidate_graph_ready "$candidate_selector" ||
+                selected_state=NOT_READY
+        fi
+        printf 'state=%s\n' "$selected_state"
+        for kind in broker sidecar; do
+            name=$kind-$candidate_selector
+            component_status "$pids/$name.pid"
+            printf '%s=%s\n' "$kind" "$component_state"
+        done
+        return 0
+    fi
+    component_status "$pids/legacy.pid"
+    legacy_state=$component_state
+    component_status "$pids/broker.pid"
+    broker_state=$component_state
+    component_status "$pids/sidecar.pid"
+    sidecar_state=$component_state
+    status_role=$(sed -n '2s/^role=//p' "$state/profiles/active.conf" 2>/dev/null)
+    status_marker=$(cat "$state_file" 2>/dev/null || printf STOPPED)
+    case $status_role in
+        LOCAL) status_state "$status_marker" "$legacy_state" ;;
+        DONOR)
+            status_candidates=$(donor_candidates) || return 1
+            if [ "$status_marker" = RUNNING ] && [ -n "$status_candidates" ]; then
+                selected_state=RUNNING
+            else
+                status_state "$status_marker" "$broker_state" "$sidecar_state"
+            fi
+            ;;
+        CANDIDATE) status_state "$status_marker" "$broker_state" "$sidecar_state" ;;
+        *) status_state "$status_marker" "$legacy_state" "$broker_state" "$sidecar_state" ;;
+    esac
+    if [ "$selected_state" = RUNNING ]; then
+        case $status_role in
+            LOCAL) global_graph_ready LOCAL || selected_state=NOT_READY ;;
+            DONOR)
+                profile_valid DONOR || selected_state=NOT_READY
+                if [ "$selected_state" = RUNNING ]; then
+                    if [ -n "${status_candidates:-}" ]; then
+                        all_candidate_graphs_ready || selected_state=NOT_READY
+                    else
+                        global_graph_ready DONOR || selected_state=NOT_READY
+                    fi
+                fi
+                ;;
+            CANDIDATE)
+                profile_valid CANDIDATE && global_graph_ready CANDIDATE ||
+                    selected_state=NOT_READY
+                ;;
+            *) selected_state=NOT_READY ;;
+        esac
+    fi
+    printf 'state=%s\n' "$selected_state"
     for name in legacy broker sidecar; do
-        if record_live "$pids/$name.pid"; then printf '%s=RUNNING\n' "$name"; else printf '%s=STOPPED\n' "$name"; fi
+        component_status "$pids/$name.pid"
+        printf '%s=%s\n' "$name" "$component_state"
     done
 }
 

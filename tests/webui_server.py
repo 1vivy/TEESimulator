@@ -10,6 +10,8 @@ import socket
 import subprocess
 from typing import Final
 
+from webui_server_state import RuntimeStateStore
+
 
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 CONTROL: Final = REPOSITORY_ROOT / "module" / "rka-control.sh"
@@ -20,10 +22,18 @@ PUBLIC_CONTROL: Final = "/data/adb/modules/tricky_store/rka-control.sh"
 class Handler(SimpleHTTPRequestHandler):
     server: "WebUiServer"
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        super().__init__(*args, directory=str(WEBROOT), **kwargs)
+    def __init__(
+        self,
+        request: socket.socket,
+        client_address: tuple[str, int],
+        server: "WebUiServer",
+    ) -> None:
+        super().__init__(request, client_address, server, directory=str(WEBROOT))
 
     def do_POST(self) -> None:
+        if self.path == "/api/test-state":
+            self.set_test_state()
+            return
         if self.path != "/api/exec":
             self.send_error(404)
             return
@@ -34,22 +44,50 @@ class Handler(SimpleHTTPRequestHandler):
         if not arguments or arguments[0] != PUBLIC_CONTROL:
             self.send_json({"errno": 64, "stdout": ""})
             return
+        session_id = self.headers.get("x-rka-test-session", "default")
+        try:
+            runtime = self.server.runtime_states.get(session_id)
+        except ValueError:
+            self.send_json({"errno": 64, "stdout": ""})
+            return
         result = subprocess.run(
             [
                 "bash",
                 str(CONTROL),
                 "--root",
-                str(self.server.module_root),
+                str(runtime.module_root),
                 "--state-root",
-                str(self.server.state_root),
+                str(runtime.state_root),
                 *arguments[1:],
             ],
             check=False,
             capture_output=True,
             text=True,
-            env={**os.environ, **self.server.runtime_environment},
+            env={**os.environ, **runtime.environment},
         )
-        self.send_json({"errno": result.returncode, "stdout": result.stdout})
+        self.send_json({
+            "errno": result.returncode,
+            "stderr": result.stderr,
+            "stdout": result.stdout,
+        })
+
+    def set_test_state(self) -> None:
+        length = int(self.headers.get("content-length", "0"))
+        if length <= 0 or length > 128:
+            self.send_json({"errno": 64, "stdout": ""})
+            return
+        request = json.loads(self.rfile.read(length))
+        if request != {"runtime": "RUNNING"}:
+            self.send_json({"errno": 64, "stdout": ""})
+            return
+        session_id = self.headers.get("x-rka-test-session", "default")
+        try:
+            runtime = self.server.runtime_states.get(session_id)
+        except ValueError:
+            self.send_json({"errno": 64, "stdout": ""})
+            return
+        private(runtime.state_root / "run" / "supervisor.state", "RUNNING\n")
+        self.send_json({"errno": 0, "stdout": ""})
 
     def send_json(self, value: dict[str, int | str]) -> None:
         body = json.dumps(value).encode()
@@ -57,14 +95,14 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            return
 
 
 class WebUiServer(ThreadingHTTPServer):
-    module_root: Path
-    state_root: Path
-    runtime_environment: dict[str, str]
-    broker_socket: socket.socket
+    runtime_states: RuntimeStateStore
 
 
 def private(path: Path, contents: str) -> None:
@@ -92,6 +130,7 @@ def initialize(root: Path) -> tuple[Path, Path, dict[str, str]]:
         state_root / "trust" / "transport-identity.commit",
         f"version=1\nspki_sha256={'cd' * 32}\n",
     )
+    private(state_root / "trust" / "transport.pin", f"{'cd' * 32}\n")
     private(
         state_root / "profiles" / "direct.conf",
         "version=2\n"
@@ -106,6 +145,15 @@ def initialize(root: Path) -> tuple[Path, Path, dict[str, str]]:
     daemon = root / "fake-daemon.sh"
     daemon.write_text("#!/bin/sh\nwhile :; do sleep 60; done\n", encoding="utf-8")
     daemon.chmod(0o700)
+    supervisor = root / "fake-supervisor.sh"
+    supervisor.write_text(
+        "#!/bin/sh\n"
+        '[ "$1" = --detach ] || exit 64\n'
+        "shift\n"
+        "RKA_INTERNAL_CHILD_LOOP=1 sh \"$@\" </dev/null >/dev/null 2>&1 &\n",
+        encoding="utf-8",
+    )
+    supervisor.chmod(0o700)
     sidecar = root / "fake-sidecar.sh"
     sidecar.write_text(
         "#!/bin/sh\n"
@@ -131,7 +179,7 @@ def initialize(root: Path) -> tuple[Path, Path, dict[str, str]]:
         "pin_sha=$(printf %s \"$pin\" | xxd -r -p | sha256sum | awk '{print $1}') || exit 1\n"
         "printf 'version=1\\nprofile_sha256=%s\\nprofile_epoch=%s\\npeer_pin_sha256=%s\\ndial_mode=DONOR_DIALS\\ntransport=DIRECT\\n' \"$profile_sha\" \"$RKA_EXPECTED_PROFILE_EPOCH\" \"$pin_sha\" > \"$RKA_PROFILE_RECEIPT_PATH\"\n"
         "chmod 600 \"$RKA_PROFILE_RECEIPT_PATH\"\n"
-        "while :; do sleep 60; done\n",
+        "exec python3 -c 'import os, socket, sys, time; s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); os.chmod(sys.argv[1], 0o600); s.listen(); time.sleep(3600)' \"$RKA_DONOR_SOCKET\"\n",
         encoding="utf-8",
     )
     sidecar.chmod(0o700)
@@ -166,6 +214,7 @@ def initialize(root: Path) -> tuple[Path, Path, dict[str, str]]:
     return module_root, state_root, {
         "RKA_DAEMON": str(daemon),
         "RKA_GETPROP": str(getprop),
+        "RKA_NATIVE_SUPERVISOR": str(supervisor),
         "RKA_PM": str(pm),
         "RKA_RKPD_PREFERENCES": str(rkpd_preferences),
         "RKA_SIDECAR": str(sidecar),
@@ -184,18 +233,15 @@ def main() -> None:
     root = arguments.root.resolve() / f"run-{os.getpid()}"
     root.mkdir(parents=True, exist_ok=False, mode=0o700)
     root.chmod(0o700)
-    module_root, state_root, environment = initialize(root)
     server = WebUiServer(("127.0.0.1", arguments.port), Handler)
-    server.module_root = module_root
-    server.state_root = state_root
-    server.runtime_environment = environment
-    server.broker_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    broker_path = state_root / "run" / "sockets" / "broker.sock"
-    server.broker_socket.bind(str(broker_path))
-    broker_path.chmod(0o600)
+    server.runtime_states = RuntimeStateStore(root, initialize)
     arguments.nonce_file.parent.mkdir(parents=True, exist_ok=True)
     arguments.nonce_file.write_text(str(os.getpid()), encoding="utf-8")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        server.runtime_states.close()
+        server.server_close()
 
 
 if __name__ == "__main__":

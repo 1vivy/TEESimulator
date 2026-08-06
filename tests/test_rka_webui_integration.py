@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import socket
@@ -29,6 +30,37 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
             text=True,
             env={**os.environ, **(environment or {})},
         )
+
+    def write_live_runtime_evidence(
+        self,
+        state: Path,
+        profile: Path,
+        candidate: str | None = None,
+    ) -> None:
+        process_id = os.getpid()
+        process_stat = Path(f"/proc/{process_id}/stat").read_text(encoding="ascii")
+        stat_fields = process_stat[process_stat.rfind(")") + 2 :].split()
+        process_record = f"{process_id} {stat_fields[2]} {stat_fields[19]}\n"
+        suffix = f"-{candidate}" if candidate else ""
+        profile_hash = hashlib.sha256(profile.read_bytes()).hexdigest()
+        receipt = state / "run" / f"direct-profile{suffix}.receipt"
+        receipt.write_text(
+            "version=1\n"
+            f"profile_sha256={profile_hash}\n"
+            "profile_epoch=0\n"
+            f"peer_pin_sha256={'cd' * 32}\n"
+            "dial_mode=DONOR_DIALS\n"
+            "transport=DIRECT\n",
+            encoding="ascii",
+        )
+        receipt.chmod(0o600)
+        for process_name in (f"broker{suffix}", f"sidecar{suffix}"):
+            record = state / "run" / "pids" / f"{process_name}.pid"
+            record.write_text(process_record, encoding="ascii")
+            record.chmod(0o600)
+        supervisor_state = state / "run" / f"supervisor{suffix}.state"
+        supervisor_state.write_text("RUNNING\n", encoding="ascii")
+        supervisor_state.chmod(0o600)
 
     def test_no_overlap_verifier_is_package_owned(self) -> None:
         control_source = CONTROL.read_text(encoding="utf-8")
@@ -123,7 +155,8 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
             root, state = base / "module", base / "state"
             self.assertEqual(self.control(root, state, "set-role", "DONOR").returncode, 0)
             self.assertEqual(self.control(root, state, "initialize").returncode, 0)
-            (state / "profiles" / "direct.conf").write_text(
+            candidate_profile = state / "profiles" / "direct.d" / "candidate-a.conf"
+            candidate_profile.write_text(
                 "version=2\n"
                 "role=DONOR\n"
                 "profile_epoch=0\n"
@@ -134,7 +167,7 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
                 "transport=DIRECT\n",
                 encoding="ascii",
             )
-            (state / "profiles" / "direct.conf").chmod(0o600)
+            candidate_profile.chmod(0o600)
             commands = base / "commands"
             commands.mkdir()
             getprop = commands / "getprop"
@@ -179,7 +212,8 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
                 "RKA_RKPD_PREFERENCES": str(rkpd_preferences),
                 "RKA_SIDECAR": str(sidecar),
             }
-            broker_socket = state / "run" / "sockets" / "broker.sock"
+            self.write_live_runtime_evidence(state, candidate_profile, "candidate-a")
+            broker_socket = state / "run" / "sockets" / "broker-candidate-a.sock"
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
                 listener.bind(str(broker_socket))
                 broker_socket.chmod(0o600)
@@ -187,7 +221,19 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
                     root, state, "webui-open", environment=environment,
                 ).stdout.split("=", 1)[1].strip()
                 prepared = self.control(
-                    root, state, "webui", "provision-rkp", nonce, environment=environment,
+                    root,
+                    state,
+                    "webui",
+                    "provision-rkp",
+                    nonce,
+                    "--candidate",
+                    "candidate-a",
+                    environment=environment,
+                )
+                self.assertEqual(
+                    prepared.returncode,
+                    0,
+                    f"stdout:\n{prepared.stdout}\nstderr:\n{prepared.stderr}",
                 )
                 values = dict(
                     line.split("=", 1) for line in prepared.stdout.splitlines() if "=" in line
@@ -199,6 +245,8 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
                     "provision-rkp",
                     values["next_nonce"],
                     values["confirmation_token"],
+                    "--candidate",
+                    "candidate-a",
                     environment=environment,
                 )
 
@@ -223,7 +271,7 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
                 "version=2\n"
                 "role=CANDIDATE\n"
                 "profile_epoch=0\n"
-                "dial_mode=CANDIDATE_DIALS\n"
+                "dial_mode=DONOR_DIALS\n"
                 "dial_endpoint=100.64.0.2\n"
                 "listen_interface=192.168.1.2\n"
                 f"peer_spki_sha256={'ab' * 32}\n"
@@ -236,6 +284,11 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
                 "-----BEGIN CERTIFICATE-----\nQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\n"
                 "-----END CERTIFICATE-----\n",
             )
+            private(
+                state / "trust" / "transport-identity.commit",
+                f"version=1\nspki_sha256={'cd' * 32}\n",
+            )
+            private(state / "trust" / "transport.pin", f"{'cd' * 32}\n")
             private(state / "run" / "supervisor.state", "RUNNING\n")
             boot_id = base / "boot-id"
             boot_id.write_text("test-boot\n", encoding="ascii")
@@ -265,6 +318,7 @@ class LiveWebUiIntegrationTest(unittest.TestCase):
                 "RKA_RECOVERY_BOOT_ID_PATH": str(boot_id),
                 "RKA_SIDECAR": str(sidecar),
             }
+            self.write_live_runtime_evidence(state, state / "profiles" / "direct.conf")
             broker_socket = state / "run" / "sockets" / "broker.sock"
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
                 listener.bind(str(broker_socket))

@@ -38,8 +38,12 @@ several candidate phones concurrently.
   `schema_version` 2 with a `candidates` array; the v1 reader is retained.
 - On-device control accepts an optional `--candidate CANDIDATE` selector. All 18
   existing action verbs are unchanged.
-- The WebUI renders one status card per candidate with independently gated lease
-  controls, and keeps the one-time-token confirmation for protected actions.
+- The donor WebUI renders one pairing-status card per candidate. Donor RKP
+  provisioning is candidate-scoped and bound to that candidate's current broker
+  generation; each candidate renews its own lease from its local WebUI. A
+  multi-candidate donor's network form is read-only because addresses are updated
+  per candidate through the host bind/deploy workflow. Protected actions retain
+  one-time-token confirmation.
 - Durable state moved to `candidates/<candidate-identity-hash>/`. Migration from
   the old single-candidate layout is one-time and atomic: validate, stage, fsync,
   atomic rename, commit manifest. Legacy state is retained, and automatic legacy

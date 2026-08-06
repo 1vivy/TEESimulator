@@ -113,7 +113,7 @@ role=$requested_role
 }
 
 usage() {
-    printf '%s\n' 'usage: rka-control.sh [--root PATH] [--state-root PATH] {set-role ROLE|initialize|provision-rkp|wipe|mutation-states|status|boot-decision|recover-exact ACTION TARGET [ARGS]|webui-open|webui ACTION NONCE [CONFIRMATION] [--candidate CANDIDATE]}' >&2
+    printf '%s\n' 'usage: rka-control.sh [--root PATH] [--state-root PATH] {set-role ROLE|initialize|provision-rkp [--candidate CANDIDATE]|wipe|mutation-states|status|boot-decision|recover-exact ACTION TARGET [ARGS]|webui-open|webui ACTION NONCE [CONFIRMATION] [--candidate CANDIDATE]}' >&2
 }
 
 provision_getprop() {
@@ -143,14 +143,34 @@ provision_rkpd_metadata() {
 }
 
 provision_rkp_inputs() {
+    provision_requested_candidate=${1:-}
     provision_role=$(read_role) || return 1
     [ "$provision_role" = DONOR ] || return 1
     rka_layout_is_valid && rka_profile_is_valid || return 1
     provision_epoch=$(sed -n '3s/^profile_epoch=//p' "$rka_state_root/profiles/$RKA_PROFILE_NAME") || return 1
     case $provision_epoch in ''|*[!0-9]*) return 1 ;; esac
+    webui_profile_epoch=$provision_epoch
+    provision_profile=$rka_state_root/profiles/direct.conf
+    provision_receipt=$rka_state_root/run/direct-profile.receipt
     provision_socket=$rka_state_root/run/sockets/broker.sock
+    provision_candidate_id=GLOBAL
+    provision_runtime_candidate=
+    provision_candidates=$(webui_donor_candidates) || return 1
+    if [ -n "$provision_candidates" ]; then
+        rka_candidate_is_valid "$provision_requested_candidate" || return 1
+        printf '%s\n' "$provision_candidates" | grep -Fxq "$provision_requested_candidate" || return 1
+        provision_profile=$rka_state_root/profiles/direct.d/$provision_requested_candidate.conf
+        provision_receipt=$rka_state_root/run/direct-profile-$provision_requested_candidate.receipt
+        provision_socket=$rka_state_root/run/sockets/broker-$provision_requested_candidate.sock
+        provision_candidate_id=$provision_requested_candidate
+        provision_runtime_candidate=$provision_requested_candidate
+    else
+        [ -z "$provision_requested_candidate" ] || return 1
+    fi
     [ -S "$provision_socket" ] && [ ! -L "$provision_socket" ] || return 1
     [ "$(stat -c '%u:%g:%a' "$provision_socket")" = "$(id -u):$(id -g):600" ] || return 1
+    webui_direct_runtime_evidence_is_ready "$provision_runtime_candidate" || return 1
+    provision_broker_generation=$(webui_broker_generation "$provision_runtime_candidate") || return 1
     provision_sidecar=${RKA_SIDECAR:-$rka_state_root/bin/rka-sidecar}
     [ -f "$provision_sidecar" ] && [ ! -L "$provision_sidecar" ] &&
         [ -x "$provision_sidecar" ] || return 1
@@ -166,14 +186,14 @@ provision_rkp_inputs() {
 }
 
 provision_rkp() {
-    provision_rkp_inputs || {
+    provision_rkp_inputs "${1:-}" || {
         printf '%s\n' 'RKA_PROVISION_FAILED stage=INPUTS' >&2
         return 1
     }
     provision_output=$(
         RKA_STATE_ROOT="$rka_state_root" \
-        RKA_PROFILE_PATH="$rka_state_root/profiles/direct.conf" \
-        RKA_PROFILE_RECEIPT_PATH="$rka_state_root/run/direct-profile.receipt" \
+        RKA_PROFILE_PATH="$provision_profile" \
+        RKA_PROFILE_RECEIPT_PATH="$provision_receipt" \
         RKA_EXPECTED_PROFILE_EPOCH="$provision_epoch" \
         RKA_DONOR_SOCKET="$provision_socket" \
         RKA_VALIDATOR_PKCS8="$rka_state_root/secrets/validator.pk8" \
@@ -193,13 +213,20 @@ RESULT=PROVISIONED" ] || {
         printf '%s\n' 'RKA_PROVISION_FAILED stage=OUTPUT' >&2
         return 1
     }
+    provision_state_path=$(webui_provisioning_state_path "$provision_runtime_candidate") || return 1
     rka_atomic_replace "$rka_state_root/journal" \
-        "$rka_state_root/journal/provisioning.state" "version=1
+        "$provision_state_path" "version=2
 status=PROVISIONED
 profile_epoch=$provision_epoch
 key_count=1
+candidate_id=$provision_candidate_id
+broker_generation_sha256=$provision_broker_generation
 " || {
         printf '%s\n' 'RKA_PROVISION_FAILED stage=STATE' >&2
+        return 1
+    }
+    webui_provisioning_is_current "$provision_runtime_candidate" || {
+        printf '%s\n' 'RKA_PROVISION_FAILED stage=POSTCONDITION' >&2
         return 1
     }
     printf '%s\n' "$provision_output"
@@ -379,11 +406,15 @@ recovery_restart_exact() {
 }
 
 recovery_ready() {
+    [ "$#" -eq 4 ] || return 1
     case $2 in ''|*[!0-9]*) return 1 ;; esac
+    case $3 in ''|*[!0-9]*) return 1 ;; esac
+    case $4 in ''|*[!0-9]*) return 1 ;; esac
     [ "$2" -le 30000 ] || return 1
     recovery_attempts=$((($2 + 99) / 100))
     while [ "$recovery_attempts" -gt 0 ]; do
-        if recovery_find_service; then
+        if recovery_find_service &&
+            { [ "$recovery_pid" != "$3" ] || [ "$recovery_start" != "$4" ]; }; then
             printf '%s\n' READY
             return 0
         fi
@@ -423,7 +454,7 @@ recover_exact() {
         snapshot) [ "$#" -eq 2 ] && recovery_snapshot "$2" ;;
         verify) [ "$#" -eq 2 ] && recovery_emit_snapshot "$2" ;;
         restart) [ "$#" -eq 4 ] && recovery_restart_exact "$2" "$3" "$4" ;;
-        ready) [ "$#" -eq 3 ] && recovery_ready "$2" "$3" ;;
+        ready) [ "$#" -eq 5 ] && recovery_ready "$2" "$3" "$4" "$5" ;;
         reapply) [ "$#" -eq 3 ] && recovery_reapply "$2" "$3" ;;
         *) return 1 ;;
     esac
@@ -445,6 +476,7 @@ webui_nonce_is_valid() {
 }
 
 webui_issue_nonce() {
+    webui_recover_role_transaction || return 1
     webui_role=$(read_role) || return 1
     [ "$webui_role" != DISABLED ] || return 1
     rka_initialize_layout "$webui_role" || return 1
@@ -512,6 +544,87 @@ webui_phone_role() {
     esac
 }
 
+webui_ipv4_is_valid() {
+    webui_ipv4_remainder=$1
+    webui_ipv4_index=1
+    while [ "$webui_ipv4_index" -le 4 ]; do
+        if [ "$webui_ipv4_index" -lt 4 ]; then
+            case $webui_ipv4_remainder in
+                *.*)
+                    webui_ipv4_octet=${webui_ipv4_remainder%%.*}
+                    webui_ipv4_remainder=${webui_ipv4_remainder#*.}
+                    ;;
+                *) return 1 ;;
+            esac
+        else
+            case $webui_ipv4_remainder in
+                *.*) return 1 ;;
+                *) webui_ipv4_octet=$webui_ipv4_remainder ;;
+            esac
+        fi
+        case $webui_ipv4_octet in ''|*[!0-9]*) return 1 ;; esac
+        [ "$webui_ipv4_octet" -le 255 ] || return 1
+        webui_ipv4_index=$((webui_ipv4_index + 1))
+    done
+}
+
+webui_read_network_profile() {
+    webui_network_peer_ip=UNAVAILABLE
+    webui_network_local_ip=UNAVAILABLE
+    webui_network_port=37373
+    webui_network_profile_ready=false
+    if [ -n "${webui_status_candidate:-}" ]; then
+        webui_network_profile=$rka_state_root/profiles/direct.d/$webui_status_candidate.conf
+    else
+        webui_network_profile=$rka_state_root/profiles/direct.conf
+    fi
+    rka_private_file_is_valid "$webui_network_profile" || return 0
+    webui_network_profile_role=$(sed -n 's/^role=//p' "$webui_network_profile") || return 1
+    webui_network_profile_epoch=$(sed -n 's/^profile_epoch=//p' "$webui_network_profile") || return 1
+    [ "$webui_network_profile_role" = "$webui_role" ] || return 0
+    [ "$webui_network_profile_epoch" = "$webui_profile_epoch" ] || return 0
+    webui_network_profile_peer=$(sed -n 's/^dial_endpoint=//p' "$webui_network_profile") || return 1
+    webui_network_profile_local=$(sed -n 's/^listen_interface=//p' "$webui_network_profile") || return 1
+    webui_ipv4_is_valid "$webui_network_profile_peer" || return 0
+    webui_ipv4_is_valid "$webui_network_profile_local" || return 0
+    webui_network_peer_ip=$webui_network_profile_peer
+    webui_network_local_ip=$webui_network_profile_local
+    webui_network_profile_ready=true
+}
+
+webui_save_network_profile() {
+    webui_network_payload=$1
+    webui_network_previous_ifs=$IFS
+    IFS=,
+    set -- $webui_network_payload
+    IFS=$webui_network_previous_ifs
+    [ "$#" -eq 3 ] || return 1
+    webui_network_peer_ip=$1
+    webui_network_local_ip=$2
+    webui_network_port=$3
+    webui_ipv4_is_valid "$webui_network_peer_ip" || return 1
+    webui_ipv4_is_valid "$webui_network_local_ip" || return 1
+    [ "$webui_network_port" = 37373 ] || return 1
+    webui_network_role=$(read_role) || return 1
+    if [ "$webui_network_role" = DONOR ]; then
+        webui_network_candidates=$(webui_donor_candidates) || return 1
+        [ -z "$webui_network_candidates" ] || return 1
+    fi
+    webui_network_profile=$rka_state_root/profiles/direct.conf
+    rka_private_file_is_valid "$webui_network_profile" || return 1
+    webui_network_profile_size=$(wc -c < "$webui_network_profile") || return 1
+    case $webui_network_profile_size in ''|*[!0-9]*) return 1 ;; esac
+    [ "$webui_network_profile_size" -le "$MAX_CONFIG_BYTES" ] || return 1
+    [ "$(sed -n '/^dial_endpoint=/p' "$webui_network_profile" | wc -l)" -eq 1 ] || return 1
+    [ "$(sed -n '/^listen_interface=/p' "$webui_network_profile" | wc -l)" -eq 1 ] || return 1
+    webui_network_updated_profile=$(sed \
+        -e "s/^dial_endpoint=.*/dial_endpoint=$webui_network_peer_ip/" \
+        -e "s/^listen_interface=.*/listen_interface=$webui_network_local_ip/" \
+        "$webui_network_profile") || return 1
+    rka_atomic_replace "$rka_state_root/profiles" "$webui_network_profile" "$webui_network_updated_profile
+"
+}
+
 webui_read_active_profile() {
     rka_layout_is_valid && rka_profile_is_valid || return 1
     webui_profile_role=
@@ -540,6 +653,9 @@ webui_sentinel_status() {
     case $webui_sentinel_sample in '' | *[!0-9]*) return 0 ;; esac
     webui_current_boot=$(cat "${RKA_RECOVERY_BOOT_ID_PATH:-/proc/sys/kernel/random/boot_id}") || return 0
     [ "$webui_sentinel_boot" = "$webui_current_boot" ] || return 0
+    webui_current_uptime=$(awk '{printf "%d", $1 * 1000}' "${RKA_RECOVERY_UPTIME_PATH:-/proc/uptime}") || return 0
+    case $webui_current_uptime in '' | *[!0-9]*) return 0 ;; esac
+    [ "$webui_sentinel_sample" -le "$webui_current_uptime" ] || return 0
     webui_sentinel=LIVE
 }
 
@@ -595,15 +711,99 @@ webui_pair_request_path() {
 }
 
 webui_runtime_state() {
-    webui_runtime=STOPPED
-    webui_runtime_path=$rka_state_root/run/supervisor.state
-    if [ ! -e "$webui_runtime_path" ] && [ ! -L "$webui_runtime_path" ]; then
-        return 0
+    webui_runtime_graph=$(webui_supervisor_graph "${webui_status_candidate:-}") || return 1
+    webui_runtime=$(printf '%s\n' "$webui_runtime_graph" | sed -n '1s/^state=//p') || return 1
+    case $webui_runtime in STARTING|RUNNING|NOT_READY|STOPPING|STOPPED|FAILED_CRASH_CAP|QUARANTINED_AMBIGUOUS_MUTATION) return 0 ;; *) return 1 ;; esac
+}
+
+webui_supervisor_graph() {
+    webui_graph_candidate=$1
+    if [ -n "$webui_graph_candidate" ]; then
+        rka_candidate_is_valid "$webui_graph_candidate" || return 1
+        sh "$script_directory/rka-supervisor.sh" --root "$root" \
+            --state-root "$rka_state_root" status "$webui_graph_candidate"
+    else
+        sh "$script_directory/rka-supervisor.sh" --root "$root" \
+            --state-root "$rka_state_root" status
     fi
-    rka_private_file_is_valid "$webui_runtime_path" || return 1
-    [ "$(wc -c < "$webui_runtime_path")" -le 64 ] || return 1
-    webui_runtime=$(cat "$webui_runtime_path") || return 1
-    case $webui_runtime in RUNNING|STOPPED|FAILED_CRASH_CAP|QUARANTINED_AMBIGUOUS_MUTATION) return 0 ;; *) return 1 ;; esac
+}
+
+webui_supervisor_graph_is_ready() {
+    webui_ready_graph=$(webui_supervisor_graph "$1") || return 1
+    if [ -n "$1" ]; then
+        [ "$webui_ready_graph" = "state=RUNNING
+broker=RUNNING
+sidecar=RUNNING" ]
+    else
+        printf '%s\n' "$webui_ready_graph" | grep -Fxq state=RUNNING &&
+            printf '%s\n' "$webui_ready_graph" | grep -Fxq broker=RUNNING &&
+            printf '%s\n' "$webui_ready_graph" | grep -Fxq sidecar=RUNNING
+    fi
+}
+
+webui_supervisor_graph_is_stopped() {
+    webui_stopped_graph=$(webui_supervisor_graph "$1") || return 1
+    if [ -n "$1" ]; then
+        [ "$webui_stopped_graph" = "state=STOPPED
+broker=STOPPED
+sidecar=STOPPED" ]
+    else
+        [ "$webui_stopped_graph" = "state=STOPPED
+legacy=STOPPED
+broker=STOPPED
+sidecar=STOPPED" ]
+    fi
+}
+
+webui_direct_runtime_paths() {
+    webui_runtime_candidate=$1
+    if [ -n "$webui_runtime_candidate" ]; then
+        rka_candidate_is_valid "$webui_runtime_candidate" || return 1
+        webui_runtime_profile=$rka_state_root/profiles/direct.d/$webui_runtime_candidate.conf
+        webui_runtime_receipt=$rka_state_root/run/direct-profile-$webui_runtime_candidate.receipt
+        webui_runtime_socket=$rka_state_root/run/sockets/broker-$webui_runtime_candidate.sock
+        webui_runtime_broker_record=$rka_state_root/run/pids/broker-$webui_runtime_candidate.pid
+    else
+        webui_runtime_profile=$rka_state_root/profiles/direct.conf
+        webui_runtime_receipt=$rka_state_root/run/direct-profile.receipt
+        webui_runtime_socket=$rka_state_root/run/sockets/broker.sock
+        webui_runtime_broker_record=$rka_state_root/run/pids/broker.pid
+    fi
+}
+
+webui_profile_receipt_is_valid() {
+    webui_direct_runtime_paths "$1" || return 1
+    rka_private_file_is_valid "$webui_runtime_profile" || return 1
+    rka_private_file_is_valid "$webui_runtime_receipt" || return 1
+    webui_runtime_profile_hash=$(sha256sum "$webui_runtime_profile" | awk '{print $1}') || return 1
+    [ "$(sed -n '1p' "$webui_runtime_receipt")" = version=1 ] || return 1
+    [ "$(sed -n '2p' "$webui_runtime_receipt")" = "profile_sha256=$webui_runtime_profile_hash" ] || return 1
+    [ "$(sed -n '3p' "$webui_runtime_receipt")" = "profile_epoch=$webui_profile_epoch" ] || return 1
+    webui_runtime_pin_line=$(sed -n '4p' "$webui_runtime_receipt") || return 1
+    case $webui_runtime_pin_line in peer_pin_sha256=????????????????????????????????????????????????????????????????) ;; *) return 1 ;; esac
+    case ${webui_runtime_pin_line#peer_pin_sha256=} in *[!0123456789abcdef]*) return 1 ;; esac
+    [ "$(sed -n '5p' "$webui_runtime_receipt")" = dial_mode=DONOR_DIALS ] || return 1
+    [ "$(sed -n '6p' "$webui_runtime_receipt")" = transport=DIRECT ] || return 1
+    [ "$(wc -l < "$webui_runtime_receipt")" -eq 6 ]
+}
+
+webui_direct_runtime_evidence_is_ready() {
+    webui_direct_runtime_paths "$1" || return 1
+    webui_profile_receipt_is_valid "$1" || return 1
+    [ -S "$webui_runtime_socket" ] && [ ! -L "$webui_runtime_socket" ] || return 1
+    [ "$(stat -c '%u:%g:%a' "$webui_runtime_socket")" = "$(id -u):$(id -g):600" ] || return 1
+    webui_supervisor_graph_is_ready "$1"
+}
+
+webui_broker_generation() {
+    webui_direct_runtime_paths "$1" || return 1
+    webui_supervisor_graph_is_ready "$1" || return 1
+    rka_private_file_is_valid "$webui_runtime_broker_record" || return 1
+    [ "$(wc -c < "$webui_runtime_broker_record")" -le 128 ] || return 1
+    webui_broker_record=$(cat "$webui_runtime_broker_record") || return 1
+    case $webui_broker_record in *[!0-9\ ]*) return 1 ;; esac
+    [ "$(printf '%s\n' "$webui_broker_record" | awk '{print NF}')" -eq 3 ] || return 1
+    sha256sum "$webui_runtime_broker_record" | awk '{print $1}'
 }
 
 webui_transport_key_is_valid() {
@@ -643,6 +843,22 @@ webui_transport_trust_is_valid() {
     [ "$webui_trust_phase" = footer ]
 }
 
+webui_transport_identity_is_valid() {
+    webui_transport_identity=$rka_state_root/trust/transport-identity.commit
+    webui_transport_pin=$rka_state_root/trust/transport.pin
+    rka_private_file_is_valid "$webui_transport_identity" || return 1
+    rka_private_file_is_valid "$webui_transport_pin" || return 1
+    webui_transport_identity_pin=$(sed -n '2s/^spki_sha256=//p' "$webui_transport_identity") || return 1
+    case $webui_transport_identity_pin in
+        ????????????????????????????????????????????????????????????????) ;;
+        *) return 1 ;;
+    esac
+    case $webui_transport_identity_pin in *[!0123456789abcdef]*) return 1 ;; esac
+    [ "$(cat "$webui_transport_identity")" = "version=1
+spki_sha256=$webui_transport_identity_pin" ] || return 1
+    [ "$(cat "$webui_transport_pin")" = "$webui_transport_identity_pin" ]
+}
+
 webui_status_state() {
     webui_pairing=UNPAIRED
     webui_direct_profile=UNAVAILABLE
@@ -654,8 +870,11 @@ webui_status_state() {
     fi
     webui_pair_request_is_valid || return 1
     webui_pairing=PENDING
+    [ "${webui_network_profile_ready:-false}" = true ] || return 0
     webui_direct_profile=DIRECT_NETWORK
-    if webui_transport_key_is_valid && webui_transport_trust_is_valid; then
+    if webui_transport_key_is_valid && webui_transport_trust_is_valid &&
+        webui_transport_identity_is_valid &&
+        webui_direct_runtime_evidence_is_ready "${webui_status_candidate:-}"; then
         webui_pairing=PAIRED
         if [ "$webui_runtime" = RUNNING ] && [ "$webui_sentinel" = LIVE ]; then
             webui_direct_readiness=READY
@@ -670,6 +889,7 @@ webui_status_block() {
     [ "$webui_role" = "$webui_profile_role" ] || return 1
     webui_runtime_state || return 1
     webui_sentinel_status
+    webui_read_network_profile || return 1
     webui_status_state || return 1
     webui_rkp_provisioning_status || return 1
     webui_synthetic_lease_status
@@ -690,6 +910,9 @@ webui_status_block() {
     printf 'lease_epoch=%s\n' "$webui_lease_epoch"
     printf 'lease_next=%s\n' "$webui_lease_next"
     printf 'lease_valid_until_millis=%s\n' "$webui_lease_valid_until_millis"
+    printf 'network_peer_ip=%s\n' "$webui_network_peer_ip"
+    printf 'network_local_ip=%s\n' "$webui_network_local_ip"
+    printf 'network_port=%s\n' "$webui_network_port"
     printf 'quarantine_count=%s\n' "$(webui_quarantine_count)"
 }
 
@@ -722,20 +945,49 @@ $webui_status_candidates
 EOF
 }
 
+webui_provisioning_state_path() {
+    webui_provisioning_candidate_selector=$1
+    if [ -z "$webui_provisioning_candidate_selector" ]; then
+        printf '%s\n' "$rka_state_root/journal/provisioning.state"
+        return 0
+    fi
+    rka_candidate_is_valid "$webui_provisioning_candidate_selector" || return 1
+    printf '%s\n' "$rka_state_root/journal/provisioning-$webui_provisioning_candidate_selector.state"
+}
+
+webui_provisioning_is_current() {
+    webui_provisioning_runtime_candidate=$1
+    webui_provisioning_path=$(webui_provisioning_state_path "$webui_provisioning_runtime_candidate") || return 1
+    if [ ! -e "$webui_provisioning_path" ] && [ ! -L "$webui_provisioning_path" ]; then
+        return 1
+    fi
+    rka_private_file_is_valid "$webui_provisioning_path" || return 1
+    webui_provisioning_candidate=${webui_provisioning_runtime_candidate:-GLOBAL}
+    webui_provisioning_contents=$(cat "$webui_provisioning_path") || return 1
+    webui_provisioning_generation=$(sed -n '6s/^broker_generation_sha256=//p' "$webui_provisioning_path") || return 1
+    case $webui_provisioning_generation in
+        ????????????????????????????????????????????????????????????????) ;;
+        *) return 1 ;;
+    esac
+    case $webui_provisioning_generation in *[!0123456789abcdef]*) return 1 ;; esac
+    [ "$webui_provisioning_contents" = "version=2
+status=PROVISIONED
+profile_epoch=$webui_profile_epoch
+key_count=1
+candidate_id=$webui_provisioning_candidate
+broker_generation_sha256=$webui_provisioning_generation" ] || return 1
+    webui_direct_runtime_evidence_is_ready "$webui_provisioning_runtime_candidate" || return 1
+    webui_current_generation=$(webui_broker_generation "$webui_provisioning_runtime_candidate") || return 1
+    [ "$webui_current_generation" = "$webui_provisioning_generation" ]
+}
+
 webui_rkp_provisioning_status() {
     webui_rkp_provisioning=NOT_APPLICABLE
     [ "$webui_role" = DONOR ] || return 0
     webui_rkp_provisioning=NOT_READY
-    webui_provisioning_path=$rka_state_root/journal/provisioning.state
-    if [ ! -e "$webui_provisioning_path" ] && [ ! -L "$webui_provisioning_path" ]; then
-        return 0
+    if webui_provisioning_is_current "${webui_status_candidate:-}"; then
+        webui_rkp_provisioning=PROVISIONED
     fi
-    rka_private_file_is_valid "$webui_provisioning_path" || return 1
-    [ "$(cat "$webui_provisioning_path")" = "version=1
-status=PROVISIONED
-profile_epoch=$webui_profile_epoch
-key_count=1" ] || return 1
-    webui_rkp_provisioning=PROVISIONED
 }
 
 webui_synthetic_lease_status() {
@@ -835,13 +1087,15 @@ EOF
 }
 
 synthetic_lease_renew_inputs() {
-    [ "$(read_role)" = CANDIDATE ] || return 1
+    webui_role=$(read_role) || return 1
+    [ "$webui_role" = CANDIDATE ] || return 1
     rka_layout_is_valid && rka_profile_is_valid || return 1
     webui_read_active_profile || return 1
     [ "$webui_profile_role" = CANDIDATE ] || return 1
     webui_runtime_state || return 1
     [ "$webui_runtime" = RUNNING ] || return 1
     webui_sentinel_status
+    webui_read_network_profile || return 1
     webui_status_state || return 1
     [ "$webui_direct_readiness" = READY ] || return 1
     synthetic_lease_socket=$rka_state_root/run/sockets/broker.sock
@@ -874,28 +1128,71 @@ webui_record_request() {
     rka_atomic_replace "$(dirname "$webui_request_path")" "$webui_request_path" "$webui_request_body"
 }
 
-webui_set_role() {
-    webui_requested_role=$1
-    role_is_valid "$webui_requested_role" || return 1
-    [ "$webui_requested_role" != DISABLED ] || return 1
-    webui_read_active_profile || return 1
-    webui_previous_role=$(read_role) || return 1
-    webui_previous_profile=$(cat "$rka_state_root/profiles/$RKA_PROFILE_NAME") || return 1
-    rka_atomic_replace "$rka_state_root/profiles" "$rka_state_root/profiles/$RKA_PROFILE_NAME" "version=1
-role=$webui_requested_role
-profile_epoch=$webui_profile_epoch
-" || return 1
-    set_role "$webui_requested_role" || {
-        rka_atomic_replace "$rka_state_root/profiles" "$rka_state_root/profiles/$RKA_PROFILE_NAME" "$webui_previous_profile
-"
-        return 1
-    }
-    if webui_read_active_profile && [ "$webui_profile_role" = "$webui_requested_role" ] && [ "$(read_role)" = "$webui_requested_role" ]; then
+webui_all_runtimes_are_stopped() {
+    webui_supervisor_graph_is_stopped '' || return 1
+    webui_stopped_candidates=$(webui_donor_candidates) || return 1
+    while IFS= read -r webui_stopped_candidate; do
+        [ -n "$webui_stopped_candidate" ] || continue
+        webui_supervisor_graph_is_stopped "$webui_stopped_candidate" || return 1
+    done <<EOF
+$webui_stopped_candidates
+EOF
+}
+
+webui_recover_role_transaction() {
+    webui_role_transaction=$rka_state_root/journal/webui-role.state
+    if [ ! -e "$webui_role_transaction" ] && [ ! -L "$webui_role_transaction" ]; then
         return 0
     fi
-    set_role "$webui_previous_role" || return 1
-    rka_atomic_replace "$rka_state_root/profiles" "$rka_state_root/profiles/$RKA_PROFILE_NAME" "$webui_previous_profile
-"
+    rka_private_file_is_valid "$webui_role_transaction" || return 1
+    [ "$(wc -l < "$webui_role_transaction")" -eq 4 ] || return 1
+    [ "$(sed -n '1p' "$webui_role_transaction")" = version=1 ] || return 1
+    webui_transaction_role=$(sed -n '2s/^requested_role=//p' "$webui_role_transaction") || return 1
+    case $webui_transaction_role in DONOR|CANDIDATE) ;; *) return 1 ;; esac
+    webui_transaction_epoch=$(sed -n '3s/^profile_epoch=//p' "$webui_role_transaction") || return 1
+    case $webui_transaction_epoch in ''|*[!0-9]*) return 1 ;; esac
+    webui_transaction_direct=$(sed -n '4s/^direct_present=//p' "$webui_role_transaction") || return 1
+    case $webui_transaction_direct in true|false) ;; *) return 1 ;; esac
+    webui_all_runtimes_are_stopped || return 1
+    webui_transaction_direct_path=$rka_state_root/profiles/direct.conf
+    if [ "$webui_transaction_direct" = true ]; then
+        rka_private_file_is_valid "$webui_transaction_direct_path" || return 1
+        [ "$(sed -n '/^role=/p' "$webui_transaction_direct_path" | wc -l)" -eq 1 ] || return 1
+        webui_transaction_direct_contents=$(sed "s/^role=.*/role=$webui_transaction_role/" "$webui_transaction_direct_path") || return 1
+        rka_atomic_replace "$rka_state_root/profiles" "$webui_transaction_direct_path" "$webui_transaction_direct_contents
+" || return 1
+    fi
+    rka_atomic_replace "$rka_state_root/profiles" "$rka_state_root/profiles/$RKA_PROFILE_NAME" "version=1
+role=$webui_transaction_role
+profile_epoch=$webui_transaction_epoch
+" || return 1
+    set_role "$webui_transaction_role" || return 1
+    [ "$(read_role)" = "$webui_transaction_role" ] || return 1
+    [ "$(sed -n '2s/^role=//p' "$rka_state_root/profiles/$RKA_PROFILE_NAME")" = "$webui_transaction_role" ] || return 1
+    if [ "$webui_transaction_direct" = true ]; then
+        [ "$(sed -n '2s/^role=//p' "$webui_transaction_direct_path")" = "$webui_transaction_role" ] || return 1
+    fi
+    rm -f "$webui_role_transaction"
+}
+
+webui_set_role() {
+    webui_requested_role=$1
+    case $webui_requested_role in DONOR|CANDIDATE) ;; *) return 1 ;; esac
+    webui_recover_role_transaction || return 1
+    webui_all_runtimes_are_stopped || return 1
+    webui_read_active_profile || return 1
+    webui_direct_profile=$rka_state_root/profiles/direct.conf
+    webui_direct_profile_present=false
+    if [ -e "$webui_direct_profile" ] || [ -L "$webui_direct_profile" ]; then
+        rka_private_file_is_valid "$webui_direct_profile" || return 1
+        webui_direct_profile_present=true
+    fi
+    rka_atomic_replace "$rka_state_root/journal" "$rka_state_root/journal/webui-role.state" "version=1
+requested_role=$webui_requested_role
+profile_epoch=$webui_profile_epoch
+direct_present=$webui_direct_profile_present
+" || return 1
+    webui_recover_role_transaction
 }
 
 webui_validate_profile() {
@@ -947,9 +1244,11 @@ webui_confirmation_path() {
 
 webui_prepare_confirmation() {
     webui_confirm_action=$1
+    webui_confirm_candidate=${2:-}
     webui_confirm_token=$(webui_next_nonce) || return 1
     webui_record_request "$(webui_confirmation_path)" "version=1
 action=$webui_confirm_action
+candidate=$webui_confirm_candidate
 nonce=$webui_new_nonce
 token=$webui_confirm_token
 " || return 1
@@ -961,11 +1260,13 @@ webui_confirmation_matches() {
     webui_confirm_action=$1
     webui_confirm_nonce=$2
     webui_confirm_token=$3
+    webui_confirm_candidate=${4:-}
     webui_nonce_is_valid "$webui_confirm_token" || return 1
     webui_confirm_path=$(webui_confirmation_path)
     rka_private_file_is_valid "$webui_confirm_path" || return 1
     [ "$(cat "$webui_confirm_path")" = "version=1
 action=$webui_confirm_action
+candidate=$webui_confirm_candidate
 nonce=$webui_confirm_nonce
 token=$webui_confirm_token" ] || return 1
     rm -f "$webui_confirm_path"
@@ -985,8 +1286,11 @@ target=$(printf '%s' "$webui_recovery_target" | tr '[:lower:]' '[:upper:]')
     webui_recovery_start=$recovery_start
     recovery_restart_exact "$webui_recovery_target" \
         "$webui_recovery_pid" "$webui_recovery_start" >/dev/null || return 1
-    recovery_ready "$webui_recovery_target" 30000 >/dev/null || return 1
-    recovery_emit_snapshot "$webui_recovery_target" >/dev/null
+    recovery_ready "$webui_recovery_target" 30000 \
+        "$webui_recovery_pid" "$webui_recovery_start" >/dev/null || return 1
+    recovery_emit_snapshot "$webui_recovery_target" >/dev/null || return 1
+    [ "$recovery_pid" != "$webui_recovery_pid" ] ||
+        [ "$recovery_start" != "$webui_recovery_start" ]
 }
 
 webui_root_bundle_fields() {
@@ -1128,7 +1432,7 @@ profile_epoch=$webui_next_epoch
 
 webui_action_is_valid() {
     case $1 in
-        status|role-donor|role-candidate|profile-validate-donor|profile-validate-candidate|profile-apply-donor|profile-apply-candidate|pair-direct|rotate-pairing|provision-rkp|renew-synthetic-lease|rotate-attestation-roots|start|stop|recover-keystore2|recover-rkpd|export-audit|export-evidence|cleanup|quarantine) return 0 ;;
+        status|role-donor|role-candidate|profile-validate-donor|profile-validate-candidate|profile-apply-donor|profile-apply-candidate|network-save|pair-direct|rotate-pairing|provision-rkp|renew-synthetic-lease|rotate-attestation-roots|start|stop|recover-keystore2|recover-rkpd|export-audit|export-evidence|cleanup|quarantine) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -1141,7 +1445,7 @@ webui_request() {
     webui_action_is_valid "$webui_action" || return 1
     if [ -n "$webui_candidate_selector" ]; then
         rka_candidate_is_valid "$webui_candidate_selector" || return 1
-        case $webui_action in status|pair-direct|renew-synthetic-lease) ;; *) return 1 ;; esac
+        case $webui_action in status|pair-direct|provision-rkp|renew-synthetic-lease) ;; *) return 1 ;; esac
     fi
     case $webui_action in
         status|quarantine) webui_nonce_matches "$webui_nonce" && webui_status "$webui_candidate_selector"; return $? ;;
@@ -1164,6 +1468,7 @@ action=ROTATE_PAIRING
         profile-validate-candidate) webui_validate_profile CANDIDATE && printf '%s\n' profile_validation=VALID && webui_request_ok=true ;;
         profile-apply-donor) webui_apply_profile DONOR && printf '%s\n' profile_apply=VALIDATED && webui_request_ok=true ;;
         profile-apply-candidate) webui_apply_profile CANDIDATE && printf '%s\n' profile_apply=VALIDATED && webui_request_ok=true ;;
+        network-save) webui_save_network_profile "$webui_confirmation" && webui_request_ok=true ;;
         recover-keystore2|recover-rkpd|provision-rkp|renew-synthetic-lease|cleanup|rotate-attestation-roots)
             if [ -z "$webui_confirmation" ]; then
                 webui_confirmation_ready=true
@@ -1173,7 +1478,7 @@ action=ROTATE_PAIRING
                         [ "$webui_sentinel" = LIVE ] || webui_confirmation_ready=false
                         ;;
                     provision-rkp)
-                        provision_rkp_inputs || webui_confirmation_ready=false
+                        provision_rkp_inputs "$webui_candidate_selector" || webui_confirmation_ready=false
                         ;;
                     renew-synthetic-lease)
                         synthetic_lease_renew_inputs || webui_confirmation_ready=false
@@ -1184,14 +1489,14 @@ action=ROTATE_PAIRING
                     webui_confirmation_ready=false
                 fi
                 if [ "$webui_confirmation_ready" = true ] &&
-                    webui_prepare_confirmation "$webui_action"; then
+                    webui_prepare_confirmation "$webui_action" "$webui_candidate_selector"; then
                     case $webui_action in
                         recover-keystore2) printf '%s\n' recovery_target=KEYSTORE2 ;;
                         recover-rkpd) printf '%s\n' recovery_target=RKPD ;;
                     esac
                     webui_request_ok=true
                 fi
-            elif webui_confirmation_matches "$webui_action" "$webui_nonce" "$webui_confirmation"; then
+            elif webui_confirmation_matches "$webui_action" "$webui_nonce" "$webui_confirmation" "$webui_candidate_selector"; then
                 case $webui_action in
                     recover-keystore2)
                         webui_recovery_request keystore2 &&
@@ -1204,8 +1509,7 @@ action=ROTATE_PAIRING
                             webui_request_ok=true
                         ;;
                     provision-rkp)
-                        provision_rkp &&
-                            printf '%s\n' rkp_provisioning=PROVISIONED &&
+                        provision_rkp "$webui_candidate_selector" >/dev/null &&
                             webui_request_ok=true
                         ;;
                     renew-synthetic-lease)
@@ -1280,8 +1584,17 @@ while [ $# -gt 0 ]; do
             exit 0
             ;;
         provision-rkp)
-            [ $# -eq 1 ] || exit 2
-            provision_rkp || {
+            provision_candidate=
+            case $# in
+                1) ;;
+                3)
+                    [ "$2" = --candidate ] || exit 2
+                    rka_candidate_is_valid "$3" || exit 2
+                    provision_candidate=$3
+                    ;;
+                *) exit 2 ;;
+            esac
+            provision_rkp "$provision_candidate" || {
                 print_inert
                 exit 1
             }

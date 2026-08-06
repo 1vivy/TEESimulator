@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import socket
@@ -265,6 +266,29 @@ class RkaControlTest(unittest.TestCase):
             )
             for executable in (getprop, pm, sidecar):
                 os.chmod(executable, 0o700)
+            profile_hash = hashlib.sha256(direct_profile.read_bytes()).hexdigest()
+            receipt = state_root / "run" / "direct-profile.receipt"
+            receipt.write_text(
+                "version=1\n"
+                f"profile_sha256={profile_hash}\n"
+                "profile_epoch=0\n"
+                f"peer_pin_sha256={'cd' * 32}\n"
+                "dial_mode=DONOR_DIALS\n"
+                "transport=DIRECT\n",
+                encoding="ascii",
+            )
+            os.chmod(receipt, 0o600)
+            process_id = os.getpid()
+            process_stat = Path(f"/proc/{process_id}/stat").read_text(encoding="ascii")
+            stat_fields = process_stat[process_stat.rfind(")") + 2 :].split()
+            process_record = f"{process_id} {stat_fields[2]} {stat_fields[19]}\n"
+            for process_name in ("broker", "sidecar"):
+                record = state_root / "run" / "pids" / f"{process_name}.pid"
+                record.write_text(process_record, encoding="ascii")
+                os.chmod(record, 0o600)
+            supervisor_state = state_root / "run" / "supervisor.state"
+            supervisor_state.write_text("RUNNING\n", encoding="ascii")
+            os.chmod(supervisor_state, 0o600)
             broker_socket = state_root / "run" / "sockets" / "broker.sock"
             environment = os.environ | {
                 "RKA_GETPROP": str(getprop),
@@ -297,7 +321,12 @@ class RkaControlTest(unittest.TestCase):
             )
             self.assertEqual(
                 (state_root / "journal" / "provisioning.state").read_text(encoding="ascii"),
-                "version=1\nstatus=PROVISIONED\nprofile_epoch=0\nkey_count=1\n",
+                "version=2\n"
+                "status=PROVISIONED\n"
+                "profile_epoch=0\n"
+                "key_count=1\n"
+                "candidate_id=GLOBAL\n"
+                f"broker_generation_sha256={hashlib.sha256(process_record.encode()).hexdigest()}\n",
             )
 
     def test_set_role_fsync_failure_preserves_last_valid_file(self) -> None:

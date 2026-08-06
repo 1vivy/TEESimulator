@@ -1,0 +1,140 @@
+.skip-link {
+  position: fixed;
+  inset-block-start: var(--space-2);
+  inset-inline-start: var(--space-2);
+  z-index: 3;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-control);
+  background: var(--text-primary);
+  color: var(--surface-void);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-160%);
+}
+
+.skip-link:focus {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.shell {
+  inline-size: min(calc(100% - 2rem), 70rem);
+  margin-inline: auto;
+  padding-block: var(--space-8) 4rem;
+}
+
+.masthead,
+.section-heading,
+.activity-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.masthead {
+  margin-block-end: var(--space-8);
+}
+
+.masthead-copy,
+.section-intro {
+  max-inline-size: 42rem;
+}
+
+.workflow,
+.operation-grid,
+.activity-card,
+.advanced {
+  margin-block-start: var(--space-6);
+}
+
+.section-intro {
+  margin-block-end: var(--space-4);
+}
+
+.workflow-grid,
+.operation-grid,
+.advanced-grid,
+.candidate-card-list,
+.field-grid {
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
+}
+
+.workflow-grid {
+  counter-reset: setup-step;
+}
+
+.operation-grid,
+.advanced-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr));
+}
+
+.candidate-card-list {
+  margin-block-start: var(--space-4);
+  grid-template-columns: repeat(auto-fit, minmax(min(24rem, 100%), 1fr));
+}
+
+.button-cluster {
+  display: flex;
+  flex-wrap: wrap;
+  margin: calc(var(--space-1) * -1);
+}
+
+.button-cluster > * {
+  margin: var(--space-1);
+}
+
+@supports (gap: 0.5rem) {
+  .button-cluster {
+    gap: var(--space-2);
+    margin: 0;
+  }
+
+  .button-cluster > * {
+    margin: 0;
+  }
+}
+
+.activity-card {
+  gap: var(--space-6);
+}
+
+.activity-card > div:first-child {
+  max-inline-size: 30rem;
+}
+
+.activity-list {
+  min-inline-size: min(100%, 24rem);
+  margin: 0;
+  padding: 0;
+}
+
+.advanced-grid {
+  margin-block-start: var(--space-4);
+}
+
+@media (max-width: 40rem) {
+  .shell {
+    inline-size: min(calc(100% - 1rem), 70rem);
+    padding-block-start: var(--space-6);
+  }
+
+  .masthead,
+  .section-heading,
+  .activity-card {
+    display: grid;
+    gap: var(--space-4);
+  }
+
+  .button,
+  .button-cluster > .button {
+    inline-size: 100%;
+  }
+
+  .toast-stack {
+    inset-inline: var(--space-2);
+    inline-size: auto;
+  }
+}

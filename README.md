@@ -136,7 +136,10 @@ candidate preserves its native application key and signature operations; the
 lease supplies the attestation chain. StrongBox, unlisted callers, and
 unsupported requests stay on the normal platform path.
 
-The WebUI shows one status card per candidate, each with its own lease controls.
+On a donor, the WebUI shows one pairing-status card per candidate. Lease renewal
+runs from the candidate's own WebUI, where the local lease state is observable.
+When a donor has candidate-indexed profiles, its WebUI network form is read-only;
+rerun the host CLI bind/deploy workflow to update each candidate's routed address.
 
 The beta's automatic network path uses direct routed Wi-Fi: the donor dials each
 candidate on TCP 37373. ADB is used to install and configure the devices but is

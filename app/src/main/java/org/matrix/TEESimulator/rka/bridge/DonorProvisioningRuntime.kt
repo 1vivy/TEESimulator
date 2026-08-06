@@ -53,6 +53,12 @@ import org.matrix.TEESimulator.rka.journal.RkpJournalState
 import org.matrix.TEESimulator.rka.journal.RkpOpaqueHandle
 
 object DonorProvisioningRuntime {
+    private sealed interface DispatchScope {
+        data object Local : DispatchScope
+
+        data class Candidate(val identity: IdentityHash) : DispatchScope
+    }
+
     private val started = AtomicBoolean()
     private val root = Path.of("/data/adb/teesimulator-rka")
     private val client by lazy(IrpcClient::android)
@@ -66,9 +72,9 @@ object DonorProvisioningRuntime {
             it.reconcile()
         }
     }
-    private val activeRequestIds = linkedMapOf<IdentityHash, RequestId>()
-    private val activeCancellations = linkedMapOf<IdentityHash, BrokerCancellation>()
-    private val quarantineControllers = linkedMapOf<IdentityHash, QuarantineController>()
+    private val activeRequestIds = linkedMapOf<DispatchScope, RequestId>()
+    private val activeCancellations = linkedMapOf<DispatchScope, BrokerCancellation>()
+    private val quarantineControllers = linkedMapOf<DispatchScope, QuarantineController>()
 
     internal fun buildQuarantineController(
         journal: RkpJournal,
@@ -90,40 +96,40 @@ object DonorProvisioningRuntime {
             requireActiveBatch = true,
         )
 
-    private fun quarantineController(candidate: IdentityHash): QuarantineController =
-        quarantineControllers.getOrPut(candidate) {
+    private fun quarantineController(scope: DispatchScope): QuarantineController =
+        quarantineControllers.getOrPut(scope) {
             buildQuarantineController(
                 journal,
                 quarantineReceiptStore,
-                cancel = { cancelActiveProvisioning(candidate) },
-                cancelled = { provisioningCancelled(candidate) },
+                cancel = { cancelActiveProvisioning(scope) },
+                cancelled = { provisioningCancelled(scope) },
             )
         }
 
     private fun registerActiveProvisioning(
-        candidate: IdentityHash,
+        scope: DispatchScope,
         requestId: RequestId,
         cancellation: BrokerCancellation,
     ) {
-        activeRequestIds[candidate] = requestId
-        activeCancellations[candidate] = cancellation
+        activeRequestIds[scope] = requestId
+        activeCancellations[scope] = cancellation
     }
 
-    private fun cancelActiveProvisioning(candidate: IdentityHash) {
-        activeCancellations.remove(candidate)?.cancel()
-        activeRequestIds.remove(candidate)
+    private fun cancelActiveProvisioning(scope: DispatchScope) {
+        activeCancellations.remove(scope)?.cancel()
+        activeRequestIds.remove(scope)
     }
 
-    private fun activeProvisioningMatches(candidate: IdentityHash, requestId: RequestId): Boolean =
-        activeRequestIds[candidate] == requestId
+    private fun activeProvisioningMatches(scope: DispatchScope, requestId: RequestId): Boolean =
+        activeRequestIds[scope] == requestId
 
-    private fun clearActiveProvisioning(candidate: IdentityHash) {
-        activeRequestIds.remove(candidate)
-        activeCancellations.remove(candidate)
+    private fun clearActiveProvisioning(scope: DispatchScope) {
+        activeRequestIds.remove(scope)
+        activeCancellations.remove(scope)
     }
 
-    private fun provisioningCancelled(candidate: IdentityHash): Boolean =
-        candidate !in activeRequestIds && candidate !in activeCancellations
+    private fun provisioningCancelled(scope: DispatchScope): Boolean =
+        scope !in activeRequestIds && scope !in activeCancellations
 
     fun initializeLifecycle() {
         if (!started.compareAndSet(false, true)) return
@@ -150,37 +156,27 @@ object DonorProvisioningRuntime {
 
     @Synchronized
     private fun dispatch(message: BridgeMessage): BridgeMessage =
-        try {
-            when (message) {
-                is BridgeMessage.CandidateCommand ->
-                    DonorDispatchAdapter.dispatch(message, donorBackend.value)
-                is BridgeMessage.SyntheticLeaseProbeRequest -> {
-                    donorBackend.value
-                    probeSyntheticLeaseForTest(message, donorDevice.value, journal)
-                }
-                else -> failure(message.requestId)
-            }
-        } catch (error: Exception) {
-            SystemLogger.warning("RKA donor dispatch failed: type=${error.javaClass.simpleName}")
-            failure(message.requestId)
-        }
+        dispatch(DispatchScope.Local, message)
 
     @Synchronized
     internal fun dispatch(candidate: IdentityHash, message: BridgeMessage): BridgeMessage =
+        dispatch(DispatchScope.Candidate(candidate), message)
+
+    private fun dispatch(scope: DispatchScope, message: BridgeMessage): BridgeMessage =
         try {
-            dispatchChecked(candidate, message)
+            dispatchChecked(scope, message)
         } catch (error: Exception) {
             SystemLogger.warning("RKA donor dispatch failed: type=${error.javaClass.simpleName}")
-            clearActiveProvisioning(candidate)
+            clearActiveProvisioning(scope)
             failure(message.requestId)
         }
 
-    private fun dispatchChecked(candidate: IdentityHash, message: BridgeMessage): BridgeMessage =
+    private fun dispatchChecked(scope: DispatchScope, message: BridgeMessage): BridgeMessage =
         when (message) {
-            is BridgeMessage.PublicKeyRequest -> provision(candidate, message)
-            is BridgeMessage.CertificationRequest -> certify(candidate, message)
+            is BridgeMessage.PublicKeyRequest -> provision(scope, message)
+            is BridgeMessage.CertificationRequest -> certify(scope, message)
             is BridgeMessage.CandidateCommand ->
-                if (message.candidateId == candidate) {
+                if ((scope as? DispatchScope.Candidate)?.identity == message.candidateId) {
                     DonorDispatchAdapter.dispatch(message, donorBackend.value)
                 } else {
                     failure(message.requestId)
@@ -195,7 +191,7 @@ object DonorProvisioningRuntime {
                 val actionIds = message.cleanupActionIds()
                 val result =
                     try {
-                        quarantineController(candidate)
+                        quarantineController(scope)
                             .quarantine(
                                 if (batchId == null) {
                                     AuthenticatedQuarantineRequest.fromTrustedBridge(
@@ -226,25 +222,30 @@ object DonorProvisioningRuntime {
         }
 
     private fun provision(
-        candidate: IdentityHash,
+        scope: DispatchScope,
         request: BridgeMessage.PublicKeyRequest,
     ): BridgeMessage {
         var stage = "CHALLENGE"
         return try {
+            val challengeOutcome = AttestationChallenge.parse(request.challenge.copyBytes())
             val challenge =
-                AttestationChallenge.parse(request.challenge.copyBytes()) as? BrokerOutcome.Success
-                    ?: return failure(request.requestId)
+                challengeOutcome as? BrokerOutcome.Success
+                    ?: return rejected(request.requestId, stage, challengeOutcome)
             stage = "JOURNAL_RECOVER"
-            if (!journal.prepareForProvisioning()) return failure(request.requestId)
-            clearActiveProvisioning(candidate)
+            if (!journal.prepareForProvisioning()) {
+                SystemLogger.warning("RKA donor provisioning rejected: stage=$stage type=ActiveBatch")
+                return failure(request.requestId)
+            }
+            clearActiveProvisioning(scope)
             val deadline = BrokerDeadline.at(BridgeLimits.DONOR_DEADLINE_MILLIS)
             val cancellation = BrokerCancellation.active()
-            activeCancellations[candidate] = cancellation
+            activeCancellations[scope] = cancellation
             val generator = DurableIrpcKeyBatchGenerator(client, journal)
             stage = "KEY_COUNT"
+            val countOutcome = RkpKeyCount.parse(request.keyCount)
             val count =
-                RkpKeyCount.parse(request.keyCount) as? BrokerOutcome.Success
-                    ?: return failure(request.requestId)
+                countOutcome as? BrokerOutcome.Success
+                    ?: return rejected(request.requestId, stage, countOutcome)
             val generatedOutcome =
                 generator.generate(count.value, deadline, cancellation) { stage = it }
             val generated =
@@ -268,9 +269,12 @@ object DonorProvisioningRuntime {
                 }
                 .getOrElse {
                     journal.quarantineCurrent()
+                    SystemLogger.warning(
+                        "RKA donor provisioning failed: stage=$stage type=${it.javaClass.simpleName}"
+                    )
                     return failure(request.requestId)
                 }
-            registerActiveProvisioning(candidate, request.requestId, cancellation)
+            registerActiveProvisioning(scope, request.requestId, cancellation)
             stage = "RESPONSE"
             BridgeMessage.PublicKeyResponse(
                 request.requestId,
@@ -310,7 +314,7 @@ object DonorProvisioningRuntime {
     }
 
     private fun certify(
-        candidate: IdentityHash,
+        scope: DispatchScope,
         request: BridgeMessage.CertificationRequest,
     ): BridgeMessage {
         var stage = "MATERIAL"
@@ -344,13 +348,13 @@ object DonorProvisioningRuntime {
                 }
             stage = "JOURNAL"
             val exact =
-                if (activeProvisioningMatches(candidate, request.requestId)) {
+                if (activeProvisioningMatches(scope, request.requestId)) {
                     journal.certifyCurrent(certification)
                 } else {
                     journal.quarantineCurrent()
                     false
                 }
-            clearActiveProvisioning(candidate)
+            clearActiveProvisioning(scope)
             if (!exact) {
                 SystemLogger.warning("RKA donor certification rejected: stage=$stage")
                 failure(request.requestId)
@@ -367,7 +371,7 @@ object DonorProvisioningRuntime {
                 "RKA donor certification failed: stage=$stage " +
                     "type=${error.javaClass.simpleName}"
             )
-            clearActiveProvisioning(candidate)
+            clearActiveProvisioning(scope)
             failure(request.requestId)
         } finally {
             batchBytes.fill(0)

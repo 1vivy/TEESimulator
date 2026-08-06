@@ -94,6 +94,32 @@ class LegacyModeBaselineTest {
         assertFalse(ConfigurationManager.shouldUseSyntheticLease(uid))
     }
 
+    @Test
+    fun syntheticLeaseCandidateUidsIncludeOnlyExplicitPatchTargets() {
+        // Given
+        setField(
+            "packageModes",
+            linkedMapOf(
+                "fixture.auto" to ConfigurationManager.Mode.AUTO,
+                "fixture.generate" to ConfigurationManager.Mode.GENERATE,
+                "fixture.patch" to ConfigurationManager.Mode.PATCH,
+            ),
+        )
+
+        // When
+        val selected =
+            ConfigurationManager.configuredCandidateUids(
+                linkedMapOf(
+                    "fixture.auto" to uid,
+                    "fixture.generate" to uid + 1,
+                    "fixture.patch" to uid + 2,
+                )
+            )
+
+        // Then
+        assertEquals(listOf(uid + 2), selected)
+    }
+
     private fun configure(packageName: String, mode: ConfigurationManager.Mode) {
         uidCache()[uid] = arrayOf(packageName)
         setField("packageModes", mapOf(packageName to mode))

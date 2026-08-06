@@ -115,16 +115,26 @@ object ConfigurationManager {
                         packageManager.getInstalledPackages(0, 0).list
                     }
                 val candidateUids =
-                    installed
-                        .filter { it.packageName in packageModes }
-                        .mapNotNull { it.applicationInfo?.uid }
-                        .distinct()
+                    configuredCandidateUids(
+                        installed
+                            .mapNotNull { pkg ->
+                                pkg.applicationInfo?.uid?.let { uid -> pkg.packageName to uid }
+                            }
+                            .toMap()
+                    )
                 configuredCandidateIdentities(
                     candidateUids,
                     AndroidCandidateIdentityAuthority(packageManager),
                 )
             }
             .getOrDefault(emptyList())
+
+    internal fun configuredCandidateUids(installedPackageUids: Map<String, Int>): List<Int> =
+        installedPackageUids
+            .mapNotNull { (packageName, uid) ->
+                uid.takeIf { packageModes[packageName] == Mode.PATCH }
+            }
+            .distinct()
 
     internal fun configuredCandidateIdentities(
         candidateUids: List<Int>,

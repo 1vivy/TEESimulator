@@ -168,6 +168,11 @@ run/direct-profile-<candidate>.receipt
 run/supervisor-<candidate>.state
 ```
 
+The donor WebUI displays those candidate-indexed addresses but does not apply one
+global network form to several profiles. Its network fields are read-only in
+multi-candidate mode. Rerun the host CLI bind/deploy workflow when a candidate's
+routed address changes.
+
 Durable donor state lives under `candidates/<candidate-identity-hash>/`.
 Migration from the older single-candidate layout happens once and atomically:
 validate, stage, fsync, atomic rename, then commit a manifest. Legacy state is
@@ -197,11 +202,12 @@ the ROM does not set them from init. They are not required on a candidate.
 Open the TEESimulator-RS WebUI in KernelSU on each device.
 
 1. On the donor, refresh status. The WebUI renders one status card per paired
-   candidate. Confirm `Donor`, `Paired`, `Ready`, and `Running`, and find the
-   card for the candidate you are provisioning.
-2. Press **Provision donor lease** on that candidate's card. Copy the displayed
-   one-time confirmation token into the confirmation field and submit it. The
-   lease controls on each card are gated independently.
+   candidate. Confirm `Donor`, `Paired`, `Ready`, and `Running` for the pairing
+   you are provisioning.
+2. In that candidate's donor status card, press **Provision candidate RKP**.
+   Copy the displayed one-time confirmation token into the confirmation field
+   and submit it. The provisioning receipt is bound to that candidate and its
+   current broker generation.
 3. Keep the donor's RKA supervisor running. The current donor opaque-blob
    resolver is process-local, so do not restart the donor runtime between
    steps 2 and 4.
@@ -210,7 +216,8 @@ Open the TEESimulator-RS WebUI in KernelSU on each device.
 5. Refresh the candidate. Confirm `synthetic lease: Active`, `lease next: Empty`,
    and a future lease-valid-until time.
 
-Repeat steps 1 through 5 for each further candidate.
+Repeat steps 2 through 5 for each further candidate. Reprovision a candidate on
+the donor only when that candidate card's RKP state is no longer `Provisioned`.
 
 Provisioning does not replace or clear an existing Android RKP lease. It asks
 for one additional fresh key for the RKA issuance transaction.
@@ -221,8 +228,9 @@ The on-device control interface takes an optional candidate selector:
 webui ACTION NONCE [CONFIRMATION] [--candidate CANDIDATE]
 ```
 
-All 18 existing action verbs are unchanged. Omit `--candidate` for a donor with
-a single paired candidate.
+All 18 existing action verbs are unchanged. Candidate-indexed donor provisioning
+requires `--candidate`, including when only one candidate profile is published;
+the WebUI supplies it from the selected status card.
 
 ## Select applications
 
@@ -269,8 +277,8 @@ expiry:
 1. Put the donor and the candidate on the same routed Wi-Fi network.
 2. Ensure the donor can reach that candidate on TCP 37373.
 3. Reapply the two donor properties if the development ROM lost them.
-4. On the donor, provision one fresh donor lease from that candidate's status
-   card.
+4. On the donor, use that candidate card's **Provision candidate RKP** control
+   when its RKP state is no longer `Provisioned`.
 5. Without restarting the donor RKA runtime, use **Issue / renew candidate
    lease** on the candidate.
 6. Confirm that candidate's lease epoch increased and `lease next` returned to

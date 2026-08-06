@@ -6,15 +6,19 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+use crate::direct_profile::DirectProfile;
 use crate::{
-    candidate::{AuthenticatedCandidateContext, CandidateId},
-    direct_profile::{DialMode, DirectProfile},
+    candidate::AuthenticatedCandidateContext,
+    direct_profile::DialMode,
     donor::{DonorRuntime, actor::CandidateActor},
 };
 
+#[cfg(test)]
+use super::authenticated_profile;
 use super::{
-    BUDGET, DirectSessionError, PORT, authenticated_profile, candidate_diagnostic, connect_bound,
-    donor_client,
+    BUDGET, DirectSessionError, DonorProfileBinding, PORT, connect_bound, diagnostic, donor_client,
+    resolve_donor_bindings,
 };
 
 mod bridge;
@@ -29,16 +33,20 @@ pub(super) enum DonorIteration {
 
 #[doc(hidden)]
 pub fn run_donor(runtime: DonorRuntime) -> Result<(), DirectSessionError> {
-    let (state, profiles) =
+    let (state, source, profiles) =
         crate::direct_profile::load_donor_profiles().map_err(|_| DirectSessionError::State)?;
+    let bindings = resolve_donor_bindings(
+        &state,
+        source,
+        profiles.into_iter().map(|(profile, _)| profile).collect(),
+    )?;
     let runtime_actor = runtime_actor(runtime)?;
     let (failures, receiver) = mpsc::sync_channel(1);
-    for (profile, _) in profiles {
-        if profile.dial_mode != DialMode::DonorDials {
+    for binding in bindings {
+        if binding.profile.dial_mode != DialMode::DonorDials {
             return Err(DirectSessionError::State);
         }
-        let authenticated = authenticated_profile(&state, &profile)?;
-        let candidate = *authenticated.candidate();
+        let candidate = *binding.authenticated.candidate();
         let runtime_actor = runtime_actor.clone();
         let actor = CandidateActor::spawn(candidate, move |frame: ActorFrame| {
             let (response, result) = mpsc::sync_channel(1);
@@ -55,7 +63,7 @@ pub fn run_donor(runtime: DonorRuntime) -> Result<(), DirectSessionError> {
         std::thread::Builder::new()
             .name("rka-profile-supervisor".to_owned())
             .spawn(move || {
-                let result = run_profile_supervisor((&actor, &state, &profile), &candidate);
+                let result = run_profile_supervisor((&actor, &state, &binding));
                 let _ = failures.send(result);
             })
             .map_err(|_| DirectSessionError::State)?;
@@ -91,18 +99,17 @@ fn runtime_actor(
 }
 
 fn run_profile_supervisor(
-    context: (&CandidateActor<ActorFrame>, &Path, &DirectProfile),
-    candidate: &CandidateId,
+    context: (&CandidateActor<ActorFrame>, &Path, &DonorProfileBinding),
 ) -> Result<(), DirectSessionError> {
-    let (actor, state, profile) = context;
+    let (actor, state, binding) = context;
     loop {
         match run_donor_actor_once(
-            (actor, state, profile),
-            SocketAddrV4::new(profile.endpoint, PORT),
+            (actor, state, binding),
+            SocketAddrV4::new(binding.profile.endpoint, PORT),
         )? {
             DonorIteration::Served => {}
             DonorIteration::Retry => {
-                candidate_diagnostic(state, candidate, "donor_pre_dispatch");
+                diagnostic(&binding.runtime_root, "donor_pre_dispatch");
                 std::thread::sleep(Duration::from_secs(1));
             }
         }
@@ -110,12 +117,12 @@ fn run_profile_supervisor(
 }
 
 fn run_donor_actor_once(
-    context: (&CandidateActor<ActorFrame>, &Path, &DirectProfile),
+    context: (&CandidateActor<ActorFrame>, &Path, &DonorProfileBinding),
     remote: SocketAddrV4,
 ) -> Result<DonorIteration, DirectSessionError> {
-    let (actor, state, profile) = context;
-    let donor = donor_client(state, profile)?;
-    let Ok(socket) = connect_bound(profile.listen_interface, remote, BUDGET) else {
+    let (actor, state, binding) = context;
+    let donor = donor_client(state, binding)?;
+    let Ok(socket) = connect_bound(binding.profile.listen_interface, remote, BUDGET) else {
         return Ok(DonorIteration::Retry);
     };
     let dispatched = Cell::new(false);
@@ -141,7 +148,13 @@ pub(super) fn run_donor_once(
     remote: SocketAddrV4,
 ) -> Result<DonorIteration, DirectSessionError> {
     let (runtime, state, profile) = context;
-    let donor = donor_client(state, profile)?;
+    let authenticated = authenticated_profile(state, profile)?;
+    let binding = DonorProfileBinding {
+        profile: *profile,
+        authenticated,
+        runtime_root: state.to_path_buf(),
+    };
+    let donor = donor_client(state, &binding)?;
     let Ok(socket) = connect_bound(profile.listen_interface, remote, BUDGET) else {
         return Ok(DonorIteration::Retry);
     };

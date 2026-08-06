@@ -17,9 +17,10 @@ use rka_state::PairedActivationRecord;
 use rka_transport::peer_spki_hash;
 
 use super::{
-    CandidateIterationError, DirectSessionError, DonorIteration, bind_local, candidate_diagnostic,
-    candidate_diagnostic_path, candidate_local_socket_path, candidate_server, connect_bound,
-    donor_client, read_frame, run_candidate_once, run_donor_once,
+    CandidateIterationError, DirectSessionError, DonorIteration, authenticated_profile, bind_local,
+    candidate_diagnostic, candidate_diagnostic_path, candidate_local_socket_path, candidate_server,
+    connect_bound, donor_client, local_socket_path, read_frame, resolve_donor_bindings,
+    run_candidate_once, run_donor_once,
     tests::{TempState, identities, persist_identity, persist_profile, routed_local_ipv4},
     write_frame,
 };
@@ -58,11 +59,94 @@ fn each_candidate_gets_its_own_diagnostic_file_and_local_broker_socket()
 }
 use crate::{
     LifecycleRole,
-    candidate::{PairingAdmission, PairingCatalog},
-    direct_profile::DirectProfile,
+    candidate::{CandidateLayout, PairingAdmission, PairingCatalog},
+    direct_profile::{DirectProfile, DonorProfileSource},
     donor::{DonorError, actor::CandidateActor, dispatch_tests::support::Fixture},
     provisioning_io::FileStateStore,
 };
+
+#[test]
+fn legacy_single_candidate_binding_uses_the_global_state_and_broker_socket()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let state = TempState::new("legacy-donor-binding")?;
+    fs::create_dir_all(state.0.join("profiles/direct.d"))?;
+    let peer_pin = [0x51; 32];
+    let profile = persist_profile(
+        &state.0,
+        (LifecycleRole::Donor, routed_local_ipv4()?, peer_pin),
+    )?;
+    let pair = PairedActivationRecord {
+        peer_spki_hash: peer_pin,
+        profile_id_hash: [0x52; 32],
+        profile_epoch: profile.epoch,
+        candidate_identity_hash: [0x53; 32],
+        session_id: [0x54; 32],
+        candidate_nonce: [0x55; 32],
+        donor_nonce: [0x56; 32],
+        prior_transcript_hash: [0x57; 32],
+    };
+    pair.persist(&FileStateStore::new(&state.0))?;
+
+    // When
+    let bindings = resolve_donor_bindings(&state.0, DonorProfileSource::Legacy, vec![profile])?;
+
+    // Then
+    assert_eq!(bindings.len(), 1);
+    let binding = bindings.first().ok_or("legacy binding missing")?;
+    assert_eq!(binding.runtime_root, state.0);
+    assert_eq!(
+        local_socket_path(&binding.runtime_root),
+        binding.runtime_root.join("run/sockets/broker.sock")
+    );
+    assert_eq!(
+        binding.authenticated.candidate().as_bytes(),
+        &pair.candidate_identity_hash
+    );
+    Ok(())
+}
+
+#[test]
+fn indexed_binding_rejects_missing_candidate_state_instead_of_using_global_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let state = TempState::new("indexed-donor-binding")?;
+    let peer_pin = [0x61; 32];
+    let profile = persist_profile(
+        &state.0,
+        (LifecycleRole::Donor, routed_local_ipv4()?, peer_pin),
+    )?;
+    let pair = PairedActivationRecord {
+        peer_spki_hash: peer_pin,
+        profile_id_hash: [0x62; 32],
+        profile_epoch: profile.epoch,
+        candidate_identity_hash: [0x63; 32],
+        session_id: [0x64; 32],
+        candidate_nonce: [0x65; 32],
+        donor_nonce: [0x66; 32],
+        prior_transcript_hash: [0x67; 32],
+    };
+    pair.persist(&FileStateStore::new(&state.0))?;
+    let mut catalog = PairingCatalog::empty();
+    catalog.admit(PairingAdmission {
+        peer_spki_hash: pair.peer_spki_hash,
+        profile_id_hash: pair.profile_id_hash,
+        profile_epoch: pair.profile_epoch,
+        candidate_identity_hash: pair.candidate_identity_hash,
+    })?;
+    catalog.persist(&state.0)?;
+    let candidate = catalog.lookup_identity(pair.candidate_identity_hash)?;
+    let missing = CandidateLayout::new(&state.0, candidate.candidate());
+    assert!(!missing.root().exists());
+
+    // When
+    let result = resolve_donor_bindings(&state.0, DonorProfileSource::Indexed, vec![profile]);
+
+    // Then
+    assert!(matches!(result, Err(DirectSessionError::State)));
+    assert!(!missing.root().exists());
+    Ok(())
+}
 
 #[test]
 fn a_slow_candidate_does_not_block_another_candidates_frame_from_being_accepted()
@@ -241,7 +325,13 @@ fn donor_dispatch_receives_the_catalog_resolved_candidate_for_the_selected_profi
         })?;
         candidate.exchange(socket, b"candidate-b-request")
     });
-    let donor = donor_client(&fixture.donor.root, &fixture.donor_profile)?;
+    let authenticated = authenticated_profile(&fixture.donor.root, &fixture.donor_profile)?;
+    let binding = super::DonorProfileBinding {
+        profile: fixture.donor_profile,
+        authenticated,
+        runtime_root: fixture.donor.root.clone(),
+    };
+    let donor = donor_client(&fixture.donor.root, &binding)?;
     let observed = Cell::new(None);
 
     // When

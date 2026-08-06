@@ -16,12 +16,13 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use thiserror::Error;
 
 use crate::{
-    candidate::{AuthenticatedCandidateContext, CandidateLayout, PairingCatalog},
+    candidate::{AuthenticatedCandidateContext, PairingCatalog},
     direct_profile::DirectProfile,
     provisioning_io::FileStateStore,
 };
 
 mod candidate_role;
+mod donor_binding;
 mod donor_role;
 mod runtime_paths;
 
@@ -30,12 +31,14 @@ pub use donor_role::{run_donor, run_donor_bridge};
 
 #[cfg(test)]
 use candidate_role::{CandidateIterationError, run_candidate_once};
+use donor_binding::{DonorProfileBinding, resolve_donor_bindings};
 #[cfg(test)]
 use donor_role::{DonorIteration, run_donor_once};
 #[cfg(test)]
 use runtime_paths::candidate_diagnostic_path;
-use runtime_paths::candidate_local_socket_path;
-use runtime_paths::{bind_local, candidate_diagnostic, diagnostic};
+use runtime_paths::{bind_local, diagnostic, local_socket_path};
+#[cfg(test)]
+use runtime_paths::{candidate_diagnostic, candidate_local_socket_path};
 
 const PORT: u16 = 37_373;
 const BUDGET: Duration = Duration::from_secs(25);
@@ -93,29 +96,25 @@ fn tls_status(error: TlsError, phase: &str) -> String {
 
 fn donor_client(
     state: &Path,
-    profile: &DirectProfile,
+    binding: &DonorProfileBinding,
 ) -> Result<PinnedTlsDonorClient<AuthenticatedCandidateContext>, DirectSessionError> {
-    let authenticated = authenticated_profile(state, profile)?;
-    let candidate_state = CandidateLayout::new(state, authenticated.candidate());
-    let activation_root = if candidate_state.root().is_dir() {
-        candidate_state.root()
-    } else {
-        state
-    };
-    let (tls_admission, profile_id_hash) = admission(activation_root, profile)?;
-    let authenticated = PairingCatalog::load(state)
-        .and_then(|catalog| catalog.lookup(profile.peer_pin, profile_id_hash, profile.epoch))
-        .map_err(|_| DirectSessionError::State)?;
+    let (tls_admission, profile_id_hash) = admission(&binding.runtime_root, &binding.profile)?;
+    if binding.authenticated.peer_spki_hash() != &binding.profile.peer_pin
+        || binding.authenticated.profile_epoch() != binding.profile.epoch
+        || binding.authenticated.profile_id_hash() != &profile_id_hash
+    {
+        return Err(DirectSessionError::State);
+    }
     PinnedTlsDonorClient::new(
         identity(state)?,
         ClientPeer::new(
             peer_trust(state)?,
             ServerName::try_from("teesimulator-rka.local".to_owned())
                 .map_err(|_| DirectSessionError::State)?,
-            profile.peer_pin,
+            binding.profile.peer_pin,
         ),
         tls_admission,
-        authenticated,
+        binding.authenticated,
     )
     .map_err(|_| DirectSessionError::Tls)
 }

@@ -16,7 +16,7 @@ pub use receipt::{consume, probe};
 const MAX_PROFILE_BYTES: u64 = 4096;
 const PROFILE_NAME: &str = "profiles/direct.conf";
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct DirectProfile {
     pub(crate) epoch: u64,
     pub(crate) endpoint: Ipv4Addr,
@@ -27,7 +27,14 @@ pub(crate) struct DirectProfile {
 
 type LoadedProfiles = Vec<(DirectProfile, Vec<u8>)>;
 
-pub(crate) fn load_donor_profiles() -> Result<(PathBuf, LoadedProfiles), SidecarError> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DonorProfileSource {
+    Legacy,
+    Indexed,
+}
+
+pub(crate) fn load_donor_profiles()
+-> Result<(PathBuf, DonorProfileSource, LoadedProfiles), SidecarError> {
     loader::load_donor_profiles()
 }
 

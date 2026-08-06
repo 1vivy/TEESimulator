@@ -2,36 +2,52 @@ use std::{
     cell::Cell,
     collections::HashMap,
     net::SocketAddrV4,
-    path::{Path, PathBuf},
+    path::Path,
     sync::mpsc::{self, SyncSender},
     time::Duration,
 };
 
 use crate::{
     bridge::{BridgeMessage, ExchangeRole, decode_frame, encode_frame},
-    candidate::{CandidateId, CandidateLayout},
+    candidate::CandidateId,
     direct_bridge::DirectBridgeAdapter,
-    direct_profile::{DialMode, DirectProfile},
+    direct_profile::DialMode,
     donor::actor::CandidateActor,
 };
 
 use super::super::{
-    BUDGET, DirectSessionError, PORT, authenticated_profile, candidate_diagnostic,
-    candidate_local_socket_path, connect_bound, donor_client, tls_status,
+    BUDGET, DirectSessionError, DonorProfileBinding, PORT, connect_bound, diagnostic, donor_client,
+    local_socket_path, resolve_donor_bindings, tls_status,
 };
 
 #[doc(hidden)]
 pub fn run_donor_bridge() -> Result<(), DirectSessionError> {
-    let (state, profiles) =
+    let (state, source, profiles) =
         crate::direct_profile::load_donor_profiles().map_err(|_| DirectSessionError::State)?;
-    let bridge = bridge_actor(state.clone())?;
+    let bindings = resolve_donor_bindings(
+        &state,
+        source,
+        profiles.into_iter().map(|(profile, _)| profile).collect(),
+    )?;
+    let adapters = bindings
+        .iter()
+        .map(|binding| {
+            (
+                *binding.authenticated.candidate(),
+                DirectBridgeAdapter::new(
+                    &binding.runtime_root,
+                    local_socket_path(&binding.runtime_root),
+                ),
+            )
+        })
+        .collect();
+    let bridge = bridge_actor(adapters)?;
     let (failures, receiver) = mpsc::sync_channel(1);
-    for (profile, _) in profiles {
-        if profile.dial_mode != DialMode::DonorDials {
+    for binding in bindings {
+        if binding.profile.dial_mode != DialMode::DonorDials {
             return Err(DirectSessionError::State);
         }
-        let authenticated = authenticated_profile(&state, &profile)?;
-        let candidate = *authenticated.candidate();
+        let candidate = *binding.authenticated.candidate();
         let bridge = bridge.clone();
         let actor = CandidateActor::spawn(candidate, move |request| {
             let (response, result) = mpsc::sync_channel(1);
@@ -52,7 +68,7 @@ pub fn run_donor_bridge() -> Result<(), DirectSessionError> {
         std::thread::Builder::new()
             .name("rka-bridge-profile-supervisor".to_owned())
             .spawn(move || {
-                let result = run_bridge_profile((&actor, &state, &profile), &candidate);
+                let result = run_bridge_profile((&actor, &state, &binding));
                 let _ = failures.send(result);
             })
             .map_err(|_| DirectSessionError::State)?;
@@ -67,21 +83,21 @@ struct BridgeRequest {
     response: SyncSender<Result<Vec<u8>, crate::donor::DonorError>>,
 }
 
-fn bridge_actor(state: PathBuf) -> Result<SyncSender<BridgeRequest>, DirectSessionError> {
+fn bridge_actor(
+    mut adapters: HashMap<CandidateId, DirectBridgeAdapter>,
+) -> Result<SyncSender<BridgeRequest>, DirectSessionError> {
     let (sender, receiver) = mpsc::sync_channel::<BridgeRequest>(32);
     std::thread::Builder::new()
         .name("rka-donor-bridge".to_owned())
         .spawn(move || {
-            let mut adapters = HashMap::<CandidateId, DirectBridgeAdapter>::new();
             while let Ok(request) = receiver.recv() {
-                let adapter = adapters.entry(request.candidate).or_insert_with(|| {
-                    DirectBridgeAdapter::new(
-                        CandidateLayout::new(&state, &request.candidate).root(),
-                        candidate_local_socket_path(&state, &request.candidate),
-                    )
-                });
-                let result = dispatch_bridge(adapter, &request.candidate, &request.request)
-                    .map_err(|()| crate::donor::DonorError::Broker);
+                let result = adapters
+                    .get_mut(&request.candidate)
+                    .ok_or(crate::donor::DonorError::Broker)
+                    .and_then(|adapter| {
+                        dispatch_bridge(adapter, &request.candidate, &request.request)
+                            .map_err(|()| crate::donor::DonorError::Broker)
+                    });
                 if request.response.send(result).is_err() {
                     break;
                 }
@@ -113,18 +129,17 @@ fn dispatch_bridge(
 }
 
 fn run_bridge_profile(
-    context: (&CandidateActor<Vec<u8>>, &Path, &DirectProfile),
-    candidate: &CandidateId,
+    context: (&CandidateActor<Vec<u8>>, &Path, &DonorProfileBinding),
 ) -> Result<(), DirectSessionError> {
-    let (actor, state, profile) = context;
+    let (actor, state, binding) = context;
     loop {
-        let donor = donor_client(state, profile)?;
+        let donor = donor_client(state, binding)?;
         let Ok(socket) = connect_bound(
-            profile.listen_interface,
-            SocketAddrV4::new(profile.endpoint, PORT),
+            binding.profile.listen_interface,
+            SocketAddrV4::new(binding.profile.endpoint, PORT),
             BUDGET,
         ) else {
-            candidate_diagnostic(state, candidate, "donor_pre_dispatch_io");
+            diagnostic(&binding.runtime_root, "donor_pre_dispatch_io");
             std::thread::sleep(Duration::from_secs(1));
             continue;
         };
@@ -138,11 +153,14 @@ fn run_bridge_profile(
         match (result, dispatched.get()) {
             (Ok(()), _) => {}
             (Err(error), true) => {
-                candidate_diagnostic(state, candidate, &tls_status(error, "donor_ambiguous"));
+                diagnostic(&binding.runtime_root, &tls_status(error, "donor_ambiguous"));
                 return Err(DirectSessionError::Ambiguous);
             }
             (Err(error), false) => {
-                candidate_diagnostic(state, candidate, &tls_status(error, "donor_pre_dispatch"));
+                diagnostic(
+                    &binding.runtime_root,
+                    &tls_status(error, "donor_pre_dispatch"),
+                );
                 std::thread::sleep(Duration::from_secs(1));
             }
         }

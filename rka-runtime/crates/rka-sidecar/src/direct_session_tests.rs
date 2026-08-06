@@ -94,6 +94,30 @@ fn unavailable_profile_source_fails_before_connect() -> Result<(), Box<dyn std::
 }
 
 #[test]
+fn the_donor_preserves_the_legacy_single_candidate_profile_when_the_catalog_is_empty()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let state = TempState::new("donor-legacy-profile")?;
+    fs::create_dir_all(state.0.join("profiles/direct.d"))?;
+    write_profile(
+        &state.0.join("profiles/direct.conf"),
+        LifecycleRole::Donor,
+        [0x10; 32],
+    )?;
+
+    // When
+    let loaded = load_published_profiles(&state.0, LifecycleRole::Donor, 9)?;
+
+    // Then
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(
+        loaded.first().map(|(profile, _)| profile.peer_pin),
+        Some([0x10; 32])
+    );
+    Ok(())
+}
+
+#[test]
 fn the_donor_loads_every_published_candidate_profile_and_rejects_a_duplicate_pin()
 -> Result<(), Box<dyn std::error::Error>> {
     // Given

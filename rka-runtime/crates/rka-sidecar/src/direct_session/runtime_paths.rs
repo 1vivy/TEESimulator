@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(test)]
 use crate::candidate::{CandidateId, CandidateLayout};
 
 use super::DirectSessionError;
@@ -15,6 +16,7 @@ pub(super) fn diagnostic(state: &Path, status: &str) {
     append_diagnostic(&state.join("run/direct-session.diagnostic"), status);
 }
 
+#[cfg(test)]
 pub(super) fn candidate_diagnostic(state: &Path, candidate: &CandidateId, status: &str) {
     append_diagnostic(&candidate_diagnostic_path(state, candidate), status);
 }
@@ -33,17 +35,20 @@ fn append_diagnostic(path: &Path, status: &str) {
     }
 }
 
+#[cfg(test)]
 pub(super) fn candidate_diagnostic_path(state: &Path, candidate: &CandidateId) -> PathBuf {
     CandidateLayout::new(state, candidate)
         .root()
         .join("run/direct-session.diagnostic")
 }
 
+#[cfg(test)]
 pub(super) fn candidate_local_socket_path(state: &Path, candidate: &CandidateId) -> PathBuf {
-    CandidateLayout::new(state, candidate)
-        .root()
-        .join("run/sockets")
-        .join(LOCAL_BRIDGE_SOCKET)
+    local_socket_path(CandidateLayout::new(state, candidate).root())
+}
+
+pub(super) fn local_socket_path(state: &Path) -> PathBuf {
+    state.join("run/sockets").join(LOCAL_BRIDGE_SOCKET)
 }
 
 pub(super) fn bind_local(state: &Path) -> Result<UnixListener, DirectSessionError> {

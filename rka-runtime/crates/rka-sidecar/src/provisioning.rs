@@ -89,6 +89,28 @@ pub enum ProvisioningValidationStage {
     ChainSet,
 }
 
+/// Secret-free JVM broker response checkpoints suitable for production diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ProvisioningBrokerStage {
+    /// Provisioning challenge violated the bridge boundary.
+    ChallengeBoundary,
+    /// JVM broker did not return a public-key response.
+    PublicKeyResponse,
+    /// JVM broker returned the wrong number of public keys.
+    PublicKeyCount,
+    /// JVM broker returned public keys in the wrong order.
+    PublicKeyOrder,
+    /// JVM broker did not acknowledge generated-batch cancellation.
+    CancelAck,
+    /// Validated certification metadata violated the bridge boundary.
+    CertificationMetadata,
+    /// JVM broker did not acknowledge certification.
+    CertificationAck,
+    /// JVM broker acknowledged different certification material.
+    CertificationBinding,
+}
+
 /// Secret-free failure information retained when best-effort cleanup also fails.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -121,6 +143,9 @@ pub enum ProvisioningRunError {
     /// The authenticated JVM broker exchange failed.
     #[error("provisioning broker failed")]
     Broker,
+    /// The authenticated JVM broker response failed at a redacted checkpoint.
+    #[error("provisioning broker failed at {0:?}")]
+    BrokerStage(ProvisioningBrokerStage),
     /// The authenticated broker transport failed with a redacted bridge category.
     #[error("provisioning broker bridge failed: {0}")]
     BrokerBridge(BridgeError),
@@ -153,7 +178,7 @@ impl ProvisioningRunError {
     const fn failure_stage(self) -> ProvisioningFailureStage {
         match self {
             Self::Configuration => ProvisioningFailureStage::Configuration,
-            Self::Broker => ProvisioningFailureStage::Broker,
+            Self::Broker | Self::BrokerStage(_) => ProvisioningFailureStage::Broker,
             Self::BrokerBridge(error) => ProvisioningFailureStage::BrokerBridge(error),
             Self::Http(error) => ProvisioningFailureStage::Http(error),
             Self::Validation => ProvisioningFailureStage::Validation,
@@ -173,6 +198,10 @@ const fn cleanup_failure(
         prior: prior.failure_stage(),
         cleanup: cleanup.failure_stage(),
     }
+}
+
+const fn broker_failure(stage: ProvisioningBrokerStage) -> ProvisioningRunError {
+    ProvisioningRunError::BrokerStage(stage)
 }
 
 /// Runs one authenticated V2 CSR-to-activated-lease production transaction.
@@ -197,7 +226,7 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
     let request = BridgeMessage::PublicKeyRequest(
         RequestId::new(request_id),
         PublicBytes::bounded(&fetched.challenge, 16, 64)
-            .map_err(|_| ProvisioningRunError::Broker)?,
+            .map_err(|_| broker_failure(ProvisioningBrokerStage::ChallengeBoundary))?,
         config.key_count,
     );
     let response = executor
@@ -215,10 +244,10 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
         let BridgeMessage::PublicKeyResponse(_, hal_csr, batch_id, irpc_identity_hash, keys) =
             response
         else {
-            return Err(ProvisioningRunError::Broker);
+            return Err(broker_failure(ProvisioningBrokerStage::PublicKeyResponse));
         };
         if keys.len() != usize::from(config.key_count) {
-            return Err(ProvisioningRunError::Broker);
+            return Err(broker_failure(ProvisioningBrokerStage::PublicKeyCount));
         }
         broker_batch_id = Some(*batch_id.as_array());
         broker_handles.extend(keys.iter().map(|key| *key.handle()));
@@ -227,7 +256,7 @@ pub fn provision_once() -> Result<(), ProvisioningRunError> {
             .enumerate()
             .map(|(order, key)| {
                 if usize::from(key.order()) != order {
-                    return Err(ProvisioningRunError::Broker);
+                    return Err(broker_failure(ProvisioningBrokerStage::PublicKeyOrder));
                 }
                 Ok(ExpectedKey::with_public_hash(
                     *key.handle(),
@@ -313,7 +342,7 @@ fn cancel_generated_batch(
         {
             Ok(())
         }
-        _ => Err(ProvisioningRunError::Broker),
+        _ => Err(broker_failure(ProvisioningBrokerStage::CancelAck)),
     }
 }
 
@@ -610,7 +639,7 @@ fn complete(
                     chain.chain_hash,
                     chain.certificate_count,
                 )
-                .map_err(|_| ProvisioningRunError::Broker)
+                .map_err(|_| broker_failure(ProvisioningBrokerStage::CertificationMetadata))
             })
             .collect::<Result<Vec<_>, ProvisioningRunError>>()?,
         roots.epoch(),
@@ -625,12 +654,14 @@ fn complete(
     let BridgeMessage::CertificationAck(_, acknowledged_batch, acknowledged_binding) =
         acknowledgement
     else {
-        return Err(ProvisioningRunError::Broker);
+        return Err(broker_failure(ProvisioningBrokerStage::CertificationAck));
     };
     if acknowledged_batch.as_array() != &broker_batch_id
         || acknowledged_binding.as_array() != prepared_activation.binding_hash()
     {
-        return Err(ProvisioningRunError::Broker);
+        return Err(broker_failure(
+            ProvisioningBrokerStage::CertificationBinding,
+        ));
     }
     let handles = validated
         .chains()

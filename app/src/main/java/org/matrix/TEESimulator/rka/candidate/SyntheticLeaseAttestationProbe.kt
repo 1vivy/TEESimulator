@@ -18,6 +18,7 @@ import org.bouncycastle.cert.X509CertificateHolder
 import org.matrix.TEESimulator.App
 import org.matrix.TEESimulator.attestation.ATTESTATION_OID
 import org.matrix.TEESimulator.attestation.AttestationConstants
+import org.matrix.TEESimulator.config.ConfigurationManager
 
 /**
  * Root/app-UID diagnostic for proving that a persisted synthetic lease serves a real Android
@@ -34,6 +35,9 @@ object SyntheticLeaseAttestationProbe {
         var stage = "INPUT"
         try {
             if (args.contentEquals(arrayOf(ROOT_DIGEST_COMMAND))) {
+                App.prepareEnvironment()
+                ConfigurationManager.initialize()
+                CandidateRuntimeRegistry.initializeLifecycle()
                 val issuer = SyntheticLeaseRegistry.current().keyBox.certificates.first()
                 println("lease_issuer_sha256=${sha256(issuer.encoded).toHex()}")
                 return

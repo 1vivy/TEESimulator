@@ -17,12 +17,15 @@ BROWSER_HARNESS = REPOSITORY_ROOT / "tests" / "webui_browser_harness.mjs"
 FIXED_ACTIONS = (
     "status",
     "role-donor",
+    "provision-rkp",
     "role-candidate",
     "pair-direct",
     "rotate-pairing",
     "start",
     "stop",
+    "rotate-attestation-roots",
     "recover-keystore2",
+    "recover-rkpd",
     "export-audit",
     "export-evidence",
     "quarantine",
@@ -107,6 +110,7 @@ class RkaWebUiTest(unittest.TestCase):
             state_root / "trust" / "transport-identity.commit",
             f"version=1\nspki_sha256={'cd' * 32}\n",
         )
+        self.write_private(state_root / "trust" / "transport.pin", f"{'cd' * 32}\n")
         self.write_private(
             state_root / "profiles" / "direct.conf",
             "version=2\n"
@@ -129,6 +133,7 @@ class RkaWebUiTest(unittest.TestCase):
             "  pin_sha=$(printf %s \"$pin\" | xxd -r -p | sha256sum | awk '{print $1}') || exit 1\n"
             "  printf 'version=1\\nprofile_sha256=%s\\nprofile_epoch=%s\\npeer_pin_sha256=%s\\ndial_mode=DONOR_DIALS\\ntransport=DIRECT\\n' \"$profile_sha\" \"$RKA_EXPECTED_PROFILE_EPOCH\" \"$pin_sha\" > \"$RKA_PROFILE_RECEIPT_PATH\"\n"
             "  chmod 600 \"$RKA_PROFILE_RECEIPT_PATH\"\n"
+            "  exec python3 -c 'import os, socket, sys, time; s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); os.chmod(sys.argv[1], 0o600); s.listen(); time.sleep(3600)' \"$RKA_DONOR_SOCKET\"\n"
             "fi\n"
             "while :; do sleep 60; done\n",
             encoding="utf-8",
@@ -184,6 +189,109 @@ class RkaWebUiTest(unittest.TestCase):
         self.assertNotIn(str(state_root), result.stdout)
         self.assertIn("runtime=STOPPED", stopped.stdout)
 
+    def test_network_settings_update_the_existing_profile_without_replacing_pairing_identity(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            config_root = temporary_root / "tricky_store"
+            state_root = temporary_root / "rka-state"
+            self.initialize(config_root, state_root)
+            self.write_live_transport_sources(state_root)
+            profile_path = state_root / "profiles" / "direct.conf"
+
+            result = self.run_control(
+                config_root,
+                state_root,
+                "webui",
+                "network-save",
+                self.open_webui(config_root, state_root),
+                "100.70.0.2,100.70.0.1,37373",
+            )
+            profile = profile_path.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("network_peer_ip=100.70.0.2", result.stdout)
+        self.assertIn("network_local_ip=100.70.0.1", result.stdout)
+        self.assertIn("network_port=37373", result.stdout)
+        self.assertIn("dial_endpoint=100.70.0.2\n", profile)
+        self.assertIn("listen_interface=100.70.0.1\n", profile)
+        self.assertIn(f"peer_spki_sha256={'ab' * 32}\n", profile)
+
+    def test_network_settings_reject_malformed_ipv4_without_changing_the_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            config_root = temporary_root / "tricky_store"
+            state_root = temporary_root / "rka-state"
+            self.initialize(config_root, state_root)
+            self.write_live_transport_sources(state_root)
+            profile_path = state_root / "profiles" / "direct.conf"
+            original = profile_path.read_text(encoding="utf-8")
+
+            result = self.run_control(
+                config_root,
+                state_root,
+                "webui",
+                "network-save",
+                self.open_webui(config_root, state_root),
+                "100.70.0.999,100.70.0.1,37373",
+            )
+            after = profile_path.read_text(encoding="utf-8")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "WEBUI_INVALID_REQUEST\n")
+        self.assertEqual(after, original)
+
+    def test_multi_candidate_status_is_scoped_and_network_edit_is_rejected(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            config_root = temporary_root / "tricky_store"
+            state_root = temporary_root / "rka-state"
+            self.initialize(config_root, state_root)
+            self.write_live_transport_sources(state_root)
+            profile = (state_root / "profiles" / "direct.conf").read_text(encoding="utf-8")
+            direct_directory = state_root / "profiles" / "direct.d"
+            candidates = ("candidate-a", "candidate-b")
+            for candidate in candidates:
+                self.write_private(direct_directory / f"{candidate}.conf", profile)
+                self.write_private(
+                    direct_directory / f"{candidate}.pair.request",
+                    "version=1\naction=PAIR_DIRECT\n",
+                )
+            self.write_private(state_root / "run" / "supervisor-candidate-a.state", "RUNNING\n")
+            self.write_private(state_root / "run" / "supervisor-candidate-b.state", "STOPPED\n")
+
+            status = self.run_control(
+                config_root, state_root, "webui", "status", self.open_webui(config_root, state_root)
+            )
+            before = {
+                candidate: (direct_directory / f"{candidate}.conf").read_text(encoding="utf-8")
+                for candidate in candidates
+            }
+            network = self.run_control(
+                config_root,
+                state_root,
+                "webui",
+                "network-save",
+                self.open_webui(config_root, state_root),
+                "100.70.0.2,100.70.0.1,37373",
+            )
+            after = {
+                candidate: (direct_directory / f"{candidate}.conf").read_text(encoding="utf-8")
+                for candidate in candidates
+            }
+
+        blocks = status.stdout.split("candidate_begin=")[1:]
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(len(blocks), 2)
+        self.assertIn("runtime=NOT_READY", blocks[0])
+        self.assertIn("direct_readiness=NOT_READY", blocks[0])
+        self.assertIn("runtime=STOPPED", blocks[1])
+        self.assertIn("direct_readiness=NOT_READY", blocks[1])
+        self.assertNotEqual(network.returncode, 0)
+        for candidate in candidates:
+            self.assertEqual(after[candidate], before[candidate])
+
     def test_status_ignores_test_seeded_snapshot_and_rejects_cross_role_state(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
@@ -233,7 +341,7 @@ class RkaWebUiTest(unittest.TestCase):
         self.assertEqual(len(successes), 1)
         self.assertIn("next_nonce=", successes[0].stdout)
         self.assertIn("pairing=PENDING", successes[0].stdout)
-        self.assertIn("direct_profile=DIRECT_NETWORK", successes[0].stdout)
+        self.assertIn("direct_profile=UNAVAILABLE", successes[0].stdout)
         self.assertIn("direct_readiness=NOT_READY", successes[0].stdout)
         for result in results:
             if result.returncode != 0:
@@ -245,18 +353,119 @@ class RkaWebUiTest(unittest.TestCase):
             config_root = temporary_root / "tricky_store"
             state_root = temporary_root / "rka-state"
             self.initialize(config_root, state_root)
+            self.write_live_transport_sources(state_root)
+            self.write_private(state_root / "run" / "supervisor.state", "RUNNING\n")
+            blocked = self.run_control(
+                config_root,
+                state_root,
+                "webui",
+                "role-candidate",
+                self.open_webui(config_root, state_root),
+            )
+            self.write_private(state_root / "run" / "supervisor.state", "STOPPED\n")
             changed, nonce = self.mutate(
                 config_root, state_root, "role-candidate", self.open_webui(config_root, state_root)
             )
             active_profile = (state_root / "profiles" / "active.conf").read_text(encoding="utf-8")
             root_role = (config_root / "rka" / "role.conf").read_text(encoding="utf-8")
+            direct_profile = (state_root / "profiles" / "direct.conf").read_text(encoding="utf-8")
             started = self.run_control(config_root, state_root, "webui", "start", nonce)
 
+        self.assertNotEqual(blocked.returncode, 0)
         self.assertIn("role=CANDIDATE", changed.stdout)
         self.assertIn("role=CANDIDATE", active_profile)
         self.assertIn("role=CANDIDATE", root_role)
+        self.assertIn("role=CANDIDATE", direct_profile)
         self.assertNotEqual(started.returncode, 0)
         self.assertEqual(started.stdout, "WEBUI_INVALID_REQUEST\n")
+
+    def test_role_change_rejects_running_indexed_candidate_when_global_state_is_stopped(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            config_root = temporary_root / "tricky_store"
+            state_root = temporary_root / "rka-state"
+            self.initialize(config_root, state_root)
+            self.write_live_transport_sources(state_root)
+            profile = (state_root / "profiles" / "direct.conf").read_text(encoding="utf-8")
+            self.write_private(
+                state_root / "profiles" / "direct.d" / "candidate-a.conf",
+                profile,
+            )
+            self.write_private(state_root / "run" / "supervisor.state", "STOPPED\n")
+            self.write_private(
+                state_root / "run" / "supervisor-candidate-a.state",
+                "RUNNING\n",
+            )
+
+            changed = self.run_control(
+                config_root,
+                state_root,
+                "webui",
+                "role-candidate",
+                self.open_webui(config_root, state_root),
+            )
+            active_profile = (state_root / "profiles" / "active.conf").read_text(
+                encoding="utf-8"
+            )
+            root_role = (config_root / "rka" / "role.conf").read_text(encoding="utf-8")
+
+        self.assertNotEqual(changed.returncode, 0)
+        self.assertIn("role=DONOR", active_profile)
+        self.assertIn("role=DONOR", root_role)
+
+    def test_webui_open_recovers_interrupted_role_transaction_by_rolling_forward(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            config_root = temporary_root / "tricky_store"
+            state_root = temporary_root / "rka-state"
+            self.initialize(config_root, state_root)
+            self.write_live_transport_sources(state_root)
+            self.write_private(
+                state_root / "journal" / "webui-role.state",
+                "version=1\nrequested_role=CANDIDATE\nprofile_epoch=0\ndirect_present=true\n",
+            )
+            self.write_private(
+                state_root / "profiles" / "active.conf",
+                "version=1\nrole=CANDIDATE\nprofile_epoch=0\n",
+            )
+
+            opened = self.run_control(config_root, state_root, "webui-open")
+            active_profile = (state_root / "profiles" / "active.conf").read_text(
+                encoding="utf-8"
+            )
+            root_role = (config_root / "rka" / "role.conf").read_text(encoding="utf-8")
+            direct_profile = (state_root / "profiles" / "direct.conf").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(opened.returncode, 0, opened.stderr)
+        self.assertIn("role=CANDIDATE", active_profile)
+        self.assertIn("role=CANDIDATE", root_role)
+        self.assertIn("role=CANDIDATE", direct_profile)
+
+    def test_provisioning_status_rejects_state_without_live_broker_generation(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            config_root = temporary_root / "tricky_store"
+            state_root = temporary_root / "rka-state"
+            self.initialize(config_root, state_root)
+            self.write_private(
+                state_root / "journal" / "provisioning.state",
+                "version=1\nstatus=PROVISIONED\nprofile_epoch=0\nkey_count=1\n",
+            )
+
+            status = self.run_control(
+                config_root,
+                state_root,
+                "webui",
+                "status",
+                self.open_webui(config_root, state_root),
+            )
+
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("rkp_provisioning=NOT_READY", status.stdout)
 
     def test_fixed_dom_actions_execute_their_command_contracts(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -308,7 +517,7 @@ class RkaWebUiTest(unittest.TestCase):
             self.assertLessEqual(len(export.encode("utf-8")), 512)
             self.assertNotIn("transport.key", export)
             self.assertNotIn(str(state_root), export)
-            self.assertIn("pairing=PAIRED", export)
+        self.assertIn("pairing=PENDING", export)
 
     def test_browser_clicks_every_fixed_action_and_renders_bridge_failures_safely(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -328,13 +537,18 @@ class RkaWebUiTest(unittest.TestCase):
         self.assertEqual([entry["action"] for entry in action_log["observed"]], list(FIXED_ACTIONS))
         self.assertEqual(
             [entry["commandState"] for entry in action_log["observed"]],
-            ["Status refreshed", *["Request accepted"] * (len(FIXED_ACTIONS) - 1)],
+            [
+                "Status refreshed" if action == "status"
+                else "Request failed · session restored" if action == "quarantine"
+                else "Request accepted"
+                for action in FIXED_ACTIONS
+            ],
         )
         self.assertFalse(action_log["escaping"]["hostileExecuted"])
-        self.assertTrue(action_log["escaping"]["hostileText"])
+        self.assertFalse(action_log["escaping"]["hostileText"])
         self.assertFalse(action_log["escaping"]["imageChildren"])
-        self.assertEqual(action_log["failure"]["commandState"], "Fixed control request failed")
-        self.assertEqual(action_log["malformedState"], "WebUI bridge response was malformed")
+        self.assertEqual(action_log["failure"]["commandState"], "Request failed · session restored")
+        self.assertEqual(action_log["malformedState"], "WebUI unavailable")
         self.assertTrue(action_log["busy"]["disabled"])
         self.assertFalse(action_log["settled"]["disabled"])
         self.assertEqual(action_log["settled"]["commandState"], "Status refreshed")

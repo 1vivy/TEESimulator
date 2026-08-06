@@ -1,15 +1,199 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark"><title>RKA control</title><link rel="stylesheet" href="style.css"></head><body>
-<main class="shell" aria-labelledby="page-title"><header class="masthead"><div><p class="eyebrow">TEESimulator RKA</p><h1 id="page-title">Paired device control</h1><p class="lede">Fixed controls for the module-owned paired runtime.</p></div><output id="command-state" class="command-state" aria-label="rka-last-operation" aria-live="polite">Connecting</output></header>
-<section class="state-card state-card-wide" aria-labelledby="status-heading"><div class="section-heading"><div><p class="eyebrow">Live status</p><h2 id="status-heading">Paired runtimes</h2></div><button type="button" class="button button-secondary" data-action="status">Refresh status</button></div><div id="rka-status-list" class="candidate-card-list"></div></section>
-<section class="control-grid" aria-label="Fixed RKA controls">
-<section class="state-card"><p class="eyebrow">Device role</p><h2>Phone A / Phone B</h2><p>Choose only a declared module role. Phone A is the donor; Phone B is the candidate.</p><div class="button-cluster"><button type="button" class="button" data-action="role-donor">Set Phone A donor</button><button type="button" class="button" data-action="role-candidate">Set Phone B candidate</button></div></section>
-<section class="state-card"><p class="eyebrow">Validated profile</p><h2>Review and apply</h2><p>Profile changes remain inert until the module validates and applies them.</p><label>Profile JSON<input id="profile-file" type="file" accept="application/json,.json"></label><div class="button-cluster"><button type="button" class="button" data-action="profile-validate">Validate profile</button><button type="button" class="button" data-action="profile-apply">Apply validated profile</button></div></section>
-<section class="state-card"><p class="eyebrow">Direct profile</p><h2>Paired network</h2><p>Direct LAN or Tailscale is the only ready transport. USB remains diagnostic-only.</p><div class="button-cluster"><button type="button" class="button" data-action="pair-direct">Request direct pairing</button><button type="button" class="button" data-action="rotate-pairing">Request pairing rotation</button></div></section>
-<section class="state-card"><p class="eyebrow">Remote provisioning</p><h2>Donor-backed RKP lease</h2><p>Phone A provisions one hardware-backed lease. Each paired Phone B stores or renews its own synthetic lease and can attest while Phone A is offline.</p><div class="button-cluster"><button type="button" class="button" data-action="provision-rkp" disabled>Provision donor lease</button><template id="candidate-lease-action"><button type="button" class="button" data-action="renew-synthetic-lease" disabled>Issue / renew candidate lease</button></template></div></section>
-<section class="state-card"><p class="eyebrow">Trust</p><h2>Attestation roots</h2><p>Activates only a staged official-root update after overlap and explicit token checks.</p><button type="button" class="button" data-action="rotate-attestation-roots">Rotate attestation roots</button></section>
-<section class="state-card"><p class="eyebrow">Runtime</p><h2>Lifecycle</h2><p>Starts and stops only the exact module-owned supervised process group.</p><div class="button-cluster"><button type="button" class="button" aria-label="rka-start" data-action="start">Start runtime</button><button type="button" class="button button-secondary" aria-label="rka-stop" data-action="stop">Stop runtime</button></div></section>
-<section class="state-card"><p class="eyebrow">Evidence</p><h2>Audit and recovery</h2><p>The live sentinel and quarantine count are shown without sensitive material.</p><div class="button-cluster"><button type="button" class="button" data-action="recover-keystore2">Request KeyStore2 recovery</button><button type="button" class="button" data-action="recover-rkpd">Request RKPD recovery</button><button type="button" class="button button-secondary" data-action="export-audit">Request audit export</button><button type="button" class="button button-secondary" data-action="export-evidence">Export redacted evidence</button><button type="button" class="button button-secondary" data-action="quarantine">Show quarantine</button></div></section>
-<section class="state-card danger-card"><p class="eyebrow">Cleanup</p><h2>Clear ephemeral runtime state</h2><p>This removes module-generated session and quarantine state only after confirmation.</p><button type="button" class="button button-danger" data-action="cleanup">Clear runtime state</button></section></section></main>
-<dialog id="confirmation-dialog" aria-labelledby="confirmation-heading" aria-describedby="confirmation-state"><h2 id="confirmation-heading">Confirm protected action</h2><p>Type this one-time token exactly.</p><output id="confirmation-token"></output><output id="confirmation-state" class="confirmation-state" aria-live="polite"></output><label>Confirmation token<input id="confirmation-input" autocomplete="off"></label><button id="confirmation-submit" type="button" class="button">Confirm action</button></dialog>
-<script src="app.js"></script></body></html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <meta name="description" content="Configure and monitor TEESimulator remote key attestation.">
+    <title>RKA control</title>
+    <link rel="stylesheet" href="tokens.css">
+    <link rel="stylesheet" href="layout.css">
+    <link rel="stylesheet" href="components.css">
+    <link rel="stylesheet" href="controls.css">
+    <script defer src="model.js"></script>
+    <script defer src="bridge.js"></script>
+    <script defer src="feedback.js"></script>
+    <script defer src="views.js"></script>
+    <script defer src="profile.js"></script>
+    <script defer src="app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to controls</a>
+    <main id="main-content" class="shell" aria-labelledby="page-title">
+      <header class="masthead">
+        <div class="masthead-copy">
+          <p class="eyebrow">TEESimulator RKA</p>
+          <h1 id="page-title">Paired device control</h1>
+          <p class="lede">Configure the direct network, run the module service, and check donor-backed attestation from one place.</p>
+        </div>
+        <p id="command-state" class="command-state" aria-label="Last operation" aria-live="polite">Connecting</p>
+      </header>
+
+      <section class="state-card status-overview" aria-labelledby="status-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Live state</p>
+            <h2 id="status-heading">Devices and connection</h2>
+          </div>
+          <button type="button" class="button button-secondary" data-action="status" data-privileged>Refresh status</button>
+        </div>
+        <div id="rka-status-list" class="candidate-card-list" aria-label="RKA device status" aria-live="polite" aria-atomic="true"></div>
+      </section>
+
+      <section class="workflow" aria-labelledby="setup-heading">
+        <div class="section-intro">
+          <p class="eyebrow">Daily setup</p>
+          <h2 id="setup-heading">Connect, then run</h2>
+          <p>Complete these steps in order. The service uses port 37373 for every direct connection.</p>
+        </div>
+        <div class="workflow-grid">
+          <section class="state-card step-card" aria-labelledby="role-heading">
+            <span class="step-number" aria-hidden="true">1</span>
+            <p class="eyebrow">Device role</p>
+            <h3 id="role-heading">Choose this phone’s job</h3>
+            <p>Use donor on Phone A, which provides hardware-backed RKP material. Use candidate on Phone B, which receives a renewable attestation lease.</p>
+            <div class="button-cluster">
+              <button type="button" class="button" data-action="role-donor" data-privileged>Set Phone A donor</button>
+              <button type="button" class="button button-secondary" data-action="role-candidate" data-privileged>Set Phone B candidate</button>
+            </div>
+          </section>
+
+          <section class="state-card step-card" aria-labelledby="network-heading">
+            <span class="step-number" aria-hidden="true">2</span>
+            <p class="eyebrow">Direct network</p>
+            <h3 id="network-heading">Set routed addresses</h3>
+            <p>Enter reachable Wi-Fi or Tailscale IPv4 addresses. USB is for diagnostics and is not the RKA data path.</p>
+            <p id="network-scope-message" class="field-note" aria-live="polite"></p>
+            <form id="network-form" novalidate>
+              <div class="field-grid">
+                <label class="field" for="network-peer-ip">
+                  <span>Peer device IPv4</span>
+                  <input id="network-peer-ip" name="peer" inputmode="decimal" autocomplete="off" aria-describedby="network-peer-help network-peer-error">
+                  <small id="network-peer-help">The other phone’s reachable address.</small>
+                  <span id="network-peer-error" class="field-error" aria-live="polite"></span>
+                </label>
+                <label class="field" for="network-local-ip">
+                  <span>Local interface IPv4</span>
+                  <input id="network-local-ip" name="local" inputmode="decimal" autocomplete="off" aria-describedby="network-local-help network-local-error">
+                  <small id="network-local-help">This phone’s address on the same routed network.</small>
+                  <span id="network-local-error" class="field-error" aria-live="polite"></span>
+                </label>
+                <label class="field field-port" for="network-port">
+                  <span>Service port</span>
+                  <input id="network-port" value="37373" readonly aria-readonly="true">
+                  <small>Fixed by the current runtime protocol.</small>
+                </label>
+              </div>
+              <button id="network-submit" type="submit" class="button" data-privileged>Save network settings</button>
+            </form>
+          </section>
+
+          <section class="state-card step-card" aria-labelledby="runtime-heading">
+            <span class="step-number" aria-hidden="true">3</span>
+            <p class="eyebrow">Module service</p>
+            <h3 id="runtime-heading">Run the supervised service</h3>
+            <p>Start only after the role and direct network are correct. Stop ends the exact module-owned process group.</p>
+            <div class="button-cluster">
+              <button type="button" class="button" data-action="start" data-privileged>Start runtime</button>
+              <button type="button" class="button button-secondary" data-action="stop" data-privileged>Stop runtime</button>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="operation-grid" aria-label="Pairing and lease controls">
+        <section class="state-card">
+          <p class="eyebrow">Pairing</p>
+          <h2>Establish direct trust</h2>
+          <p>Request pairing after both devices have routed addresses. Rotation replaces existing transport trust.</p>
+          <div class="button-cluster">
+            <button type="button" class="button" data-action="pair-direct" data-privileged>Request direct pairing</button>
+            <button type="button" class="button button-secondary" data-action="rotate-pairing" data-privileged>Request pairing rotation</button>
+          </div>
+        </section>
+        <section class="state-card">
+          <p class="eyebrow">Remote provisioning</p>
+          <h2>Issue attestation leases</h2>
+          <p>The donor provisions hardware-backed RKP material. Each candidate stores and renews its own synthetic lease.</p>
+          <button type="button" class="button" data-action="provision-rkp" data-privileged disabled>Provision donor lease</button>
+          <template id="candidate-provision-action">
+            <button type="button" class="button" data-action="provision-rkp" data-privileged disabled>Provision candidate RKP</button>
+          </template>
+          <template id="candidate-lease-action">
+            <button type="button" class="button" data-action="renew-synthetic-lease" data-privileged disabled>Issue / renew candidate lease</button>
+          </template>
+        </section>
+      </section>
+
+      <section class="activity-card" aria-labelledby="activity-heading">
+        <div>
+          <p class="eyebrow">This page session</p>
+          <h2 id="activity-heading">Recent activity</h2>
+          <p>Actions appear here while this page remains open. Nothing is stored.</p>
+        </div>
+        <ol id="session-activity" class="activity-list"></ol>
+      </section>
+
+      <details class="advanced">
+        <summary>Advanced maintenance</summary>
+        <div class="advanced-grid">
+          <section class="state-card">
+            <p class="eyebrow">Role profile</p>
+            <h2>Review and apply JSON</h2>
+            <p>This is separate from network settings. A profile changes the declared donor or candidate role only after validation.</p>
+            <label class="field" for="profile-file">
+              <span>Profile JSON</span>
+              <input id="profile-file" type="file" accept="application/json,.json" data-privileged>
+            </label>
+            <div class="button-cluster">
+              <button type="button" class="button" data-action="profile-validate" data-privileged disabled>Validate profile</button>
+              <button type="button" class="button button-secondary" data-action="profile-apply" data-privileged disabled>Apply validated profile</button>
+            </div>
+          </section>
+          <section class="state-card">
+            <p class="eyebrow">Trust maintenance</p>
+            <h2>Attestation roots</h2>
+            <p>Activate only a staged official-root update after overlap and one-time token checks.</p>
+            <button type="button" class="button" data-action="rotate-attestation-roots" data-privileged>Rotate attestation roots</button>
+          </section>
+          <section class="state-card">
+            <p class="eyebrow">Recovery and evidence</p>
+            <h2>Inspect exact subsystems</h2>
+            <p>Recovery targets one named service. Exports contain redacted state only.</p>
+            <div class="button-cluster">
+              <button type="button" class="button" data-action="recover-keystore2" data-privileged>Request KeyStore2 recovery</button>
+              <button type="button" class="button" data-action="recover-rkpd" data-privileged>Request RKPD recovery</button>
+              <button type="button" class="button button-secondary" data-action="export-audit" data-privileged>Request audit export</button>
+              <button type="button" class="button button-secondary" data-action="export-evidence" data-privileged>Export redacted evidence</button>
+              <button type="button" class="button button-secondary" data-action="quarantine" data-privileged>Show quarantine</button>
+            </div>
+          </section>
+          <section class="state-card danger-card">
+            <p class="eyebrow">Cleanup</p>
+            <h2>Clear ephemeral runtime state</h2>
+            <p>This removes module-generated session and quarantine state only after one-time token confirmation.</p>
+            <button type="button" class="button button-danger" data-action="cleanup" data-privileged>Clear runtime state</button>
+          </section>
+        </div>
+      </details>
+    </main>
+
+    <ol id="toast-stack" class="toast-stack" role="status" aria-live="polite" aria-atomic="false"></ol>
+    <dialog id="confirmation-dialog" aria-labelledby="confirmation-heading" aria-describedby="confirmation-state">
+      <p class="eyebrow">Protected operation</p>
+      <h2 id="confirmation-heading">Confirm exact action</h2>
+      <p id="confirmation-instructions">Type this one-time token exactly. Closing this dialog cancels the client request.</p>
+      <output id="confirmation-token" class="confirmation-token"></output>
+      <p id="confirmation-state" class="confirmation-state" aria-live="polite"></p>
+      <label id="confirmation-field" class="field" for="confirmation-input">
+        <span>Confirmation token</span>
+        <input id="confirmation-input" autocomplete="off">
+      </label>
+      <div class="dialog-actions">
+        <button id="confirmation-cancel" type="button" class="button button-secondary">Cancel</button>
+        <button id="confirmation-submit" type="button" class="button">Confirm action</button>
+      </div>
+    </dialog>
+  </body>
+</html>
